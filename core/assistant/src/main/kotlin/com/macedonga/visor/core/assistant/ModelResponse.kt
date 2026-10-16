@@ -37,13 +37,27 @@ internal object ModelResponse {
         var done = false
         events(reader, checkCancelled) { type, data ->
             if (type == "error") error(streamError(data))
+            if (type == "approval.request") {
+                error("Hermes requires approval; approval is unsupported on glasses. Open an approval-capable Hermes client on your phone to review the request.")
+            }
+            // Named extensions are notifications, not Chat Completions chunks.
+            if (type.isNotEmpty() && type != "message") return@events false
             if (data == "[DONE]") {
                 done = true
                 return@events true
             }
             val item = JSONObject(data)
             if (item.has("error")) error(streamError(data))
+            item.optJSONObject("hermes")?.let { status ->
+                check(status.optBoolean("completed", true) && !status.optBoolean("partial") && !status.optBoolean("failed")) {
+                    "the model stream failed: " + status.optString("error", "incomplete Hermes response")
+                }
+            }
             val choices = item.getJSONArray("choices")
+            if (choices.length() == 0) {
+                check(item.optJSONObject("usage") != null) { "the model stream sent empty choices without usage" }
+                return@events false
+            }
             val choice = (0 until choices.length()).map { choices.getJSONObject(it) }
                 .firstOrNull { it.optInt("index", 0) == 0 } ?: return@events false
             val delta = choice.getJSONObject("delta")
@@ -65,7 +79,12 @@ internal object ModelResponse {
                     }
                 }
             }
-            if (!choice.isNull("finish_reason")) finish = choice.getString("finish_reason")
+            if (!choice.isNull("finish_reason")) {
+                finish = choice.getString("finish_reason")
+                check(finish == "stop" || finish == "tool_calls") {
+                    "the model stream failed: finish_reason=$finish"
+                }
+            }
             false
         }
         check(done && finish.isNotEmpty()) { "the model stream ended before completion" }

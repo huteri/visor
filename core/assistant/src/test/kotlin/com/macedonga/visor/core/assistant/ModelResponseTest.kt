@@ -25,6 +25,74 @@ class ModelResponseTest {
     private fun chunk(delta: JSONObject, finish: Any = JSONObject.NULL, index: Int = 0) =
         JSONObject().put("choices", org.json.JSONArray().put(JSONObject().put("index", index).put("delta", delta).put("finish_reason", finish)))
 
+    // Sanitized shapes from api_server_openai_routes.py's Chat Completions writer.
+    @Test fun hermesNotificationsNeverBecomeAnswerOrLocalToolCalls() {
+        val input = sse(chunk(JSONObject().put("role", "assistant"))) +
+            "event: hermes.tool.progress\ndata: {\"tool\":\"web_search\",\"emoji\":\"search\",\"label\":\"Search example\",\"toolCallId\":\"call_safe\",\"status\":\"running\"}\n\n" +
+            "event: hermes.status\ndata: {\"kind\":\"warning\",\"text\":\"Waiting for provider\"}\n\n" +
+            ": keepalive\n\n" +
+            sse(chunk(JSONObject().put("reasoning_content", "private thought")), chunk(JSONObject().put("content", "Answer"))) +
+            "event: hermes.tool.progress\ndata: {\"tool\":\"web_search\",\"toolCallId\":\"call_safe\",\"status\":\"completed\"}\n\n" +
+            "event: hermes.future.extension\ndata: not even JSON\n\n" +
+            "event: hermes.future.extension\ndata: [DONE]\n\n" +
+            sse(chunk(JSONObject().put("content", " only")), chunk(JSONObject(), "stop")) + "data: [DONE]\n\n"
+        val message = parse(input).getJSONArray("choices").getJSONObject(0).getJSONObject("message")
+        assertEquals("Answer only", message.getString("content"))
+        assertEquals("private thought", message.getString("reasoning_content"))
+        assertFalse(message.has("tool_calls"))
+    }
+
+    @Test fun approvalChoicesFailClosedBeforeAnswerSchemaOrDone() {
+        // api_server.py _approval_request_event exposes string decisions, not answer choices.
+        for (payload in listOf(
+            """{"run_id":"chatcmpl-safe","event":"approval.request","timestamp":1.0,"session_id":"safe","command":"example","choices":["once","session","always","deny"]}""",
+            "[DONE]", "not JSON",
+        )) {
+            val input = sse(chunk(JSONObject().put("content", "partial"))) +
+                "event: approval.request\ndata: $payload\n\n" +
+                sse(chunk(JSONObject(), "stop")) + "data: [DONE]\n\n"
+            val failure = assertThrows(IllegalStateException::class.java) { parse(input) }
+            assertTrue(failure.message.orEmpty().contains("approval", ignoreCase = true))
+            assertTrue(failure.message.orEmpty().contains("phone", ignoreCase = true))
+            assertTrue(failure.message.orEmpty().contains("unsupported", ignoreCase = true))
+        }
+    }
+
+    @Test fun rejectsUnsuccessfulTerminalReasonsEvenWithDone() {
+        for (reason in listOf("error", "incomplete", "length", "content_filter", "unexpected")) {
+            val failure = assertThrows(IllegalStateException::class.java) {
+                parse(sse(chunk(JSONObject().put("content", "partial")), chunk(JSONObject(), reason)) + "data: [DONE]\n\n")
+            }
+            assertTrue(failure.message.orEmpty().contains(reason))
+        }
+    }
+
+    @Test fun rejectsHermesFailureMetadataRegardlessOfStopReason() {
+        for (metadata in listOf(
+            """{"completed":false,"partial":false,"failed":true,"error":"agent unavailable","error_code":"agent_error"}""",
+            """{"completed":false,"partial":true,"failed":false,"error":"output truncated","error_code":"output_truncated"}""",
+            """{"completed":false,"partial":false,"failed":false,"error":null}""",
+            """{"completed":true,"partial":true,"failed":false,"error":null}""",
+        )) {
+            val terminal = chunk(JSONObject(), "stop").put("hermes", JSONObject(metadata))
+            val failure = assertThrows(IllegalStateException::class.java) {
+                parse(sse(chunk(JSONObject().put("content", "partial")), terminal) + "data: [DONE]\n\n")
+            }
+            assertTrue(failure.message.orEmpty().contains("model stream"))
+        }
+    }
+
+    @Test fun malformedDefaultAnswerFramesAreNotOptionalExtensions() {
+        for (bad in listOf(
+            "not JSON", "{}", "{\"choices\":[]}",
+            "{\"choices\":[{\"index\":0,\"delta\":\"wrong schema\"}]}",
+        )) {
+            assertThrows(Exception::class.java) {
+                parse("data: $bad\n\n" + sse(chunk(JSONObject().put("content", "answer")), chunk(JSONObject(), "stop")) + "data: [DONE]\n\n")
+            }
+        }
+    }
+
     @Test fun openAiAccumulatesInterleavedToolArguments() {
         fun call(index: Int, arguments: String, id: String? = null, name: String? = null) =
             JSONObject().put("index", index).put("id", id).put("type", "function")
@@ -144,6 +212,10 @@ class ModelResponseTest {
             "event: error\ndata: {\"error\":{\"message\":\"overloaded\"}}\n\n",
             "data: {\"error\":{\"message\":\"overloaded\"}}\n\n",
             "event: error\ndata: overloaded\n\n",
+            sse(chunk(JSONObject(), "error")
+                .put("usage", event("""{"prompt_tokens":1,"completion_tokens":0,"total_tokens":1}"""))
+                .put("error", event("""{"message":"overloaded","type":"agent_error"}"""))
+                .put("hermes", event("""{"completed":false,"partial":false,"failed":true,"error":"overloaded","error_code":"agent_error"}"""))) + "data: [DONE]\n\n",
         )) {
             val error = assertThrows(IllegalStateException::class.java) { parse(input) }
             assertTrue(error.message.orEmpty().contains("overloaded"))
@@ -155,6 +227,9 @@ class ModelResponseTest {
         val finished = text + sse(chunk(JSONObject(), "stop"))
         for (input in listOf(text, finished, text + "data: [DONE]\n\n", ": ping\n\n", "")) {
             assertThrows(IllegalStateException::class.java) { parse(input) }
+        }
+        for (tail in listOf("data: [DON", "data: {\"choices\":")) {
+            assertThrows(Exception::class.java) { parse(finished + tail) }
         }
     }
 
