@@ -17,6 +17,8 @@ androidxComposeBom = "2026.09.00"
 nav3Core = "1.1.7"
 lifecycleViewmodelNav3 = "2.11.0"
 coroutines = "1.10.2"
+junit = "4.13.2"
+jsonTest = "20260814"
 
 # :core:identity only. scrypt is in no JCA provider on either platform and the bundle
 # JSON has to stay readable by the desktop client. Both are argued in
@@ -45,6 +47,8 @@ targetSdk = "37"
 minSdk = "29"
 
 [libraries]
+junit = { module = "junit:junit", version.ref = "junit" }
+json-test = { module = "org.json:json", version.ref = "jsonTest" }
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "androidxCore" }
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "androidxActivity" }
 

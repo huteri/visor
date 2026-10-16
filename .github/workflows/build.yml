@@ -1,5 +1,5 @@
-# Builds the debug APK on every push to main and every pull request.
-# There are no test suites: the glasses are the test. This only proves that the app still builds.
+# Runs the streaming parser tests and builds the debug APK on main pushes and pull requests.
+# Protocol and playback behavior still require real-glasses verification.
 name: Build
 
 on:
@@ -36,8 +36,8 @@ jobs:
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
-      - name: Build the debug APK
-        run: ./gradlew :app:assembleDebug
+      - name: Test streaming responses and build the debug APK
+        run: ./gradlew :core:assistant:testDebugUnitTest :app:assembleDebug
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

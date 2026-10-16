@@ -81,6 +81,9 @@ jobs:
           done
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/visor-release.p12"
 
+      - name: Verify streaming responses
+        run: ./gradlew :core:assistant:testDebugUnitTest
+
       - name: Build the release APK
         env:
           VISOR_KEYSTORE: ${{ runner.temp }}/visor-release.p12

@@ -11,7 +11,14 @@ import java.net.URL
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import kotlin.coroutines.EmptyCoroutineContext
+import kotlin.coroutines.resume
+import kotlin.coroutines.coroutineContext
+import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -115,6 +122,7 @@ class Brain(private val config: () -> AssistantConfig, private val book: MemoryB
 
     /** A tool run for the model: remember or forget, or one of the person's servers'. What it is told back. */
     private suspend fun runTool(name: String, input: JSONObject, turn: Turn): ToolResult {
+        coroutineContext.ensureActive()
         val book = book
         if (book != null && name == "remember") {
             val fact = input.optString("fact").trim()
@@ -122,6 +130,7 @@ class Brain(private val config: () -> AssistantConfig, private val book: MemoryB
             book.remember(fact)
             turn.remembered += fact
             return ToolResult("kept", false)
+
         }
         if (book != null && name == "forget") {
             return if (book.forget(input.optString("id")) != null) ToolResult("forgotten", false) else ToolResult("no such fact", true)
@@ -135,6 +144,7 @@ class Brain(private val config: () -> AssistantConfig, private val book: MemoryB
     /** A server's tool, described for the model with where it comes from. */
     private fun ExposedTool.help(): String =
         ("[${server.name}] " + (if (tool.title.isNotEmpty()) "${tool.title}. " else "") + tool.description).take(MAX_TOOL_HELP)
+
 
     private suspend fun claude(
         c: AssistantConfig, model: String, system: String, past: List<Exchange>, question: String, image: ByteArray?,
@@ -224,6 +234,8 @@ class Brain(private val config: () -> AssistantConfig, private val book: MemoryB
             tools?.let { body.put("tools", it) }
             val answer = try {
                 send(url, headers, body)
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: IllegalStateException) {
                 // A server without tools refuses the field; then the conversation goes on without memory.
                 if (tools == null || !TOOLS_REFUSED.containsMatchIn(error.message.orEmpty())) throw error
@@ -250,12 +262,20 @@ class Brain(private val config: () -> AssistantConfig, private val book: MemoryB
     }
 
     /** A local reasoning model (LM Studio, llama.cpp) otherwise spends the whole answer thinking; OpenAI's own and some others refuse the field. */
-    private fun send(url: String, headers: Map<String, String>, body: JSONObject): JSONObject {
+    private suspend fun send(url: String, headers: Map<String, String>, body: JSONObject): JSONObject {
         // OpenAI's newer models refuse max_tokens, and every one of its models takes max_completion_tokens.
         if ("api.openai.com" in url) return post(url, headers, completionTokens(body))
         return try {
-            runCatching { post(url, headers, JSONObject(body.toString()).put("reasoning_effort", "none")) }
-                .getOrElse { if ("reasoning" in it.message.orEmpty()) post(url, headers, body) else throw it }
+            try {
+                post(url, headers, JSONObject(body.toString()).put("reasoning_effort", "none"))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: IllegalStateException) {
+                if ("reasoning" !in error.message.orEmpty()) throw error
+                post(url, headers, body)
+            }
+        } catch (error: CancellationException) {
+            throw error
         } catch (error: IllegalStateException) {
             // A server that relays those models (Azure, a proxy) says which field it wants.
             if ("max_completion_tokens" !in error.message.orEmpty()) throw error
@@ -265,32 +285,55 @@ class Brain(private val config: () -> AssistantConfig, private val book: MemoryB
 
     private fun completionTokens(body: JSONObject) = JSONObject(body.toString()).apply { put("max_completion_tokens", remove("max_tokens")) }
 
-    private fun post(url: String, headers: Map<String, String>, body: JSONObject): JSONObject {
-        val http = URL(url).openConnection() as HttpURLConnection
-        try {
-            http.requestMethod = "POST"
-            http.connectTimeout = 5_000
-            // A local model reading a picture can take a while; each turn still has its own budget above.
-            http.readTimeout = 45_000
-            http.doOutput = true
-            http.setRequestProperty("content-type", "application/json")
-            headers.forEach(http::setRequestProperty)
-            http.outputStream.use { it.write(body.toString().toByteArray()) }
-            val code = http.responseCode
-            val text = (if (code in 200..299) http.inputStream else http.errorStream)?.use { it.readBytes().decodeToString() }.orEmpty()
-            if (code !in 200..299) {
-                val message = runCatching { JSONObject(text).getJSONObject("error").getString("message") }.getOrDefault(text.take(200))
-                error("the model answered $code: $message")
+    private suspend fun post(url: String, headers: Map<String, String>, body: JSONObject): JSONObject =
+        suspendCancellableCoroutine { pending ->
+            val http = URL(url).openConnection() as HttpURLConnection
+            // disconnect may block behind a read on some JDKs; never block the cancelling thread.
+            pending.invokeOnCancellation {
+                Dispatchers.IO.dispatch(EmptyCoroutineContext, Runnable { http.disconnect() })
             }
-            return JSONObject(text)
-        } finally {
-            http.disconnect()
+            Dispatchers.IO.dispatch(pending.context, Runnable {
+                try {
+                    pending.context.ensureActive()
+                    val answer = request(http, headers, body) { pending.context.ensureActive() }
+                    pending.context.ensureActive()
+                    pending.resume(answer)
+                } catch (error: Exception) {
+                    pending.resumeWithException(error)
+                } finally {
+                    http.disconnect()
+                }
+            })
+        }
+
+    private fun request(http: HttpURLConnection, headers: Map<String, String>, body: JSONObject, checkCancelled: () -> Unit): JSONObject {
+        checkCancelled()
+        http.requestMethod = "POST"
+        http.connectTimeout = 5_000
+        // A local model reading a picture can take a while; each turn still has its own budget above.
+        http.readTimeout = 45_000
+        http.doOutput = true
+        http.setRequestProperty("content-type", "application/json")
+        headers.forEach(http::setRequestProperty)
+        http.setRequestProperty("accept", "text/event-stream, application/json")
+        checkCancelled()
+        http.outputStream.use { it.write(JSONObject(body.toString()).put("stream", true).toString().toByteArray(Charsets.UTF_8)) }
+        checkCancelled()
+        val code = http.responseCode
+        if (code !in 200..299) {
+            val text = http.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            checkCancelled()
+            val message = runCatching { JSONObject(text).getJSONObject("error").getString("message") }.getOrDefault(text.take(200))
+            error("the model answered $code: $message")
+        }
+        return http.inputStream.reader(Charsets.UTF_8).use {
+            ModelResponse.read(it, headers.containsKey("anthropic-version"), checkCancelled)
         }
     }
 
     private companion object {
         /** Thinking a server left inline in the answer. */
-        val THINKING = Regex("(?s)<think>.*?</think>")
+        val THINKING = Regex("(?s)<think>.*?(?:</think>|$)")
         val TOOLS_REFUSED = Regex("tool|function", RegexOption.IGNORE_CASE)
         const val MAX_EXCHANGES = 12
         // A tool often looks something up, acts, then answers: room for a few of those.
