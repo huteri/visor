@@ -29,6 +29,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -175,6 +176,7 @@ class Assistant(
      * is answered only if no ev57 for it has come a moment after it ended.
      */
     private fun listen(l: Link, interaction: String) {
+        l.diagnostic.invalidate("new-microphone")
         ears?.stop()
         val ended = CompletableDeferred<Unit>().also { micEnded = it }
         l.listening = interaction
@@ -184,20 +186,26 @@ class Assistant(
         ears = GlassesEars(
             context, l.locale, continuous = true,
             onUtterance = { text, startMs, _ ->
+                val diagnosticTicket = l.diagnostic.ticket()
                 scope.launch {
                     delay(OWN_RECOGNITION_GRACE_MS)
                     if (interaction in l.closed || !l.fallback.allowed(recognition)) return@launch
+                    if (TimeoutDiagnostic.recognize(text) != null && l.diagnostic.ticket() != diagnosticTicket) return@launch
                     when {
                         // The question itself, which the glasses recognised and sent as ev57.
                         interaction in l.taken && !l.answered.contains(interaction) -> Unit
                         // After an answer: a follow-up, a sub-interaction of its own as the server opens one.
                         interaction in l.answered -> {
+                            l.diagnostic.invalidate("new-followup")
+                            val followupTicket = l.diagnostic.ticket()
                             val sub = java.util.UUID.randomUUID().toString()
-                            say("Heard \"$text\" myself: a follow-up, answered as $sub")
-                            l.mux.send(checkNotNull(l.m0), netEvent(EV_START_OF_USER_SPEECH, ThriftWriter().str(1, sub).i64(2, startMs).done()), messageType = MT_NET_EVENT)
+                            if (TimeoutDiagnostic.recognize(text) == null) say("Heard \"$text\" myself: a follow-up, answered as $sub")
+                            if (TimeoutDiagnostic.recognize(text) == null) {
+                                l.mux.send(checkNotNull(l.m0), netEvent(EV_START_OF_USER_SPEECH, ThriftWriter().str(1, sub).i64(2, startMs).done()), messageType = MT_NET_EVENT)
+                            } else l.sessionOf[sub] = interaction
                             if (!l.fallback.allowed(recognition)) return@launch
                             l.taken.add(sub)
-                            answer(l, sub, text, Visual(null, "", "", false, ""))
+                            answer(l, sub, text, Visual(null, "", "", false, ""), followupTicket)
                         }
                         // Nothing came from the glasses: the whole question was left to the server. Their own
                         // transcript comes only after their stream ends, so wait for that, and never answer the wake word.
@@ -207,8 +215,8 @@ class Assistant(
                             delay(QUESTION_GRACE_MS)
                             if (interaction in l.taken || interaction in l.closed || !l.fallback.allowed(recognition)) return@launch
                             l.taken.add(interaction)
-                            say("Heard \"$text\" myself: the glasses left this question to the server")
-                            answer(l, interaction, text, Visual(null, "", "", false, ""))
+                            if (TimeoutDiagnostic.recognize(text) == null) say("Heard \"$text\" myself: the glasses left this question to the server")
+                            answer(l, interaction, text, Visual(null, "", "", false, ""), diagnosticTicket)
                         }
                     }
                 }
@@ -226,12 +234,16 @@ class Assistant(
     @Volatile
     private var link: Link? = null
         set(value) {
-            if (field !== value) field?.incoming?.close()
+            if (field !== value) {
+                field?.diagnostic?.invalidate("link-replaced")
+                field?.incoming?.close()
+            }
             field = value
         }
 
     /** svc15 state for one Bluetooth session. */
     private class Link(val mux: DataXConnection) {
+        val diagnostic = DiagnosticLifetime()
         val incoming = AssistantMessageDispatcher(SystemClock::elapsedRealtime)
         // Whether the current turn is a session (SCI) one, which only plays streamed answers.
         @Volatile var sessionTurn = false
@@ -318,6 +330,7 @@ class Assistant(
                 val l = link ?: return@collect
                 if (channel != (l.m0 ?: -1) and 0x7FFF && channel != (l.s0 ?: -1) and 0x7FFF) return@collect
                 l.incoming.close()
+                l.diagnostic.invalidate("channel-closed")
                 again?.cancel()
                 again = scope.launch {
                     delay(REGISTER_AGAIN_MS)
@@ -424,7 +437,10 @@ class Assistant(
         val channel = message.info.channelId
         if (message.info.flags.isClosed) {
             l.incoming.closeChannel(channel)
-            if (channel == l.m0?.and(0x7FFF) || channel == l.s0?.and(0x7FFF)) l.incoming.close()
+            if (channel == l.m0?.and(0x7FFF) || channel == l.s0?.and(0x7FFF)) {
+                l.diagnostic.invalidate("channel-closed")
+                l.incoming.close()
+            }
             return
         }
         val payload = message.payload
@@ -473,6 +489,7 @@ class Assistant(
 
     private suspend fun envelopeMessage(l: Link, inner: Int, blob: ByteArray) {
         if (inner == MT_START_INTERACTION) {
+            l.diagnostic.invalidate("new-interaction")
             val fields = runCatching { Thrift.loads(blob) }.getOrDefault(emptyMap())
             // Use case 3 is LIVE_AI_INTERACTION; after a switch to LIVE_AI the next interaction is the session's.
             if (fields[5] == 3L || liveAi.phase.value == LiveAiPhase.STARTING) liveAi.onStartInteraction(fields, l.locale)
@@ -509,7 +526,10 @@ class Assistant(
                 if (liveAi.active && runCatching { Thrift.loads(event.body)[2] }.getOrNull() == 0L) liveAi.end("the session closed")
             }
             EV_REMOTE_INTERACTION_COMPLETE -> {
-                runCatching { Thrift.loads(event.body)[1].asText() }.getOrNull()?.takeIf { it.isNotEmpty() }?.let { l.closed.add(it) }
+                runCatching { Thrift.loads(event.body)[1].asText() }.getOrNull()?.takeIf { it.isNotEmpty() }?.let {
+                    l.closed.add(it)
+                    l.diagnostic.remoteComplete(it)
+                }
                 say("Assistant: remote interaction complete ${describe(event.body)}")
                 liveAi.end("the glasses completed the interaction")
             }
@@ -565,6 +585,8 @@ class Assistant(
         val interaction = m[1].asText()
         val transcript = m[2].asStruct()[1].asStruct()[1].asText()
         if (interaction.isEmpty() || !l.taken.add(interaction)) return
+        l.diagnostic.invalidate("new-request")
+        val diagnosticTicket = l.diagnostic.ticket()
         // In a session the request has its own id; the microphone's is the session's, and it is the same turn.
         l.listening?.takeIf { it != interaction }?.let {
             l.sessionOf[interaction] = it
@@ -573,19 +595,21 @@ class Assistant(
         }
         m[8].asText().takeIf { it.length > 8 && !l.streamIds.containsKey(interaction) }?.let { l.streamIds[interaction] = it }
         val visual = Visual.from(m)
-        say("Heard \"$transcript\" (request ${describe(body)}, understanding ${describeRead(m[2])})")
+        val diagnosticMode = TimeoutDiagnostic.recognize(transcript)
+        if (diagnosticMode == null) say("Heard \"$transcript\" (request ${describe(body)}, understanding ${describeRead(m[2])})")
         // The glasses' own understanding of the request, e.g. IN:REPLY_MESSAGE, and its slots.
         val intent = m[23].asText()
-        say("Understood $intent, slots ${deep(m[26])}")
+        if (diagnosticMode == null) say("Understood $intent, slots ${deep(m[26])}")
         val waiting = awaitingReply?.takeIf { System.currentTimeMillis() < it.until }
         // The glasses fulfil this one themselves, by switching the session to Live AI; an answer would talk over it.
-        if (intent == "IN:START_LIVE_AI") {
+        if (intent == "IN:START_LIVE_AI" && diagnosticMode == null) {
             say("Live AI asked for; the glasses start it themselves")
             return
         }
         // "Hey Meta" and nothing after it: the glasses close the turn at once.
-        if (intent == "IN:WAKE_WORD") return
+        if (intent == "IN:WAKE_WORD" && diagnosticMode == null) return
         when {
+            diagnosticMode != null -> scope.launch { runDiagnostic(l, interaction, transcript, diagnosticMode, diagnosticTicket) }
             // The glasses' own words for giving up.
             waiting != null && intent in CANCEL_INTENTS -> {
                 awaitingReply = null
@@ -596,7 +620,7 @@ class Assistant(
                 sendReply(l, interaction, transcript, waiting.conversation, slot(m[26], "SL:CONTENT_EXACT").ifEmpty { transcript })
             }
             intent == "IN:REPLY_MESSAGE" -> scope.launch { replyRequested(l, interaction, transcript, slot(m[26], "SL:CONTENT_EXACT")) }
-            else -> scope.launch { answer(l, interaction, transcript, visual) }
+            else -> scope.launch { answer(l, interaction, transcript, visual, diagnosticTicket) }
         }
     }
 
@@ -645,7 +669,70 @@ class Assistant(
 
     // --- answering -----------------------------------------------------------
 
-    private suspend fun answer(l: Link, interaction: String, transcript: String, visual: Visual) {
+    private suspend fun runDiagnostic(l: Link, interaction: String, transcript: String, mode: TimeoutDiagnostic.Mode, ticket: Long) {
+        val aliases = setOfNotNull(interaction, l.sessionOf[interaction])
+        if (link !== l || aliases.any { it in l.closed }) return
+        val job = kotlinx.coroutines.currentCoroutineContext()[Job]
+        var lease: DiagnosticLease? = null
+        fun note(event: String) = say("Speech diagnostic mode=${mode.name.lowercase()} elapsedMs=${lease?.elapsedMs ?: 0} event=$event")
+        lease = l.diagnostic.begin(ticket, aliases, SystemClock::elapsedRealtime, ::note, { job?.cancel() }) ?: return
+        val active = lease
+        val native = store.config.value.glassesVoice && !l.sessionTurn
+        note(if (mode == TimeoutDiagnostic.Mode.STREAMING) "start-phone-tts-opus-preference-unchanged" else if (native) "start-selected-glasses-voice" else "start-selected-phone-tts")
+        _phase.value = AssistantPhase.THINKING
+        try {
+            withTimeout(DiagnosticLease.BUDGET_MS) {
+                var seq = 1
+                suspend fun keepalive() {
+                    active.send {
+                        l.mux.send(checkNotNull(l.m0), netEvent(EV_KEEP_AIR_SESSION_ALIVE,
+                            ThriftWriter().str(1, "AwaitingResponse").i32(2, 20_000).i32(3, seq++).done()), messageType = MT_NET_EVENT)
+                    }
+                    note("keepalive")
+                }
+                if (mode == TimeoutDiagnostic.Mode.DELAYED) awaitDiagnosticDelay(active, { delay(it) }, { keepalive() })
+                kotlinx.coroutines.coroutineScope {
+                    val waiting = launch { while (true) { delay(HOLD_ON_MS); keepalive() } }
+                    try {
+                        val text = "Timeout test completed"
+                        if (mode == TimeoutDiagnostic.Mode.DELAYED && native) {
+                            waiting.cancelAndJoin()
+                            note("native-answer-dispatch")
+                            speakOnGlasses(l, interaction, transcript, text, active)
+                            note("native-answer-end")
+                        } else {
+                            val packets = active.prepare {
+                                if (mode == TimeoutDiagnostic.Mode.STREAMING) voice.diagnosticSpeech("Timeout test started", text, l.locale)
+                                else voice.diagnosticSpeech(text, null, l.locale)
+                            }
+                            waiting.cancelAndJoin()
+                            stream(l, interaction, transcript, if (mode == TimeoutDiagnostic.Mode.STREAMING) "Timeout test started. $text" else text,
+                                packets, active, ::note)
+                        }
+                    } finally { waiting.cancel() }
+                }
+                active.check()
+                l.answered.add(interaction)
+                l.sessionOf[interaction]?.let { l.answered.add(it) }
+                note("finished")
+            }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            note("aborted")
+            active.revoke()
+            throw cancelled
+        } catch (error: Exception) {
+            active.revoke()
+            note("failed-${error.javaClass.simpleName}")
+        } finally {
+            if (link === l && l.diagnostic.ticket() == ticket) _phase.value = AssistantPhase.LISTENING
+        }
+    }
+
+    private suspend fun answer(l: Link, interaction: String, transcript: String, visual: Visual, diagnosticTicket: Long = l.diagnostic.ticket()) {
+        TimeoutDiagnostic.recognize(transcript)?.let {
+            runDiagnostic(l, interaction, transcript, it, diagnosticTicket)
+            return
+        }
         val started = System.currentTimeMillis()
         record(TurnRecord(interaction, started, transcript))
         _phase.value = AssistantPhase.THINKING
@@ -803,7 +890,7 @@ class Assistant(
     }
 
     /** ev71, ev52 and ev342, which open every answer. ev52 and ev342 go at a tagged type 0, as the app sends them. */
-    private suspend fun preamble(l: Link, interaction: String, transcript: String, text: String) {
+    private suspend fun preamble(l: Link, interaction: String, transcript: String, text: String, diagnostic: DiagnosticLease? = null) {
         val m0 = checkNotNull(l.m0)
         val e71 = ThriftWriter().str(1, interaction).done()
         val e52 = ThriftWriter().str(1, transcript.ifEmpty { text }).i32(2, 0).str(4, "").bool(7, false).str(8, interaction).done()
@@ -813,7 +900,7 @@ class Assistant(
             Triple(0, EV_FINAL_TRANSCRIPTION, e52),
             Triple(0, EV_ON_PHONE_UNDERSTANDING, e342),
         )) {
-            l.mux.send(m0, netEvent(event, body), messageType = type)
+            sendSpeech(l, diagnostic, m0, netEvent(event, body), type)
             delay(20)
         }
     }
@@ -822,71 +909,90 @@ class Assistant(
      * The answer in the glasses' own voice: a VARM that streams nothing, then ev60 with the text, which is what makes
      * them speak it with their own TTS.
      */
-    private suspend fun speakOnGlasses(l: Link, interaction: String, transcript: String, text: String) {
+    private suspend fun speakOnGlasses(l: Link, interaction: String, transcript: String, text: String, diagnostic: DiagnosticLease? = null) {
         val m0 = checkNotNull(l.m0)
-        preamble(l, interaction, transcript, text)
+        preamble(l, interaction, transcript, text, diagnostic)
         _phase.value = AssistantPhase.SPEAKING
         val voiceId = glassesVoice()
-        l.mux.send(m0, netEvent(EV_VOICE_ACTION_RESPONSE, varm(interaction, transcript, text, onGlasses = true, voiceId = voiceId)), messageType = MT_NET_EVENT)
+        sendSpeech(l, diagnostic, m0, netEvent(EV_VOICE_ACTION_RESPONSE, varm(interaction, transcript, text, onGlasses = true, voiceId = voiceId)), MT_NET_EVENT)
         delay(20)
-        l.mux.send(m0, netEvent(EV_MWA_VOICE_INTERACTION_COMPLETE, interactionComplete(interaction, text)), messageType = MT_NET_EVENT)
+        sendSpeech(l, diagnostic, m0, netEvent(EV_MWA_VOICE_INTERACTION_COMPLETE, interactionComplete(interaction, text)), MT_NET_EVENT)
         delay(20)
         val mono = System.nanoTime() / 1_000_000
         val e392 = ThriftWriter().str(1, "VoiceActionResponseMessage").i32(2, (mono and 0xFFFF).toInt()).i32(3, 1).done()
-        l.mux.send(m0, netEvent(EV_KEEP_AIR_SESSION_ALIVE, e392), messageType = MT_NET_EVENT)
-        say("Answered in the glasses' voice${voiceId?.let { " ($it)" }.orEmpty()}: \"$text\"")
+        sendSpeech(l, diagnostic, m0, netEvent(EV_KEEP_AIR_SESSION_ALIVE, e392), MT_NET_EVENT)
+        if (diagnostic == null) say("Answered in the glasses' voice${voiceId?.let { " ($it)" }.orEmpty()}: \"$text\"")
     }
 
     /**
      * The answer, in the app's order: ev71, ev52, ev342, ev388; the stream header and the first
      * audio message; the VARM; the rest of the audio as bare frames in real time; 6000; ev389, ev392.
      */
-    private suspend fun stream(l: Link, interaction: String, transcript: String, text: String, packets: List<OpusPacket>) {
+    private suspend fun sendSpeech(l: Link, diagnostic: DiagnosticLease?, channel: Int, payload: ByteArray, type: Int? = null) {
+        diagnostic?.check()
+        // An already-started transport write may finish; revocation blocks subsequent writes, not bytes in flight.
+        l.mux.send(channel, payload, messageType = type)
+        diagnostic?.check()
+    }
+
+    private suspend fun stream(l: Link, interaction: String, transcript: String, text: String, packets: List<OpusPacket>, diagnostic: DiagnosticLease? = null, diagnosticNote: (String) -> Unit = {}) {
         val mux = l.mux
         val m0 = checkNotNull(l.m0)
         val s0 = checkNotNull(l.s0)
-        preamble(l, interaction, transcript, text)
+        val diagnosticStreamId = if (diagnostic == null) null
+            else l.streamIds[interaction] ?: l.sessionOf[interaction]?.let { l.streamIds[it] }.orEmpty()
+        if (diagnostic != null) check(!diagnosticStreamId.isNullOrEmpty()) { "no interaction-owned diagnostic stream" }
+        preamble(l, interaction, transcript, text, diagnostic)
         val mono = System.nanoTime() / 1_000_000
         val e388 = ThriftWriter().i64(1, System.currentTimeMillis()).i64(2, mono).str(3, interaction).done()
-        mux.send(m0, netEvent(EV_TTS_START_INFO, e388), messageType = MT_NET_EVENT)
+        sendSpeech(l, diagnostic, m0, netEvent(EV_TTS_START_INFO, e388), MT_NET_EVENT)
         delay(20)
 
         // Field 1 is the stream the glasses allocated. Without it they drop the stream silently.
-        val streamId = l.streamIds[interaction] ?: l.latestStream
+        // Normal IDs can arrive during the preamble; retain the original late lookup.
+        val streamId = diagnosticStreamId ?: (l.streamIds[interaction] ?: l.latestStream)
         val header = (if (streamId.isNotEmpty()) Wire.fieldBytes(1, streamId.toByteArray()) else ByteArray(0)) +
             Wire.fieldBytes(2, interaction.toByteArray()) + Wire.fieldVarint(4, 1) + Wire.fieldVarint(7, 1) + Wire.fieldVarint(19, 1)
         if (streamId.isEmpty()) say("No stream id from the glasses for this answer; it may not play")
-        mux.send(s0, header, messageType = MT_STREAM_HEADER)
+        sendSpeech(l, diagnostic, s0, header, MT_STREAM_HEADER)
 
         _phase.value = AssistantPhase.SPEAKING
         val answer = netEvent(EV_VOICE_ACTION_RESPONSE, varm(interaction, transcript, text))
-        val start = System.nanoTime()
-        var dueUs = 0L
-        for ((i, chunk) in packets.chunked(2).withIndex()) {
-            val frame = chunk.fold(ByteArray(0)) { acc, p ->
-                acc + ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(p.data.size).array() + p.data
+        if (diagnostic != null) {
+            diagnosticAudio(packets, diagnostic, SystemClock::elapsedRealtime, { delay(it) },
+                audio = { frame, first -> sendSpeech(l, diagnostic, s0, frame, if (first) MT_STREAM_AUDIO else null) },
+                varm = { sendSpeech(l, diagnostic, m0, answer, MT_NET_EVENT) },
+                end = { sendSpeech(l, diagnostic, s0, ByteArray(0), MT_STREAM_END) },
+                note = diagnosticNote)
+        } else {
+            val start = System.nanoTime()
+            var dueUs = 0L
+            for ((i, chunk) in packets.chunked(2).withIndex()) {
+                val frame = chunk.fold(ByteArray(0)) { acc, p ->
+                    acc + ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(p.data.size).array() + p.data
+                }
+                if (i == 0) {
+                    mux.send(s0, frame, messageType = MT_STREAM_AUDIO)
+                    // The VARM goes after the first audio message, never before.
+                    mux.send(m0, answer, messageType = MT_NET_EVENT)
+                } else {
+                    // A bare header: tagged with type 0, only the first 40 ms would ever play.
+                    mux.send(s0, frame)
+                }
+                dueUs += chunk.sumOf { it.durationUs }
+                val wait = dueUs / 1000 - (System.nanoTime() - start) / 1_000_000
+                if (wait > 0) delay(wait)
             }
-            if (i == 0) {
-                mux.send(s0, frame, messageType = MT_STREAM_AUDIO)
-                // The VARM goes after the first audio message, never before.
-                mux.send(m0, answer, messageType = MT_NET_EVENT)
-            } else {
-                // A bare header: tagged with type 0, only the first 40 ms would ever play.
-                mux.send(s0, frame)
-            }
-            dueUs += chunk.sumOf { it.durationUs }
-            val wait = dueUs / 1000 - (System.nanoTime() - start) / 1_000_000
-            if (wait > 0) delay(wait)
+            mux.send(s0, ByteArray(0), messageType = MT_STREAM_END)
         }
-        mux.send(s0, ByteArray(0), messageType = MT_STREAM_END)
 
         val e389 = ThriftWriter().i64(1, System.currentTimeMillis()).i64(2, mono).i64(3, 7000).str(4, interaction).done()
         val e392 = ThriftWriter().str(1, "VoiceActionResponseMessage").i32(2, (mono and 0xFFFF).toInt()).i32(3, 1).done()
         for ((event, body) in listOf(EV_TTS_END_INFO to e389, EV_KEEP_AIR_SESSION_ALIVE to e392)) {
-            mux.send(m0, netEvent(event, body), messageType = MT_NET_EVENT)
+            sendSpeech(l, diagnostic, m0, netEvent(event, body), MT_NET_EVENT)
             delay(20)
         }
-        say("Answered: \"$text\"")
+        if (diagnostic == null) say("Answered: \"$text\"") else diagnosticNote("stream-completion")
     }
 
     /** 5005: `<streamId>_<interactionId>_<pcmBytes>_<ms>`, 96 bytes of PCM per millisecond played. */

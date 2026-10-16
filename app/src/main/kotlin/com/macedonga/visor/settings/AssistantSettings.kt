@@ -210,6 +210,12 @@ fun AssistantSettingsScreen(open: (NavKey) -> Unit, model: AssistantViewModel = 
                 )
             }
         }
+        item(key = "timeout-diagnostic") {
+            Column {
+                SectionLabel(stringResource(R.string.ai_timeout_diagnostic_title))
+                Footnote(stringResource(R.string.ai_timeout_diagnostic_help))
+            }
+        }
         item(key = "places") {
             Column(Modifier.padding(top = 28.dp)) {
                 Rows(

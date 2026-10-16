@@ -20,6 +20,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.ensureActive
 
 /** One Opus packet and how long it plays. */
 class OpusPacket(val data: ByteArray, val durationUs: Long)
@@ -45,16 +46,51 @@ class Voice(private val context: Context) {
         withContext(Dispatchers.Default) { encodeOpus(resample(pcm.samples, pcm.rate, 48_000)) }
     }
 
-    private suspend fun synthesize(text: String, locale: Locale, out: File) {
+    /** Diagnostic only: phone TTS, one 48 kHz PCM timeline, one existing Opus encoder instance. */
+    internal suspend fun diagnosticSpeech(first: String, second: String?, locale: Locale): List<OpusPacket> = lock.withLock {
+        val firstWav = File(context.cacheDir, "diagnostic-${UUID.randomUUID()}.wav")
+        val secondWav = File(context.cacheDir, "diagnostic-${UUID.randomUUID()}.wav")
+        try {
+            synthesize(first, locale, firstWav, diagnostic = true)
+            val a = withContext(Dispatchers.Default) {
+                val job = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]
+                DiagnosticWav.read(firstWav, if (second == null) 10 else 25) { job?.ensureActive() }
+            }
+            val pcm = if (second == null) a else {
+                synthesize(second, locale, secondWav, diagnostic = true)
+                val b = withContext(Dispatchers.Default) {
+                    val job = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]
+                    DiagnosticWav.read(secondWav, 10) { job?.ensureActive() }
+                }
+                diagnosticPcm(a, b)
+            }
+            withContext(Dispatchers.Default) {
+                val job = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]
+                encodeOpus(pcm) { job?.ensureActive() }
+            }
+        } finally {
+            firstWav.delete()
+            secondWav.delete()
+        }
+    }
+
+    private suspend fun synthesize(text: String, locale: Locale, out: File, diagnostic: Boolean = false) {
         val engine = ready()
         if (engine.isLanguageAvailable(locale) >= TextToSpeech.LANG_AVAILABLE) engine.language = locale
         val id = UUID.randomUUID().toString()
         val done = CompletableDeferred<Boolean>().also { pending[id] = it }
         out.delete()
-        check(engine.synthesizeToFile(text, Bundle(), out, id) == TextToSpeech.SUCCESS) { "the phone's text to speech refused the sentence" }
-        val ok = withTimeout(15_000) { done.await() }
-        pending.remove(id)
-        check(ok && out.length() > 44) { "the phone's text to speech failed" }
+        try {
+            check(engine.synthesizeToFile(text, Bundle(), out, id) == TextToSpeech.SUCCESS) { "the phone's text to speech refused the sentence" }
+            val ok = withTimeout(15_000) { done.await() }
+            pending.remove(id)
+            check(ok && out.length() > 44) { "the phone's text to speech failed" }
+        } finally {
+            if (diagnostic) {
+                pending.remove(id)
+                if (!done.isCompleted) engine.stop()
+            }
+        }
     }
 
     private suspend fun ready(): TextToSpeech {
@@ -144,7 +180,7 @@ class Voice(private val context: Context) {
     }
 
     /** The platform Opus encoder, one packet per output buffer, codec config left out. */
-    private fun encodeOpus(pcm: ShortArray): List<OpusPacket> {
+    private fun encodeOpus(pcm: ShortArray, checkActive: () -> Unit = {}): List<OpusPacket> {
         val format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, 48_000, 1).apply {
             setInteger(MediaFormat.KEY_BIT_RATE, 32_000)
         }
@@ -153,13 +189,18 @@ class Voice(private val context: Context) {
         try {
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             codec.start()
+            checkActive()
             val bytes = ByteBuffer.allocate(pcm.size * 2).order(ByteOrder.LITTLE_ENDIAN)
-            pcm.forEach { bytes.putShort(it) }
+            pcm.forEachIndexed { index, sample ->
+                if (index and 1023 == 0) checkActive()
+                bytes.putShort(sample)
+            }
             val raw = bytes.array()
             var fed = 0
             var inputDone = false
             val info = MediaCodec.BufferInfo()
             while (true) {
+                checkActive()
                 if (!inputDone) {
                     val index = codec.dequeueInputBuffer(10_000)
                     if (index >= 0) {
