@@ -246,12 +246,19 @@ class GlassesSession(
 
         // A peer-opened channel names its service on its first message only, so record it
         // here or every later frame on that channel is attributed to service 0.
-        if (info.serviceId != 0) registry.bindInbound(info.channelId, info.serviceId)
-        val serviceId = registry.serviceForInbound(info.channelId)
+        if (!info.flags.isClosed && info.serviceId != 0) registry.bindInbound(info.channelId, info.serviceId)
+        val serviceId = if (info.flags.isClosed) {
+            // Only Assistant consumes newly routed service-less closes. Other responders can
+            // mistake their cached type for application data; keep explicit service tags working.
+            if (info.serviceId != 0) info.serviceId
+            else message.closedServiceId?.takeIf { it == 15 } ?: 0
+        } else {
+            registry.serviceForInbound(info.channelId)
+        }
 
         if (serviceId in REFUSED_PEER_SERVICES &&
             (info.channelId and 0x8000) != 0 &&
-            !info.flags.hasError
+            !info.flags.hasError && !info.flags.isClosed
         ) {
             // The glasses open svc30, their device-peer trust, and svc79, constellation auth,
             // toward every companion.
@@ -287,7 +294,7 @@ class GlassesSession(
             }
             return
         }
-        // An empty close frame only ends a channel, and the registry has already forgotten whose it was.
+        // An empty close frame only ends a channel, with no application data to publish.
         if (info.flags.isClosed && message.payload.isEmpty()) return
         publish(ServiceData(serviceId, info.messageType, message.payload))
     }

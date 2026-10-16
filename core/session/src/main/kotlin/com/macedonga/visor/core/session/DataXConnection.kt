@@ -17,7 +17,12 @@ interface PlaintextLink {
 }
 
 /** One decoded DataX message: its header and its application payload. */
-class DataXMessage(val info: MessageInfo, val payload: ByteArray)
+class DataXMessage(
+    val info: MessageInfo,
+    val payload: ByteArray,
+    // Close delivery removes the binding before the session routes the message.
+    internal val closedServiceId: Int? = null,
+)
 
 /** The channel mux riding on one [PlaintextLink]. */
 class DataXConnection(
@@ -138,7 +143,10 @@ class DataXConnection(
 
     private fun deliver(message: DataXMessage): DataXMessage {
         if (message.info.flags.isClosed) {
+            val serviceId = message.closedServiceId?.takeIf { it != 0 }
+                ?: registry.serviceForInbound(message.info.channelId)
             registry.closeInbound(message.info.channelId)
+            return DataXMessage(message.info, message.payload, serviceId)
         }
         return message
     }

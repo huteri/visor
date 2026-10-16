@@ -8,4 +8,5 @@ android {
 
 dependencies {
     api(project(":core:connection"))
+    testImplementation(libs.junit)
 }

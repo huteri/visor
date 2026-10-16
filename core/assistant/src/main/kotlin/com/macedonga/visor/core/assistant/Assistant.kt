@@ -1,6 +1,7 @@
 package com.macedonga.visor.core.assistant
 
 import android.content.Context
+import android.os.SystemClock
 import com.macedonga.visor.core.assistant.mcp.ToolAction
 import com.macedonga.visor.core.connection.GlassesConnection
 import com.macedonga.visor.core.media.AirshipReceiver
@@ -224,9 +225,14 @@ class Assistant(
 
     @Volatile
     private var link: Link? = null
+        set(value) {
+            if (field !== value) field?.incoming?.close()
+            field = value
+        }
 
     /** svc15 state for one Bluetooth session. */
     private class Link(val mux: DataXConnection) {
+        val incoming = AssistantMessageDispatcher(SystemClock::elapsedRealtime)
         // Whether the current turn is a session (SCI) one, which only plays streamed answers.
         @Volatile var sessionTurn = false
         // The interaction the microphone is open for, and each request's session when the two differ.
@@ -311,6 +317,7 @@ class Assistant(
                 val channel = CHANNEL_CLOSED.find(warning)?.groupValues?.get(1)?.toIntOrNull(16) ?: return@collect
                 val l = link ?: return@collect
                 if (channel != (l.m0 ?: -1) and 0x7FFF && channel != (l.s0 ?: -1) and 0x7FFF) return@collect
+                l.incoming.close()
                 again?.cancel()
                 again = scope.launch {
                     delay(REGISTER_AGAIN_MS)
@@ -414,8 +421,22 @@ class Assistant(
         val l = link ?: return
         // The Wi-Fi session gets this responder too; only the link we registered on is ours.
         if (connection !== l.mux) return
+        val channel = message.info.channelId
+        if (message.info.flags.isClosed) {
+            l.incoming.closeChannel(channel)
+            if (channel == l.m0?.and(0x7FFF) || channel == l.s0?.and(0x7FFF)) l.incoming.close()
+            return
+        }
         val payload = message.payload
-        when (val type = message.info.messageType) {
+        val type = message.info.messageType
+        if (type == MT_ENVELOPE && l.m0 == null) return
+        if (l.incoming.dispatch(type, payload, channel,
+            acknowledge = { seq -> l.m0?.let { l.mux.send(it, Wire.fieldVarint(1, seq), messageType = MT_ENVELOPE_ACK) } },
+            onEvent = { event, receivedChannel -> if (link === l) handleNetEvent(l, event, receivedChannel) },
+            onEnvelope = { inner, blob -> if (link === l) envelopeMessage(l, inner, blob) },
+            onChunk = visualDiagnostics::record,
+        )) return
+        when (type) {
             MT_INIT_MESSAGE_RESPONSE -> l.m0Answered.complete(Unit)
             MT_INIT_STREAM_RESPONSE -> l.s0Answered.complete(Unit)
             MT_RUNNING_LOCALE -> {
@@ -444,22 +465,13 @@ class Assistant(
                 ears?.finish()
             }
             MT_STREAM_STATUS -> streamStatus(payload.decodeToString())
-            MT_ENVELOPE -> envelope(l, payload, message.info.channelId)
-            // Chunk schema is not known: preserve privately on explicit opt-in, never hex-log it.
-            1002, 1003 -> visualDiagnostics.record(type, payload, message.info.channelId)
             // Init answers, time stretch, TTS buffer config, MMAI enabled, assistant ready, stream consumed.
             1028, 1033, 1036, 1037, 6001 -> Unit
             else -> say("Assistant: message type $type, ${payload.size} bytes ${hex(payload)}")
         }
     }
 
-    private suspend fun envelope(l: Link, payload: ByteArray, channel: Int) {
-        val m0 = l.m0 ?: return
-        val env = Wire.parse(payload)
-        // Unacked, the glasses resend the same envelope for minutes.
-        if (env.has(1)) l.mux.send(m0, Wire.fieldVarint(1, env.varint(1)), messageType = MT_ENVELOPE_ACK)
-        val inner = env.varint(2).toInt()
-        val blob = env.bytes(3)
+    private suspend fun envelopeMessage(l: Link, inner: Int, blob: ByteArray) {
         if (inner == MT_START_INTERACTION) {
             val fields = runCatching { Thrift.loads(blob) }.getOrDefault(emptyMap())
             // Use case 3 is LIVE_AI_INTERACTION; after a switch to LIVE_AI the next interaction is the session's.
@@ -471,20 +483,11 @@ class Assistant(
             }
             return
         }
-        if (inner == 1002 || inner == 1003) {
-            visualDiagnostics.record(inner, blob, channel)
-            return
-        }
-        if (inner != MT_NET_EVENT) {
-            say("Assistant: an envelope carrying type $inner, ${blob.size} bytes ${hex(blob)}")
-            return
-        }
-        val event = try {
-            parseNetEvent(blob)
-        } catch (error: Exception) {
-            say("Assistant: an unreadable event (${error.message})")
-            return
-        }
+        say("Assistant: an envelope carrying type $inner, ${blob.size} bytes ${hex(blob)}")
+    }
+
+    private suspend fun handleNetEvent(l: Link, event: NetEvent, channel: Int) {
+        val m0 = l.m0 ?: return
         when (event.id) {
             EV_SESSION_MODE_UPDATE_RESPONSE -> {
                 val fields = runCatching { Thrift.loads(event.body) }.getOrDefault(emptyMap())
@@ -558,7 +561,7 @@ class Assistant(
 
     private fun fulfillmentRequest(l: Link, body: ByteArray) {
         if (l.m0 == null || l.s0 == null) return say("A question came before the assistant channels were up; dropped")
-        val m = runCatching { Thrift.loads(body) }.getOrNull() ?: return say("An unreadable question, ${body.size} bytes ${hex(body)}")
+        val m = runCatching { Thrift.loads(body) }.getOrNull() ?: return say("An unreadable question (${body.size} bytes); dropped")
         val interaction = m[1].asText()
         val transcript = m[2].asStruct()[1].asStruct()[1].asText()
         if (interaction.isEmpty() || !l.taken.add(interaction)) return
