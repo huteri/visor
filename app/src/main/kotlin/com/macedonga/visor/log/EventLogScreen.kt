@@ -45,7 +45,11 @@ import java.io.File
 import javax.inject.Inject
 
 @HiltViewModel
-class EventLogViewModel @Inject constructor(val log: EventLog, val media: MediaImport) : ViewModel()
+class EventLogViewModel @Inject constructor(
+    val log: EventLog,
+    val media: MediaImport,
+    val assistant: com.macedonga.visor.core.assistant.Assistant,
+) : ViewModel()
 
 /** The log as one card of lines, opened at the end: what matters is what just happened. */
 @Composable
@@ -76,6 +80,11 @@ fun EventLogScreen(model: EventLogViewModel = hiltViewModel()) {
             Column(Modifier.padding(horizontal = 16.dp).fillMaxWidth().clip(shape).background(Visor.colors.raised)) {
                 if (i > 0) Hairline()
                 LogRow(line)
+            }
+        }
+        item(key = "visual-capture") {
+            Box(Modifier.padding(horizontal = 32.dp, vertical = 20.dp)) {
+                VisualCaptureControls(model.assistant)
             }
         }
         item(key = "bug-report") {

@@ -114,6 +114,26 @@ class Assistant(
     private val _notes = MutableSharedFlow<String>(extraBufferCapacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     val notes: SharedFlow<String> = _notes.asSharedFlow()
 
+    private val visualDiagnostics = VisualCaptureProvider.capture
+    private var visualCaptureExpiry: Job? = null
+
+    /** Consent is requested by the Event log screen, never enabled by a build flag. */
+    fun startVisualCapture() {
+        clearVisualCapture()
+        visualDiagnostics.start()
+        visualCaptureExpiry = scope.launch {
+            delay(600_000)
+            visualDiagnostics.expire()
+        }
+    }
+
+    fun exportVisualCapture(): android.net.Uri? = VisualCaptureProvider.publish(context)
+
+    fun clearVisualCapture() {
+        visualCaptureExpiry?.cancel()
+        visualDiagnostics.clear()
+    }
+
     private val liveAi = LiveAi(context, scope, object : LiveAiHost {
         override suspend fun event(id: Int, body: ByteArray) {
             val l = link ?: return
@@ -157,6 +177,7 @@ class Assistant(
         ears?.stop()
         val ended = CompletableDeferred<Unit>().also { micEnded = it }
         l.listening = interaction
+        val recognition = l.fallback.listen(interaction)
         if (interaction.isEmpty() || !store.config.value.enabled) return
         say("Listening to the microphone for $interaction")
         ears = GlassesEars(
@@ -164,7 +185,7 @@ class Assistant(
             onUtterance = { text, startMs, _ ->
                 scope.launch {
                     delay(OWN_RECOGNITION_GRACE_MS)
-                    if (interaction in l.closed) return@launch
+                    if (interaction in l.closed || !l.fallback.allowed(recognition)) return@launch
                     when {
                         // The question itself, which the glasses recognised and sent as ev57.
                         interaction in l.taken && !l.answered.contains(interaction) -> Unit
@@ -173,6 +194,7 @@ class Assistant(
                             val sub = java.util.UUID.randomUUID().toString()
                             say("Heard \"$text\" myself: a follow-up, answered as $sub")
                             l.mux.send(checkNotNull(l.m0), netEvent(EV_START_OF_USER_SPEECH, ThriftWriter().str(1, sub).i64(2, startMs).done()), messageType = MT_NET_EVENT)
+                            if (!l.fallback.allowed(recognition)) return@launch
                             l.taken.add(sub)
                             answer(l, sub, text, Visual(null, "", "", false, ""))
                         }
@@ -182,7 +204,7 @@ class Assistant(
                             if (WAKE_WORD_ONLY.matches(text.trim())) return@launch
                             withTimeoutOrNull(MIC_END_WAIT_MS) { ended.await() }
                             delay(QUESTION_GRACE_MS)
-                            if (interaction in l.taken || interaction in l.closed) return@launch
+                            if (interaction in l.taken || interaction in l.closed || !l.fallback.allowed(recognition)) return@launch
                             l.taken.add(interaction)
                             say("Heard \"$text\" myself: the glasses left this question to the server")
                             answer(l, interaction, text, Visual(null, "", "", false, ""))
@@ -210,6 +232,7 @@ class Assistant(
         // The interaction the microphone is open for, and each request's session when the two differ.
         @Volatile var listening: String? = null
         val sessionOf = java.util.concurrent.ConcurrentHashMap<String, String>()
+        val fallback = MicrophoneFallback()
         @Volatile var m0: Int? = null
         @Volatile var s0: Int? = null
         val m0Answered = CompletableDeferred<Unit>()
@@ -421,14 +444,16 @@ class Assistant(
                 ears?.finish()
             }
             MT_STREAM_STATUS -> streamStatus(payload.decodeToString())
-            MT_ENVELOPE -> envelope(l, payload)
+            MT_ENVELOPE -> envelope(l, payload, message.info.channelId)
+            // Chunk schema is not known: preserve privately on explicit opt-in, never hex-log it.
+            1002, 1003 -> visualDiagnostics.record(type, payload, message.info.channelId)
             // Init answers, time stretch, TTS buffer config, MMAI enabled, assistant ready, stream consumed.
             1028, 1033, 1036, 1037, 6001 -> Unit
             else -> say("Assistant: message type $type, ${payload.size} bytes ${hex(payload)}")
         }
     }
 
-    private suspend fun envelope(l: Link, payload: ByteArray) {
+    private suspend fun envelope(l: Link, payload: ByteArray, channel: Int) {
         val m0 = l.m0 ?: return
         val env = Wire.parse(payload)
         // Unacked, the glasses resend the same envelope for minutes.
@@ -444,6 +469,10 @@ class Assistant(
                 l.sessionTurn = fields[5] == SESSION_USE_CASE
                 say("Assistant: start interaction ${deep(fields)}")
             }
+            return
+        }
+        if (inner == 1002 || inner == 1003) {
+            visualDiagnostics.record(inner, blob, channel)
             return
         }
         if (inner != MT_NET_EVENT) {
@@ -483,6 +512,7 @@ class Assistant(
             }
             EV_FRAME_KEEP_ALIVE_RESPONSE -> Unit
             EV_FULFILLMENT_REQUEST -> fulfillmentRequest(l, event.body)
+            65 -> unsupportedVisualRequest(l, event.body, channel)
             EV_DEVICE_VOICE_STATE -> voiceState(event.body)
             EV_REMOTE_IMAGE_CAPTURE_RESPONSE -> {
                 pending?.answered = true
@@ -510,6 +540,22 @@ class Assistant(
         say("Glasses: \"$words\"")
     }
 
+    private fun unsupportedVisualRequest(l: Link, body: ByteArray, channel: Int) {
+        visualDiagnostics.record(65, body, channel)
+        val problem = context.getString(R.string.visual_request_unsupported)
+        val interaction = MmaiVisualRequest.interactionId(body)
+        // Capture-only: no synthetic diary question that Again could send to the model.
+        // An unknown ev65 UUID cannot safely be assigned to the current microphone.
+        if (interaction != null) {
+            l.taken.add(interaction)
+            if (l.fallback.suppress(interaction)) {
+                l.listening?.let { l.taken.add(it) }
+                ears?.stop()
+            }
+        }
+        say(problem)
+    }
+
     private fun fulfillmentRequest(l: Link, body: ByteArray) {
         if (l.m0 == null || l.s0 == null) return say("A question came before the assistant channels were up; dropped")
         val m = runCatching { Thrift.loads(body) }.getOrNull() ?: return say("An unreadable question, ${body.size} bytes ${hex(body)}")
@@ -519,6 +565,7 @@ class Assistant(
         // In a session the request has its own id; the microphone's is the session's, and it is the same turn.
         l.listening?.takeIf { it != interaction }?.let {
             l.sessionOf[interaction] = it
+            l.fallback.associate(interaction, it)
             l.taken.add(it)
         }
         m[8].asText().takeIf { it.length > 8 && !l.streamIds.containsKey(interaction) }?.let { l.streamIds[interaction] = it }

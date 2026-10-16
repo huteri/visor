@@ -612,6 +612,15 @@
     <string name="event_log_share">Condividi</string>
     <string name="event_log_clear">Svuota</string>
     <string name="event_log_empty">Non è ancora successo niente.</string>
+    <string name="visual_capture_start">Cattura richiesta visiva (2 min)</string>
+    <string name="visual_capture_share">Condividi cattura visiva privata</string>
+    <string name="visual_capture_delete">Elimina cattura visiva privata</string>
+    <string name="visual_capture_help">Solo per richieste visive degli occhiali non supportate. Avvia la cattura, fai una domanda visiva agli occhiali e condividi privatamente entro 10 minuti. Questa cattura è separata dal registro eventi.</string>
+    <string name="visual_capture_warning">Vengono acquisiti i dati completi della richiesta, che possono includere trascrizioni, immagini o altre informazioni private. Si acquisiscono solo gli eventi 65 e i messaggi 1002/1003, fino a 2 MB. Cattura ed esportazioni restano solo in memoria, per al massimo 10 minuti da Avvia; Visor non salva file della cattura. Elimina, una nuova cattura o la scadenza revocano i collegamenti esportati; anche la chiusura del processo li rende illeggibili. Nulla viene caricato automaticamente. Condividi solo con persone fidate, mai in una segnalazione pubblica. Le letture già aperte e le copie ricevute da altre app non possono essere ritirate.</string>
+    <string name="visual_capture_started">Cattura privata avviata per 2 minuti. Fai una domanda visiva agli occhiali, poi condividi la cattura privatamente.</string>
+    <string name="visual_capture_empty">Nessuna richiesta visiva acquisita, oppure cattura scaduta. Avvia la cattura prima di fare la domanda agli occhiali.</string>
+    <string name="visual_capture_deleted">Cattura visiva privata eliminata da questa app.</string>
+    <string name="visual_capture_export_failed">Impossibile esportare la cattura visiva privata.</string>
     <string name="event_log_bug_report">Scarica un bug report dagli occhiali</string>
     <string name="onboard_pair_title">Mettili in modalità di accoppiamento</string>
     <string name="onboard_pair_fold">Chiudi entrambe le stanghette.</string>

@@ -1,0 +1,3 @@
+<resources>
+    <string name="visual_request_unsupported">This glasses visual-request format is not supported yet. This event is diagnostic only, not a question in turn history. Microphone fallback is stopped only for a verified matching turn; other assistant paths may still send a photo. To help diagnose it, use the private visual capture in Settings → Advanced → Event log.</string>
+</resources>

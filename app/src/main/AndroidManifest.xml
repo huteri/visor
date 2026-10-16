@@ -94,6 +94,12 @@
         </activity>
 
         <provider
+            android:name="com.macedonga.visor.core.assistant.VisualCaptureProvider"
+            android:authorities="${applicationId}.visual"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
+        <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.files"
             android:exported="false"
