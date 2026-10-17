@@ -64,8 +64,9 @@ class Brain(private val config: () -> AssistantConfig, private val book: MemoryB
         image: ByteArray? = null,
         note: String = "",
         audience: Audience = Audience.GLASSES,
+        configuration: AssistantConfig? = null,
     ): Reply = withContext(Dispatchers.IO) {
-        val c = config()
+        val c = configuration ?: config()
         check(c.apiKey.isNotBlank() || c.provider == Provider.OPENAI_COMPATIBLE) { "no API key is set" }
         // The tools never stand in the way of an answer: without them the model still answers.
         val turn = Turn(hub?.let { runCatching { it.toolbox() }.getOrNull() } ?: Toolbox(emptyList(), ""))

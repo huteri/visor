@@ -78,12 +78,19 @@ internal class DiagnosticLifetime {
 
     @Synchronized fun ticket(): Long = generation
 
+    /** Non-suspending UI/history publication is atomic with generation revocation. */
+    @Synchronized fun publish(ticket: Long, block: () -> Unit) {
+        if (!closed && ticket == generation) block()
+    }
+
     @Synchronized fun begin(
         ticket: Long, interactions: Set<String>, now: () -> Long,
         onNote: (String) -> Unit = {}, onCancel: () -> Unit = {},
+        budgetMs: Long = DiagnosticLease.BUDGET_MS,
+        allowed: () -> Boolean = { true },
     ): DiagnosticLease? {
-        if (closed || ticket != generation || active != null || interactions.any { it in completed }) return null
-        val lease = DiagnosticLease(now) { ticket == ticket() }
+        if (closed || ticket != generation || active != null || !allowed() || interactions.any { it in completed }) return null
+        val lease = DiagnosticLease(now, { ticket == ticket() && allowed() }, budgetMs)
         ids = interactions
         active = lease
         note = onNote
@@ -108,7 +115,7 @@ internal class DiagnosticLifetime {
 }
 
 /** Every diagnostic write and late synthesis result must still own the original interaction. */
-internal class DiagnosticLease(private val now: () -> Long, private val current: () -> Boolean) {
+internal class DiagnosticLease(private val now: () -> Long, private val current: () -> Boolean, private val budgetMs: Long = BUDGET_MS) {
     private val started = now()
     @Volatile private var revoked = false
     val elapsedMs: Long get() = now() - started
@@ -116,7 +123,7 @@ internal class DiagnosticLease(private val now: () -> Long, private val current:
 
     suspend fun check() {
         kotlinx.coroutines.currentCoroutineContext().ensureActive()
-        if (revoked || !current() || elapsedMs >= BUDGET_MS) throw kotlinx.coroutines.CancellationException("diagnostic no longer active")
+        if (revoked || !current() || elapsedMs >= budgetMs) throw kotlinx.coroutines.CancellationException("diagnostic no longer active")
     }
 
     suspend fun <T> prepare(block: suspend () -> T): T {

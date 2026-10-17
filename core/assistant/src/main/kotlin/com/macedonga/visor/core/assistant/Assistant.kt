@@ -176,7 +176,7 @@ class Assistant(
      * is answered only if no ev57 for it has come a moment after it ended.
      */
     private fun listen(l: Link, interaction: String) {
-        l.diagnostic.invalidate("new-microphone")
+        l.invalidateTurns("new-microphone")
         ears?.stop()
         val ended = CompletableDeferred<Unit>().also { micEnded = it }
         l.listening = interaction
@@ -187,25 +187,34 @@ class Assistant(
             context, l.locale, continuous = true,
             onUtterance = { text, startMs, _ ->
                 val diagnosticTicket = l.diagnostic.ticket()
+                val progressTicket = l.progress.ticket()
+                val turnConfig = store.config.value
                 scope.launch {
                     delay(OWN_RECOGNITION_GRACE_MS)
                     if (interaction in l.closed || !l.fallback.allowed(recognition)) return@launch
                     if (TimeoutDiagnostic.recognize(text) != null && l.diagnostic.ticket() != diagnosticTicket) return@launch
+                    if (AssistantTurnRouter.shouldDropProgressUtterance(turnConfig, liveAi.active, progressTicket, l.progress.ticket())) return@launch
                     when {
                         // The question itself, which the glasses recognised and sent as ev57.
                         interaction in l.taken && !l.answered.contains(interaction) -> Unit
                         // After an answer: a follow-up, a sub-interaction of its own as the server opens one.
                         interaction in l.answered -> {
-                            l.diagnostic.invalidate("new-followup")
+                            l.invalidateTurns("new-followup")
                             val followupTicket = l.diagnostic.ticket()
+                            val followupProgressTicket = l.progress.ticket()
                             val sub = java.util.UUID.randomUUID().toString()
                             if (TimeoutDiagnostic.recognize(text) == null) say("Heard \"$text\" myself: a follow-up, answered as $sub")
-                            if (TimeoutDiagnostic.recognize(text) == null) {
-                                l.mux.send(checkNotNull(l.m0), netEvent(EV_START_OF_USER_SPEECH, ThriftWriter().str(1, sub).i64(2, startMs).done()), messageType = MT_NET_EVENT)
-                            } else l.sessionOf[sub] = interaction
+                            when (AssistantTurnRouter.routeFollowup(text, turnConfig, liveAi.active)) {
+                                FollowupAction.PREAMBLE -> {
+                                    l.mux.send(checkNotNull(l.m0), netEvent(EV_START_OF_USER_SPEECH, ThriftWriter().str(1, sub).i64(2, startMs).done()), messageType = MT_NET_EVENT)
+                                }
+                                FollowupAction.SESSION_ALIAS -> {
+                                    l.sessionOf[sub] = interaction
+                                }
+                            }
                             if (!l.fallback.allowed(recognition)) return@launch
                             l.taken.add(sub)
-                            answer(l, sub, text, Visual(null, "", "", false, ""), followupTicket)
+                            answer(l, sub, text, Visual(null, "", "", false, ""), followupTicket, followupProgressTicket, turnConfig)
                         }
                         // Nothing came from the glasses: the whole question was left to the server. Their own
                         // transcript comes only after their stream ends, so wait for that, and never answer the wake word.
@@ -216,7 +225,7 @@ class Assistant(
                             if (interaction in l.taken || interaction in l.closed || !l.fallback.allowed(recognition)) return@launch
                             l.taken.add(interaction)
                             if (TimeoutDiagnostic.recognize(text) == null) say("Heard \"$text\" myself: the glasses left this question to the server")
-                            answer(l, interaction, text, Visual(null, "", "", false, ""), diagnosticTicket)
+                            answer(l, interaction, text, Visual(null, "", "", false, ""), diagnosticTicket, progressTicket, turnConfig)
                         }
                     }
                 }
@@ -235,7 +244,7 @@ class Assistant(
     private var link: Link? = null
         set(value) {
             if (field !== value) {
-                field?.diagnostic?.invalidate("link-replaced")
+                field?.invalidateTurns("link-replaced")
                 field?.incoming?.close()
             }
             field = value
@@ -244,6 +253,11 @@ class Assistant(
     /** svc15 state for one Bluetooth session. */
     private class Link(val mux: DataXConnection) {
         val diagnostic = DiagnosticLifetime()
+        val progress = DiagnosticLifetime()
+        fun invalidateTurns(reason: String) {
+            diagnostic.invalidate(reason)
+            progress.invalidate(reason)
+        }
         val incoming = AssistantMessageDispatcher(SystemClock::elapsedRealtime)
         // Whether the current turn is a session (SCI) one, which only plays streamed answers.
         @Volatile var sessionTurn = false
@@ -321,6 +335,14 @@ class Assistant(
                 if (ready && enabled) connection.submit { mux -> scope.launch { bringUp(mux) } }
             }
         }
+        scope.launch {
+            var selected = store.config.value.usesSpokenProgress()
+            store.config.collect { config ->
+                val next = config.usesSpokenProgress()
+                if (selected && !next) link?.progress?.invalidate("progress-disabled")
+                selected = next
+            }
+        }
         scope.launch { camera?.frames?.collect { if (it) liveAi.onFirstFrame() } }
         // A language switch restarts the glasses' assistant, which closes our channels: register again once it settles.
         scope.launch {
@@ -330,7 +352,7 @@ class Assistant(
                 val l = link ?: return@collect
                 if (channel != (l.m0 ?: -1) and 0x7FFF && channel != (l.s0 ?: -1) and 0x7FFF) return@collect
                 l.incoming.close()
-                l.diagnostic.invalidate("channel-closed")
+                l.invalidateTurns("channel-closed")
                 again?.cancel()
                 again = scope.launch {
                     delay(REGISTER_AGAIN_MS)
@@ -438,7 +460,7 @@ class Assistant(
         if (message.info.flags.isClosed) {
             l.incoming.closeChannel(channel)
             if (channel == l.m0?.and(0x7FFF) || channel == l.s0?.and(0x7FFF)) {
-                l.diagnostic.invalidate("channel-closed")
+                l.invalidateTurns("channel-closed")
                 l.incoming.close()
             }
             return
@@ -490,7 +512,7 @@ class Assistant(
 
     private suspend fun envelopeMessage(l: Link, inner: Int, blob: ByteArray) {
         if (inner == MT_START_INTERACTION) {
-            l.diagnostic.invalidate("new-interaction")
+            l.invalidateTurns("new-interaction")
             val fields = runCatching { Thrift.loads(blob) }.getOrDefault(emptyMap())
             // Use case 3 is LIVE_AI_INTERACTION; after a switch to LIVE_AI the next interaction is the session's.
             if (fields[5] == 3L || liveAi.phase.value == LiveAiPhase.STARTING) liveAi.onStartInteraction(fields, l.locale)
@@ -530,6 +552,7 @@ class Assistant(
                 runCatching { Thrift.loads(event.body)[1].asText() }.getOrNull()?.takeIf { it.isNotEmpty() }?.let {
                     l.closed.add(it)
                     l.diagnostic.remoteComplete(it)
+                    l.progress.remoteComplete(it)
                 }
                 say("Assistant: remote interaction complete ${describe(event.body)}")
                 liveAi.end("the glasses completed the interaction")
@@ -586,8 +609,10 @@ class Assistant(
         val interaction = m[1].asText()
         val transcript = m[2].asStruct()[1].asStruct()[1].asText()
         if (interaction.isEmpty() || !l.taken.add(interaction)) return
-        l.diagnostic.invalidate("new-request")
+        l.invalidateTurns("new-request")
         val diagnosticTicket = l.diagnostic.ticket()
+        val progressTicket = l.progress.ticket()
+        val turnConfig = store.config.value
         // In a session the request has its own id; the microphone's is the session's, and it is the same turn.
         l.listening?.takeIf { it != interaction }?.let {
             l.sessionOf[interaction] = it
@@ -621,7 +646,7 @@ class Assistant(
                 sendReply(l, interaction, transcript, waiting.conversation, slot(m[26], "SL:CONTENT_EXACT").ifEmpty { transcript })
             }
             intent == "IN:REPLY_MESSAGE" -> scope.launch { replyRequested(l, interaction, transcript, slot(m[26], "SL:CONTENT_EXACT")) }
-            else -> scope.launch { answer(l, interaction, transcript, visual, diagnosticTicket) }
+            else -> scope.launch { answer(l, interaction, transcript, visual, diagnosticTicket, progressTicket, turnConfig) }
         }
     }
 
@@ -729,10 +754,95 @@ class Assistant(
         }
     }
 
-    private suspend fun answer(l: Link, interaction: String, transcript: String, visual: Visual, diagnosticTicket: Long = l.diagnostic.ticket()) {
-        TimeoutDiagnostic.recognize(transcript)?.let {
-            runDiagnostic(l, interaction, transcript, it, diagnosticTicket)
-            return
+    private suspend fun progressAnswer(
+        l: Link, interaction: String, transcript: String, visual: Visual, ticket: Long, config: AssistantConfig,
+    ) {
+        val aliases = setOfNotNull(interaction, l.sessionOf[interaction])
+        if (link !== l || aliases.any { it in l.closed }) return
+        val streamId = l.streamIds[interaction] ?: l.sessionOf[interaction]?.let { l.streamIds[it] }.orEmpty()
+        val turnLocale = l.locale
+        val localized = context.createConfigurationContext(android.content.res.Configuration(context.resources.configuration).apply { setLocale(turnLocale) })
+        val acknowledgement = localized.getString(R.string.progress_acknowledgement)
+        val progress = localized.getString(R.string.progress_working)
+        val started = System.currentTimeMillis()
+        val monotonicStart = SystemClock.elapsedRealtime()
+        var owned: DiagnosticLease? = null
+        var picture: ByteArray? = null
+        try {
+            ProgressTurn(SystemClock::elapsedRealtime).run(l.progress, ticket, aliases, streamId,
+                controller = { lease, stream ->
+                    owned = lease
+                    l.progress.publish(ticket) {
+                        record(TurnRecord(interaction, started, transcript))
+                        _phase.value = AssistantPhase.THINKING
+                    }
+                    val wire = ProgressWire(lease, interaction, transcript, acknowledgement, stream,
+                        checkNotNull(l.m0), checkNotNull(l.s0), SystemClock::elapsedRealtime, System::currentTimeMillis,
+                        { delay(it) }) { channel, bytes, type -> l.mux.send(channel, bytes, messageType = type) }
+                    val sink = object : ProgressSink by wire {
+                        override suspend fun start() {
+                            wire.start()
+                            lease.prepare { l.progress.publish(ticket) { _phase.value = AssistantPhase.SPEAKING } }
+                        }
+                    }
+                    ProgressSpeech(SystemClock::elapsedRealtime, { delay(it) },
+                        { voice.speechPcm(it, turnLocale) }, { AndroidProgressEncoder() }, sink)
+                }, acknowledgement = acknowledgement, progress = progress,
+                model = {
+                    val lease = checkNotNull(owned)
+                    val live = if (config.vision) {
+                        try { lease.prepare { liveFrame()?.let { toModelJpeg(it) } } }
+                        catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                        catch (_: Exception) { null }
+                    } else null
+                    val visualQuestion = live != null || (config.vision && (visual.glassesCaptured || visual.glassesWantImage || soundsVisual(transcript)))
+                    val image = live ?: if (visualQuestion) lease.prepare { photo(l, interaction, visual, lease) } else null
+                    picture = image
+                    val note = if (visualQuestion && image == null) "The wearer seems to ask about what they see, but the photo from the glasses did not arrive; say so briefly." else ""
+                    lease.prepare { brain.answer(transcript, turnLocale, pastOf(interaction), image, note, configuration = config) }
+                },
+                completed = { result ->
+                    val imagePath = picture?.let { bytes ->
+                        val file = File(photos, "$interaction.jpg")
+                        runCatching { photos.mkdirs(); file.writeBytes(bytes); file.path }.getOrDefault("")
+                    }.orEmpty()
+                    update(interaction) { it.copy(answer = result.reply.text, remembered = result.reply.remembered,
+                        actions = result.reply.actions, modelMs = result.modelMs, sentMs = result.audioMs, image = imagePath) }
+                    l.answered.add(interaction)
+                    l.sessionOf[interaction]?.let { l.answered.add(it) }
+                },
+                failed = { error -> update(interaction) { it.copy(problem = "Spoken progress failed (${error.javaClass.simpleName})",
+                    modelMs = SystemClock.elapsedRealtime() - monotonicStart) } },
+                ownership = { link === l && store.config.value.usesSpokenProgress() && !liveAi.active && aliases.none { it in l.closed } },
+            )
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            if (cancelled is kotlinx.coroutines.TimeoutCancellationException || SystemClock.elapsedRealtime() - monotonicStart >= ProgressSpeech.BUDGET_MS) {
+                l.progress.publish(ticket) { update(interaction) { it.copy(problem = "Spoken progress timed out") } }
+            }
+            throw cancelled
+        } catch (error: Exception) {
+            say("Spoken progress failed: ${error.javaClass.simpleName}")
+        } finally {
+            if (link === l) l.progress.publish(ticket) { _phase.value = AssistantPhase.LISTENING }
+        }
+    }
+
+    private suspend fun answer(
+        l: Link, interaction: String, transcript: String, visual: Visual,
+        diagnosticTicket: Long = l.diagnostic.ticket(), progressTicket: Long = l.progress.ticket(),
+        turnConfig: AssistantConfig = store.config.value,
+    ) {
+        when (AssistantTurnRouter.routeAnswer(transcript, turnConfig, liveAi.active)) {
+            AnswerRoute.DIAGNOSTIC -> {
+                val diagnostic = checkNotNull(TimeoutDiagnostic.recognize(transcript))
+                runDiagnostic(l, interaction, transcript, diagnostic, diagnosticTicket)
+                return
+            }
+            AnswerRoute.PROGRESS -> {
+                progressAnswer(l, interaction, transcript, visual, progressTicket, turnConfig)
+                return
+            }
+            AnswerRoute.ORDINARY -> Unit
         }
         val started = System.currentTimeMillis()
         record(TurnRecord(interaction, started, transcript))
@@ -836,7 +946,7 @@ class Assistant(
      * airship. If they did not take one, ask with RemoteImageCaptureRequest (73); they answer 74
      * with the image's id and then send the file.
      */
-    private suspend fun photo(l: Link, interaction: String, visual: Visual): ByteArray? {
+    private suspend fun photo(l: Link, interaction: String, visual: Visual, speechLease: DiagnosticLease? = null): ByteArray? {
         glassesPhotos?.take(visual.imageUuid)?.let { bytes ->
             toModelJpeg(bytes)?.let {
                 say("The photo had come already on svc53, ${bytes.size / 1000} KB")
@@ -855,7 +965,7 @@ class Assistant(
             if (!visual.glassesCaptured) {
                 val m0 = l.m0 ?: return null
                 val request = ThriftWriter().bool(1, false).bool(2, true).bool(3, false).str(4, interaction).done()
-                l.mux.send(m0, netEvent(EV_REMOTE_IMAGE_CAPTURE_REQUEST, request), messageType = MT_NET_EVENT)
+                sendSpeech(l, speechLease, m0, netEvent(EV_REMOTE_IMAGE_CAPTURE_REQUEST, request), MT_NET_EVENT)
                 say("Asked the glasses for a photo")
             } else {
                 say("The glasses took a photo (${visual.imageUuid.ifEmpty { visual.captureHandle }}); waiting for it")

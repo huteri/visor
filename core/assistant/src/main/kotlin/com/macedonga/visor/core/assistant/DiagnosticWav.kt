@@ -5,13 +5,16 @@ import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-/** Diagnostic-only strict PCM reader. Validate the complete container before allocating audio. */
+/** Strict bounded PCM reader. Validate the complete container before allocating audio. */
 internal object DiagnosticWav {
     private const val MAX_BYTES = 8L * 1024 * 1024
     private const val OUTPUT_RATE = 48_000
     private val rates = setOf(8_000, 11_025, 12_000, 16_000, 22_050, 24_000, 32_000, 44_100, 48_000)
 
-    fun read(file: File, maxSeconds: Int, checkActive: () -> Unit = {}): ShortArray {
+    fun read(file: File, maxSeconds: Int, checkActive: () -> Unit = {}): ShortArray =
+        readBoundedPcm(file, maxSeconds, checkActive)
+
+    fun readBoundedPcm(file: File, maxSeconds: Int, checkActive: () -> Unit = {}): ShortArray {
         require(maxSeconds in 1..25)
         checkActive()
         return RandomAccessFile(file, "r").use { input ->

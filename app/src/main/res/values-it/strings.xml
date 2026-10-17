@@ -750,4 +750,7 @@
     <string name="meta_ai_action_failed">%1$s · %2$s · non riuscito</string>
     <string name="ai_timeout_diagnostic_title">Test facoltativi del timeout degli occhiali</string>
     <string name="ai_timeout_diagnostic_help">Con Visor attivo, pronuncia esattamente “Hey Meta, test delayed answer”: nessuna voce per 25 secondi, poi “Timeout test completed” con la voce selezionata. Oppure pronuncia “Hey Meta, test streaming answer”: la sintesi vocale del telefono dice “Timeout test started”, trasmette silenzio e dice “Timeout test completed” circa 25 secondi dopo il primo audio, in una sola risposta. I test non contattano il fornitore IA e non cambiano la voce salvata. Il limite è di 60 secondi per test. Una nuova interazione o una disconnessione interrompe il test, senza riprodurlo di nuovo. Sono esperimenti, non una correzione del timeout. Consulta Impostazioni → Avanzate → Registro eventi per i tempi indicati da Speech diagnostic.</string>
+    <string name="ai_spoken_progress">Avanzamento vocale (sperimentale)</string>
+    <string name="ai_spoken_progress_sub">Solo per le domande dagli occhiali. Usa la sintesi vocale del telefono per una conferma iniziale, brevi aggiornamenti ogni 15 secondi e la risposta reale in un unico flusso. Limite totale di due minuti. La voce abituale resta invariata.</string>
+    <string name="ai_spoken_progress_unavailable">Solo con un provider compatibile OpenAI</string>
 </resources>

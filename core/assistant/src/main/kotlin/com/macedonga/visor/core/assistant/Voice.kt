@@ -12,10 +12,8 @@ import java.nio.ByteOrder
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
-import kotlin.coroutines.resume
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -44,6 +42,18 @@ class Voice(private val context: Context) {
         synthesize(text, locale, wav)
         val pcm = withContext(Dispatchers.Default) { readWav(wav) }
         withContext(Dispatchers.Default) { encodeOpus(resample(pcm.samples, pcm.rate, 48_000)) }
+    }
+
+    /** No encoded clips: the caller owns the one live encoder, outside this synthesis lock. */
+    internal suspend fun speechPcm(text: String, locale: Locale): ShortArray = lock.withLock {
+        val wav = File(context.cacheDir, "progress-${UUID.randomUUID()}.wav")
+        try {
+            synthesize(text, locale, wav, diagnostic = true)
+            withContext(Dispatchers.Default) {
+                val job = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]
+                DiagnosticWav.readBoundedPcm(wav, 25) { job?.ensureActive() }
+            }
+        } finally { wav.delete() }
     }
 
     /** Diagnostic only: phone TTS, one 48 kHz PCM timeline, one existing Opus encoder instance. */
@@ -95,12 +105,16 @@ class Voice(private val context: Context) {
 
     private suspend fun ready(): TextToSpeech {
         tts?.let { return it }
-        var made: TextToSpeech? = null
-        val status = suspendCancellableCoroutine { cont ->
-            made = TextToSpeech(context) { cont.resume(it) }
+        val initialized = CompletableDeferred<Int>()
+        val engine = TextToSpeech(context) { initialized.complete(it) }
+        try {
+            val status = withTimeout(15_000) { initialized.await() }
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            check(status == TextToSpeech.SUCCESS) { "the phone has no working text to speech" }
+        } catch (error: Throwable) {
+            engine.shutdown()
+            throw error
         }
-        val engine = checkNotNull(made)
-        check(status == TextToSpeech.SUCCESS) { "the phone has no working text to speech" }
         engine.setOnUtteranceProgressListener(
             object : UtteranceProgressListener() {
                 override fun onStart(utteranceId: String) = Unit

@@ -189,6 +189,16 @@ fun AssistantSettingsScreen(open: (NavKey) -> Unit, model: AssistantViewModel = 
                             onPick = { on -> model.store.update { it.copy(glassesVoice = on) } },
                         )
                     },
+                    {
+                        if (claude) ValueRow(
+                            stringResource(R.string.ai_spoken_progress), stringResource(R.string.ai_spoken_progress_unavailable),
+                            onClick = null, sub = stringResource(R.string.ai_spoken_progress_sub),
+                        ) else ToggleRow(
+                            stringResource(R.string.ai_spoken_progress), config.spokenProgress,
+                            onChange = { on -> model.store.update { it.copy(spokenProgress = on) } },
+                            sub = stringResource(R.string.ai_spoken_progress_sub),
+                        )
+                    },
                     { VisorToggleRow(model.toggles.byId("vision")!!, sub = stringResource(R.string.ai_vision_sub)) },
                     if (claude) row { VisorToggleRow(model.toggles.byId("web")!!, sub = stringResource(R.string.ai_web_sub)) } else null,
                     {

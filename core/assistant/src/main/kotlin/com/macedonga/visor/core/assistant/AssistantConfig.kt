@@ -19,6 +19,7 @@ data class AssistantConfig(
     val vision: Boolean = true,
     // Answers in the glasses' own voice, the one that reads notifications; off, the phone's voice streamed to them.
     val glassesVoice: Boolean = true,
+    val spokenProgress: Boolean = false,
     val instructions: String = "",
     // How long a conversation is remembered after its last question.
     val memoryMinutes: Int = 10,
@@ -43,6 +44,7 @@ class AssistantConfigStore(context: Context) {
             .putBoolean("web_search", next.webSearch)
             .putBoolean("vision", next.vision)
             .putBoolean("glasses_voice", next.glassesVoice)
+            .putBoolean("spoken_progress", next.spokenProgress)
             .putString("instructions", next.instructions)
             .putInt("memory_minutes", next.memoryMinutes)
             .apply()
@@ -61,6 +63,7 @@ class AssistantConfigStore(context: Context) {
             webSearch = prefs.getBoolean("web_search", d.webSearch),
             vision = prefs.getBoolean("vision", d.vision),
             glassesVoice = prefs.getBoolean("glasses_voice", d.glassesVoice),
+            spokenProgress = prefs.getBoolean("spoken_progress", d.spokenProgress),
             instructions = prefs.getString("instructions", d.instructions).orEmpty(),
             memoryMinutes = prefs.getInt("memory_minutes", d.memoryMinutes),
         )

@@ -752,4 +752,7 @@
     <string name="meta_ai_action_failed">%1$s · %2$s · did not work</string>
     <string name="ai_timeout_diagnostic_title">Optional glasses timeout tests</string>
     <string name="ai_timeout_diagnostic_help">With Visor enabled, say exactly “Hey Meta, test delayed answer”: no speech for 25 seconds, then “Timeout test completed” in your selected voice. Or say “Hey Meta, test streaming answer”: phone TTS says “Timeout test started”, streams silence, then says “Timeout test completed” about 25 seconds after the first audio, in one response. Neither test contacts your AI provider or changes your saved voice. Each has a 60-second limit. A new interaction or disconnection stops the test; nothing replays. These are experiments, not a timeout fix. Check Settings → Advanced → Event log for Speech diagnostic timing events.</string>
+    <string name="ai_spoken_progress">Spoken progress (experimental)</string>
+    <string name="ai_spoken_progress_sub">Glasses questions only. Uses phone text-to-speech for an early acknowledgement, brief updates every 15 seconds and the real answer on one live stream. Two-minute total cap. Your ordinary voice preference is unchanged.</string>
+    <string name="ai_spoken_progress_unavailable">OpenAI-compatible provider only</string>
 </resources>

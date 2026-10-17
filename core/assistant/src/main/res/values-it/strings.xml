@@ -1,3 +1,5 @@
 <resources>
     <string name="visual_request_unsupported">Questo formato di richiesta visiva degli occhiali non è ancora supportato. Questo evento è solo diagnostico, non una domanda nella cronologia. Il riconoscimento alternativo del microfono viene fermato solo per un turno corrispondente verificato; altri percorsi dell’assistente possono comunque inviare una foto. Per aiutare la diagnosi, usa la cattura visiva privata in Impostazioni → Avanzate → Registro eventi.</string>
+    <string name="progress_acknowledgement">Sto lavorando alla tua richiesta.</string>
+    <string name="progress_working">Sto ancora lavorando alla tua richiesta.</string>
 </resources>
