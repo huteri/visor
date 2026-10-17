@@ -1222,8 +1222,8 @@ class Assistant(
     private fun update(interaction: String, change: (TurnRecord) -> TurnRecord) = diary.update(interaction, change)
 
     private companion object {
-        // The glasses give the whole turn 20 s; speech and streaming need some of it.
-        const val TURN_BUDGET_MS = 16_000L
+        // Experimental ordinary-answer budget; firmware may close the interaction earlier.
+        const val TURN_BUDGET_MS = 120_000L
         const val HOLD_ON_MS = 3_000L
         /** How long the glasses' own recognition gets to send its ev57 before the server's answer goes instead. */
         const val OWN_RECOGNITION_GRACE_MS = 1_200L
