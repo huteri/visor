@@ -108,9 +108,14 @@ internal class DiagnosticLifetime {
         cancel = {}
     }
 
-    @Synchronized fun remoteComplete(interaction: String) {
+    @Synchronized fun remoteComplete(interaction: String, code: Long? = null): Boolean {
         completed.add(interaction)
-        if (interaction in ids) invalidate("remote-complete")
+        val owned = interaction in ids
+        if (owned) {
+            note("remote-close-code-${code ?: "unknown"}")
+            invalidate("remote-complete")
+        }
+        return owned
     }
 }
 
@@ -140,13 +145,19 @@ internal class DiagnosticLease(private val now: () -> Long, private val current:
 
 /** Explicit voice-only opt-in; never applied to phone chat. */
 internal object TimeoutDiagnostic {
-    enum class Mode { DELAYED, STREAMING }
+    enum class Mode {
+        DELAYED, STREAMING, NATIVE_BASELINE, NATIVE_INTERIM, NATIVE_COMPLETION;
+        val nativeProbe: Boolean get() = this == NATIVE_BASELINE || this == NATIVE_INTERIM || this == NATIVE_COMPLETION
+    }
 
     fun recognize(transcript: String): Mode? {
         val command = transcript.trim().replace(wake, "").trim().trimEnd('.', '!', '?').trim()
         return when {
             command.equals("test delayed answer", ignoreCase = true) -> Mode.DELAYED
             command.equals("test streaming answer", ignoreCase = true) -> Mode.STREAMING
+            command.equals("test native baseline", ignoreCase = true) -> Mode.NATIVE_BASELINE
+            command.equals("test native interim", ignoreCase = true) -> Mode.NATIVE_INTERIM
+            command.equals("test native completion", ignoreCase = true) -> Mode.NATIVE_COMPLETION
             else -> null
         }
     }

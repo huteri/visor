@@ -339,7 +339,10 @@ class Assistant(
         scope.launch {
             var selected = store.config.value
             store.config.collect { config ->
-                if (selected != config) link?.progress?.invalidate("progress-settings-changed")
+                if (selected != config) {
+                    link?.progress?.invalidate("progress-settings-changed")
+                    link?.diagnostic?.invalidate("diagnostic-settings-changed")
+                }
                 selected = config
             }
         }
@@ -549,12 +552,14 @@ class Assistant(
                 if (liveAi.active && runCatching { Thrift.loads(event.body)[2] }.getOrNull() == 0L) liveAi.end("the session closed")
             }
             EV_REMOTE_INTERACTION_COMPLETE -> {
-                runCatching { Thrift.loads(event.body)[1].asText() }.getOrNull()?.takeIf { it.isNotEmpty() }?.let {
-                    l.closed.add(it)
-                    l.diagnostic.remoteComplete(it)
-                    l.progress.remoteComplete(it)
-                }
-                say("Assistant: remote interaction complete ${describe(event.body)}")
+                val fields = runCatching { Thrift.loads(event.body) }.getOrDefault(emptyMap())
+                val id = fields[1].asText()
+                val diagnosticClosed = if (id.isNotEmpty()) {
+                    l.closed.add(id)
+                    l.progress.remoteComplete(id)
+                    l.diagnostic.remoteComplete(id, fields[2] as? Long)
+                } else false
+                if (!diagnosticClosed) say("Assistant: remote interaction complete ${describe(event.body)}")
                 liveAi.end("the glasses completed the interaction")
             }
             EV_FRAME_KEEP_ALIVE_RESPONSE, EV_KEEP_MWA_ALIVE -> Unit
@@ -636,7 +641,7 @@ class Assistant(
         // "Hey Meta" and nothing after it: the glasses close the turn at once.
         if (intent == "IN:WAKE_WORD" && diagnosticMode == null) return
         when {
-            diagnosticMode != null -> scope.launch { runDiagnostic(l, interaction, transcript, diagnosticMode, diagnosticTicket) }
+            diagnosticMode != null -> scope.launch { runDiagnostic(l, interaction, transcript, diagnosticMode, diagnosticTicket, turnConfig) }
             // The glasses' own words for giving up.
             waiting != null && intent in CANCEL_INTENTS -> {
                 awaitingReply = null
@@ -696,9 +701,34 @@ class Assistant(
 
     // --- answering -----------------------------------------------------------
 
-    private suspend fun runDiagnostic(l: Link, interaction: String, transcript: String, mode: TimeoutDiagnostic.Mode, ticket: Long) {
+    private suspend fun runDiagnostic(
+        l: Link, interaction: String, transcript: String, mode: TimeoutDiagnostic.Mode, ticket: Long,
+        config: AssistantConfig = store.config.value,
+    ) {
         val aliases = setOfNotNull(interaction, l.sessionOf[interaction])
         if (link !== l || aliases.any { it in l.closed }) return
+        if (mode.nativeProbe) {
+            val selectedVoice = glassesVoice()
+            try {
+                NativeTtsDiagnostic.runOwned(l.diagnostic, ticket, aliases, SystemClock::elapsedRealtime,
+                    { link === l && aliases.none { it in l.closed } && store.config.value == config &&
+                        NativeTtsDiagnostic.allowed(store.config.value, l.sessionTurn, liveAi.active, selectedVoice, glassesVoice()) },
+                    mode, l.simplified, interaction, transcript, selectedVoice, { delay(it) },
+                    { bytes, type -> l.mux.send(checkNotNull(l.m0), bytes, messageType = type) },
+                    note = { say("Speech diagnostic mode=${mode.name.lowercase()} $it") },
+                    completed = {
+                        l.answered.add(interaction)
+                        l.sessionOf[interaction]?.let { l.answered.add(it) }
+                    })
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // Controller already logged only elapsed time and exception type.
+            } finally {
+                if (link === l) l.diagnostic.publish(ticket) { _phase.value = AssistantPhase.LISTENING }
+            }
+            return
+        }
         val job = kotlinx.coroutines.currentCoroutineContext()[Job]
         var lease: DiagnosticLease? = null
         fun note(event: String) = say("Speech diagnostic mode=${mode.name.lowercase()} elapsedMs=${lease?.elapsedMs ?: 0} event=$event")
@@ -873,7 +903,7 @@ class Assistant(
         when (AssistantTurnRouter.routeAnswer(transcript, turnConfig, liveAi.active)) {
             AnswerRoute.DIAGNOSTIC -> {
                 val diagnostic = checkNotNull(TimeoutDiagnostic.recognize(transcript))
-                runDiagnostic(l, interaction, transcript, diagnostic, diagnosticTicket)
+                runDiagnostic(l, interaction, transcript, diagnostic, diagnosticTicket, turnConfig)
                 return
             }
             AnswerRoute.PROGRESS, AnswerRoute.NATIVE_PROGRESS -> {

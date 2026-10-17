@@ -91,6 +91,43 @@ They also have a broadcast receiver that drives the app from adb (`app/src/debug
 
 A tag like `v1.2.3` builds the signed release APK in CI and publishes it as a GitHub release (`.github/workflows/release.yml`).
 
+## Native speech protocol diagnostics (test builds)
+
+These probes are diagnostics, **not a timeout or native-progress fix**. No hardware playback or longer
+interaction lifetime is implied by a successful build. Each exact spoken phrase opts in for one glasses
+turn; phone chat is unchanged. Existing `test delayed answer` and `test streaming answer` keep their behavior.
+
+1. Use a build containing these probes. Enable Assistant and select the glasses' own voice. Exit Live AI
+   and session conversation mode; native speech is unsupported there. Existing settings survive APK updates.
+   Spoken progress, generated progress, native-progress and backend settings do not enable these probes.
+2. Start each probe in a fresh “Hey Meta” interaction, not a follow-up:
+
+   | Phrase after “Hey Meta” | Wire experiment |
+   |---|---|
+   | `test native baseline` | Ordinary native framing immediately, including ev60 `ttsMessage`: “Native baseline test”. |
+   | `test native interim` | Immediate non-streaming VARM only, **no ev60**; ordinary final pair at 35 seconds: “Native test completed”. |
+   | `test native completion` | Immediate ordinary native pair, including ev60 `ttsMessage`: “Native test started”; same final pair at 35 seconds. |
+
+3. Record separately whether the initial sentence was audible, whether the final sentence was audible,
+   and when the glasses closed. Do not infer speech from a dispatch log. The completion-bearing interim
+   may close the turn immediately; that is useful evidence, not a failure to work around. If the glasses
+   close at roughly 25 seconds, no 35-second write is attempted after the close is received.
+4. Wait for closure before the next probe. A new microphone/request/follow-up, channel loss, settings
+   change or cancellation revokes pending writes. Hard local budget is 45 seconds; final target is measured
+   from probe start, not speech playback. Transport bytes already in flight cannot be recalled.
+
+All three use ev71/52/342 preamble and selected native voice, with ordinary field-30-dependent native
+ordering (simplified: ev53 then ev60; non-simplified: ev60 then ev53). The two 35-second probes send identical
+`AwaitingResponse` keepalives at 3-second targets through 33 seconds (20,000 ms value, increasing sequence).
+They send no phone audio, model/phrase/status/photo requests, or retryable diary entries. Native voice must
+be selected explicitly; otherwise the reserved command logs rejection instead of silently using phone TTS
+or asking a model. Near-matching phrases are normal questions, not diagnostic commands.
+
+`Speech diagnostic` notes contain mode, monotonic elapsed milliseconds, event IDs/message types,
+simplified-order flag and numeric remote close code (ev360 field 2), not transcripts or payloads. Existing
+app/debug wire logs remain separate and may contain private data; do not share raw logs. These probes
+cannot prove the glasses played audio or accepted a longer interaction without a physical test.
+
 ## How it is built
 
 | Module | What it holds |
