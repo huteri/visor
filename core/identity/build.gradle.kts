@@ -19,6 +19,7 @@ android {
     defaultConfig {
         buildConfigField("String", "META_HW_TOKEN", "\"${metaToken("VISOR_META_HW_TOKEN")}\"")
         buildConfigField("String", "META_AR_TOKEN", "\"${metaToken("VISOR_META_AR_TOKEN")}\"")
+        buildConfigField("String", "META_FRL_TOKEN", "\"${metaToken("VISOR_META_FRL_TOKEN")}\"")
     }
 
     buildFeatures {

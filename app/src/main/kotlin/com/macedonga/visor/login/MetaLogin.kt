@@ -2,13 +2,22 @@ package com.macedonga.visor.login
 
 import android.content.Context
 import android.net.Uri
+import android.os.Build
 import android.webkit.CookieManager
+import com.macedonga.visor.BuildConfig
+import com.macedonga.visor.core.identity.HttpPost
 import com.macedonga.visor.core.identity.KeystoreSealer
+import com.macedonga.visor.core.identity.UrlConnectionPost
+import com.macedonga.visor.core.identity.bloks.BloksClient
+import com.macedonga.visor.core.identity.bloks.BloksHost
+import com.macedonga.visor.core.identity.bloks.BloksSession
 import com.macedonga.visor.core.identity.token.AuthorizeRequest
 import com.macedonga.visor.core.identity.token.WebLoginSource
 import com.macedonga.visor.log.EventLog
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
+import java.util.Locale
+import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
@@ -22,7 +31,7 @@ import kotlinx.coroutines.launch
 /** The Meta login, for as long as the process lives. */
 @Singleton
 class MetaLogin @Inject constructor(
-    @ApplicationContext context: Context,
+    @ApplicationContext private val context: Context,
     private val log: EventLog,
 ) {
     val source = WebLoginSource(
@@ -85,6 +94,93 @@ class MetaLogin @Inject constructor(
                 Status.Failed(error.message ?: error.javaClass.simpleName)
             }
         }
+    }
+
+    /** The native login (Meta's Bloks screens, as the Meta AI app runs them) for the request [begin] made. */
+    fun nativeSession(darkMode: Boolean, host: BloksHost): BloksSession {
+        // Debug builds keep every answer, so a screen that misbehaves on a phone can be read afterwards.
+        val dump = File(context.filesDir, "bloks").takeIf { BuildConfig.DEBUG }?.apply {
+            deleteRecursively()
+            mkdirs()
+        }
+        var answers = 0
+        val http = HttpPost { url, headers, body ->
+            UrlConnectionPost.post(url, headers, body).also { reply ->
+                dump?.let { File(it, "%02d-%s.json".format(++answers, headers["X-FB-Friendly-Name"].orEmpty().substringAfterLast('.'))).writeBytes(reply.body) }
+            }
+        }
+        val client = BloksClient(
+            token = com.macedonga.visor.core.identity.BuildConfig.META_FRL_TOKEN,
+            locale = Locale.getDefault().toString(),
+            androidRelease = Build.VERSION.RELEASE,
+            apiLevel = Build.VERSION.SDK_INT,
+            http = http,
+        )
+        val trace = traceFile(context).apply {
+            parentFile?.mkdirs()
+            writeText("")
+        }
+        val started = System.currentTimeMillis()
+        return BloksSession(
+            client,
+            deviceId,
+            darkMode,
+            log = { line -> log.add("Login: $line") },
+            trace = { line ->
+                // A login is a few thousand lines; past a few megabytes something is looping and the rest says nothing new.
+                if (trace.length() < TRACE_LIMIT) {
+                    runCatching { trace.appendText("%7.3f  %s\n".format((System.currentTimeMillis() - started) / 1000.0, line)) }
+                }
+            },
+            host = host,
+        )
+    }
+
+    /** How the native login ended. A code goes through the same exchange as the web login's; a token is the FRLA. */
+    fun finishNative(outcome: BloksSession.Outcome) {
+        pending = null
+        when (outcome) {
+            is BloksSession.Outcome.Cancelled -> {
+                log.add("Login: closed before the end")
+                refresh()
+            }
+            is BloksSession.Outcome.Failed -> {
+                log.add("Login failed: ${outcome.reason}")
+                _status.value = Status.Failed(outcome.reason)
+            }
+            is BloksSession.Outcome.Code, is BloksSession.Outcome.Token -> {
+                _status.value = Status.Working
+                scope.launch {
+                    _status.value = try {
+                        if (outcome is BloksSession.Outcome.Code) {
+                            log.add("Login: Meta handed a code; exchanging it")
+                            source.finishCode(outcome.code)
+                        } else {
+                            log.add("Login: Meta handed the account token")
+                            source.finishToken((outcome as BloksSession.Outcome.Token).accessToken)
+                        }
+                        log.add("Login: logged in to Meta")
+                        Status.LoggedIn
+                    } catch (error: Exception) {
+                        log.add("Login failed: ${error.message}")
+                        Status.Failed(error.message ?: error.javaClass.simpleName)
+                    }
+                }
+            }
+        }
+    }
+
+    companion object {
+        private const val TRACE_LIMIT = 4L * 1024 * 1024
+
+        /** Every Bloks call of the last native login, shared with the event log. */
+        fun traceFile(context: Context): File = File(context.filesDir, "bloks-trace.log")
+    }
+
+    /** One id per install, as the Meta app keeps its `device_id`: the login's server state is tied to it. */
+    private val deviceId: String by lazy {
+        val prefs = context.getSharedPreferences("meta_login", Context.MODE_PRIVATE)
+        prefs.getString("device_id", null) ?: UUID.randomUUID().toString().also { prefs.edit().putString("device_id", it).apply() }
     }
 
     /** Forget the cached login and the page's session, so the next login starts clean. */

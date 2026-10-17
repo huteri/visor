@@ -125,6 +125,16 @@ class WebLoginSource(
         writeCache(exchangeCode(code, http))
     }
 
+    /** The native login was handed a code: exchange it and cache the FRLA. */
+    fun finishCode(code: String) {
+        writeCache(exchangeCode(code, http))
+    }
+
+    /** The native login was handed the FRLA itself. */
+    fun finishToken(frla: String) {
+        writeCache(frla)
+    }
+
     /** Forget the cached login. The WebView's cookies are the app's to clear. */
     fun logOut() {
         cacheFile?.delete()

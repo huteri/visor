@@ -27,8 +27,12 @@ import org.json.JSONObject
 /** Where an answer comes from. */
 enum class Provider { CLAUDE, OPENAI_COMPATIBLE }
 
-/** One question and its answer, the conversation behind the next question. */
-data class Exchange(val question: String, val answer: String)
+/** One question, its answer and what the tools did for it: the conversation behind the next question. */
+data class Exchange(val question: String, val answer: String, val actions: List<ToolAction> = emptyList())
+
+/** The answer as the model reads it later: with Visor's note of what the tools did, so words alone never pass for an action. */
+private fun Exchange.told(): String = if (actions.isEmpty()) answer else
+    answer + " [Visor: " + actions.joinToString("; ") { "${it.server} · ${it.what}, " + if (it.ok) "done" else "failed" }.replace(']', ')') + "]"
 
 /** An answer, what the model chose to remember while giving it, and what it did with the person's tools. */
 data class Reply(val text: String, val remembered: List<String> = emptyList(), val actions: List<ToolAction> = emptyList())
@@ -77,7 +81,7 @@ class Brain(private val config: () -> AssistantConfig, private val book: MemoryB
         val text = when (c.provider) {
             Provider.CLAUDE -> claude(c, c.model.ifBlank { DEFAULT_CLAUDE_MODEL }, system, recent, question, image, tokens, c.webSearch, turn)
             Provider.OPENAI_COMPATIBLE -> openAi(c, c.model, system, recent, question, image, tokens, turn)
-        }.trim()
+        }.replace(VISOR_NOTE, "").trim()
         check(text.isNotEmpty()) { "the model gave an empty answer" }
         Reply(text, turn.remembered, turn.actions)
     }
@@ -153,7 +157,7 @@ class Brain(private val config: () -> AssistantConfig, private val book: MemoryB
         val messages = JSONArray()
         for (e in past) {
             messages.put(JSONObject().put("role", "user").put("content", e.question))
-            messages.put(JSONObject().put("role", "assistant").put("content", e.answer))
+            messages.put(JSONObject().put("role", "assistant").put("content", e.told()))
         }
         val content = JSONArray()
         if (image != null) {
@@ -207,7 +211,7 @@ class Brain(private val config: () -> AssistantConfig, private val book: MemoryB
         val messages = JSONArray().put(JSONObject().put("role", "system").put("content", system))
         for (e in past) {
             messages.put(JSONObject().put("role", "user").put("content", e.question))
-            messages.put(JSONObject().put("role", "assistant").put("content", e.answer))
+            messages.put(JSONObject().put("role", "assistant").put("content", e.told()))
         }
         val user: Any = if (image == null) question else JSONArray()
             .put(JSONObject().put("type", "text").put("text", question))
@@ -334,6 +338,8 @@ class Brain(private val config: () -> AssistantConfig, private val book: MemoryB
     private companion object {
         /** Thinking a server left inline in the answer. */
         val THINKING = Regex("(?s)<think>.*?(?:</think>|$)")
+        /** Visor's note on past answers, should the model copy it into its own. */
+        val VISOR_NOTE = Regex("""\s*\[Visor:[^\]]*]""")
         val TOOLS_REFUSED = Regex("tool|function", RegexOption.IGNORE_CASE)
         const val MAX_EXCHANGES = 12
         // A tool often looks something up, acts, then answers: room for a few of those.

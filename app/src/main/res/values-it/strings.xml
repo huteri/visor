@@ -599,6 +599,7 @@
     <string name="onboard_skip">Non ora</string>
     <string name="onboard_continue">Continua</string>
     <string name="onboard_needed">Necessario</string>
+    <string name="login_code">Codice</string>
     <string name="onboard_login_title">Accedi a Meta</string>
     <string name="onboard_login_body">Meta tiene il registro di chi possiede ogni paio. Accedi con l\'account che possiede questi occhiali: Visor lo usa per rendere questo telefono il loro proprietario.</string>
     <string name="onboard_login_button">Accedi con Meta</string>

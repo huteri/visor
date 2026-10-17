@@ -280,6 +280,11 @@ class GlassesSettings(private val connection: GlassesConnection, drive: RlDriveR
                 if (finished) "" else ", timed out",
         )
         retry.forEach { (key, want) -> scope.launch { writeDrive(key, want) } }
+        // The glasses leave the factory with Meta AI off and nothing in RLDrive; the Meta app's setup turns it on.
+        if (full && finished && uuid.isNotEmpty() && ASSISTANT_ENABLED !in stored) {
+            say("Meta AI was never turned on on these glasses; turning it on")
+            scope.launch { writeDrive(ASSISTANT_ENABLED, "true") }
+        }
     }
 
     private suspend fun onReply(reply: SyncReply, link: DataXConnection) {
@@ -310,6 +315,7 @@ class GlassesSettings(private val connection: GlassesConnection, drive: RlDriveR
     companion object {
         private const val READ_TIMEOUT_MILLIS = 8_000L
         private const val SETTLE_MILLIS = 3_000L
+        private const val ASSISTANT_ENABLED = "assistant_enabled"
 
         private val SCOPED_NAMESPACES = listOf("individual_device_settings", "individual_device_sensitive_settings")
         private val DEVICE_NAMESPACES = listOf("local_device_settings", "shared_settings_namespace_1")

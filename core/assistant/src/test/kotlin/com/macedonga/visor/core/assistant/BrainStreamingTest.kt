@@ -11,6 +11,18 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class BrainStreamingTest {
+    @Test fun closingBracketsInToolHistoryCannotEscapeThePrivateNote() = runBlocking {
+        serve({ body, _ ->
+            val copied = body.getJSONArray("messages").getJSONObject(2).getString("content")
+            200 to complete("Reply $copied")
+        }) { brain, _ ->
+            val past = Exchange("Earlier question", "Original answer.", listOf(
+                com.macedonga.visor.core.assistant.mcp.ToolAction("server]", "Find [synthetic] item", true),
+            ))
+            assertEquals("Reply Original answer.", brain.answer("Continue", Locale.ENGLISH, listOf(past)).text)
+        }
+    }
+
     private suspend fun serve(
         reply: (JSONObject, Int) -> Pair<Int, String>,
         book: MemoryBook? = null,

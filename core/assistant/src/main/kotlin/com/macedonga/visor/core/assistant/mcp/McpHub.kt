@@ -257,7 +257,9 @@ class McpHub(private val context: Context, val store: McpStore) {
         if (exposed.isEmpty()) return Toolbox(emptyList(), "")
         val prompt = " You can also use tools from ${names.joinToString()}. Use them whenever the wearer asks you to do, check " +
             "or find something they cover, without asking first unless the request is unclear; after acting, say in a few " +
-            "words what was done. Never say something was done unless a tool confirmed it." + notes
+            "words what was done. Never say something was done unless a tool confirmed it. Earlier answers end with Visor's note " +
+            "in square brackets of what the tools did for them; one without a note did nothing. Never write such a note " +
+            "yourself, and call the tool each time an action is asked, even one done before." + notes
         return Toolbox(exposed, prompt)
     }
 
