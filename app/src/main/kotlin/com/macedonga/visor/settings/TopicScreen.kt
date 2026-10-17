@@ -67,7 +67,7 @@ private fun sectionsOf(topic: Topic): List<Pair<Int?, List<String>>> = when (top
     )
     Topic.PRIVACY -> listOf(
         R.string.section_location to listOf("location_global_enabled", "location_chatbot_enabled"),
-        R.string.section_camera to listOf("camera_use_enabled", "passive_visual_capture_enabled"),
+        R.string.section_camera to listOf("passive_visual_capture_enabled"),
         R.string.section_data to listOf(
             "assistant_store_voice_recordings", "assistant_store_voice_transcripts", "cloud_media_processing_enabled",
             "media_cloud_enabled", "device_share_additional_data_enabled",

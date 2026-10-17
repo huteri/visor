@@ -55,7 +55,7 @@ internal fun Registry.core() {
     }
     on("bk.action.bloks.GetScript") { ctx.script(at(0) as String) }
     on("bk.action.bloks.GetParameter") { screen?.params?.get(at(0)) }
-    on("bk.action.bloks.asynccomponents.GetClientParamV2") { null }
+    on("bk.action.bloks.asynccomponents.GetClientParamV2") { (ctx as? BloksSession.Nested)?.clientParam(at(0).toString()) }
     on("bk.action.core.GetTemplateArg") {
         val n = at(0) as String
         val nested = ctx as? BloksSession.Nested

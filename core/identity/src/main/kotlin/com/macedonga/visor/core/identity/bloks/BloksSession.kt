@@ -166,6 +166,16 @@ class BloksSession(
         if (screens.isEmpty()) finish(Outcome.Cancelled)
     }
 
+    /** The page waited and the top screen still has nothing to draw, with nothing on its way: name it in the log. */
+    fun stuck() {
+        if (done) return
+        thread.execute {
+            val top = screens.lastOrNull()?.appId
+            log("$top shows nothing to draw")
+            trace("STUCK $top: nothing to draw, nothing pending")
+        }
+    }
+
     fun close() {
         done = true
         thread.shutdownNow()
@@ -311,7 +321,14 @@ class BloksSession(
     }
 
     /** Scripts from an action's answer or an embedded payload: their own table first, the screen's after. */
-    inner class Nested(val payload: Payload, val screen: Screen?, private val parent: Ctx?, var templateArgs: Map<*, *> = emptyMap<Any, Any>()) : Ctx {
+    inner class Nested(
+        val payload: Payload,
+        val screen: Screen?,
+        private val parent: Ctx?,
+        var templateArgs: Map<*, *> = emptyMap<Any, Any>(),
+        // An async component's client params, read by `asynccomponents.GetClientParamV2`.
+        private val clientParams: Map<*, *> = emptyMap<Any, Any>(),
+    ) : Ctx {
         override fun script(id: String): Lambda =
             payload.scripts[id]?.let { Lambda(it.expr, emptyList(), this) } ?: parent?.script(id) ?: throw BloksException("no script $id")
 
@@ -319,6 +336,8 @@ class BloksSession(
             this@BloksSession.traced(screen, this, name, args)
 
         fun templateArg(name: String): Any? = templateArgs[name] ?: (parent as? Nested)?.templateArg(name)
+
+        fun clientParam(name: String): Any? = clientParams[name] ?: (parent as? Nested)?.clientParam(name)
     }
 
     /** A payload made ready for a tree: by `GetPayload` or a template, with the context its scripts run in. */
@@ -355,6 +374,28 @@ class BloksSession(
         log("screen $appId")
         trace("SCREEN $appId (depth ${screens.size})")
         payload.action?.let { interpreter.run(it.expr, screen, listOf(screen)) }
+        fetchComponents(payload, screen, screen)
+    }
+
+    /**
+     * A payload's `component_queries`: each async component is fetched and replaces the children of its target, the
+     * skeleton the screen shows until then. The password step is one: without this it never leaves its skeleton.
+     */
+    private fun fetchComponents(payload: Payload, screen: Screen, ctx: Ctx) {
+        for (q in payload.componentQueries) {
+            val target = q.target ?: continue
+            val appId = q.appId?.let { interpreter.run(it.expr, ctx) } as? String ?: continue
+            val params = q.params?.let { interpreter.run(it.expr, ctx) } as? Map<*, *> ?: emptyMap<Any, Any>()
+            val clientParams = q.clientParams?.let { interpreter.run(it.expr, ctx) } as? Map<*, *> ?: emptyMap<Any, Any>()
+            val query = BloksJson.encode(mapOf("params" to params), boolsAsInts = false)
+            request("component $appId", { client.component(appId, query) }, { answer ->
+                val nested = Nested(answer, screen, ctx, clientParams = clientParams)
+                declare(answer, nested)
+                screen.replaced[target] = listOf(Instance(answer, nested))
+                answer.action?.let { interpreter.run(it.expr, nested, listOf(screen)) }
+                fetchComponents(answer, screen, nested)
+            })
+        }
     }
 
     /** An action's answer: its data and props go into the screen, then its script runs with the screen as context. */

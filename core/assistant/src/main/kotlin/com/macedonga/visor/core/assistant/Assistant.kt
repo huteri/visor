@@ -247,6 +247,11 @@ class Assistant(
         val closed: MutableSet<String> = Collections.newSetFromMap(ConcurrentHashMap())
         val taken: MutableSet<String> = Collections.newSetFromMap(ConcurrentHashMap())
         @Volatile var locale: Locale = Locale.US
+        // ev57's field 30, MobileConfig assistant_on_sn.simplify_mwa_message_forwarding. Off (the factory value),
+        // the glasses act on a VARM the moment it lands and end the turn there.
+        @Volatile var simplified = true
+        // Segmented messages being put back together, by id: their type, size and bytes so far.
+        val segments = ConcurrentHashMap<String, Triple<Int, Int, java.io.ByteArrayOutputStream>>()
     }
 
     /** A photo this side is waiting for, for one interaction. */
@@ -445,10 +450,9 @@ class Assistant(
             }
             MT_STREAM_STATUS -> streamStatus(payload.decodeToString())
             MT_ENVELOPE -> envelope(l, payload, message.info.channelId)
-            // Chunk schema is not known: preserve privately on explicit opt-in, never hex-log it.
-            1002, 1003 -> visualDiagnostics.record(type, payload, message.info.channelId)
             // Some glasses send the same messages bare, without the envelope.
-            MT_NET_EVENT, MT_START_INTERACTION -> inner(l, type, payload, message.info.channelId)
+            MT_NET_EVENT, MT_START_INTERACTION, MT_SEGMENTED_HEADER, MT_SEGMENTED_BUFFER ->
+                inner(l, type, payload, message.info.channelId)
             // Init answers, time stretch, TTS buffer config, MMAI enabled, assistant ready, stream consumed.
             1028, 1033, 1036, 1037, 6001 -> Unit
             else -> say("Assistant: message type $type, ${payload.size} bytes ${hex(payload)}")
@@ -478,9 +482,9 @@ class Assistant(
             }
             return
         }
-        if (type == 1002 || type == 1003) {
+        if (type == MT_SEGMENTED_HEADER || type == MT_SEGMENTED_BUFFER) {
             visualDiagnostics.record(type, blob, channel)
-            return
+            return segment(l, type, blob, channel)
         }
         if (type != MT_NET_EVENT) {
             say("Assistant: an envelope carrying type $type, ${blob.size} bytes ${hex(blob)}")
@@ -527,6 +531,22 @@ class Assistant(
             }
             else -> say("Assistant: ${eventName(event.id)} (${event.id}), ${event.body.size} bytes ${describe(event.body)}")
         }
+    }
+
+    /** 1002 opens a segmented message, 1003 carries its pieces; the whole one goes on as its own type. */
+    private suspend fun segment(l: Link, type: Int, blob: ByteArray, channel: Int) {
+        val f = Wire.parse(blob)
+        val id = f.bytes(if (type == MT_SEGMENTED_HEADER) 3 else 2).decodeToString()
+        if (type == MT_SEGMENTED_HEADER) {
+            l.segments[id] = Triple(f.varint(1).toInt(), f.varint(2).toInt(), java.io.ByteArrayOutputStream())
+            return
+        }
+        val (kind, size, bytes) = l.segments[id] ?: return say("Assistant: a segment of unknown message $id")
+        bytes.write(f.bytes(1))
+        if (f.varint(3) == 0L) return
+        l.segments.remove(id)
+        if (bytes.size() != size) return say("Assistant: segmented message $id came to ${bytes.size()} bytes of $size")
+        inner(l, kind, bytes.toByteArray(), channel)
     }
 
     /** ev339 echoed straight back as ev333, field for field. */
@@ -576,6 +596,7 @@ class Assistant(
             l.taken.add(it)
         }
         m[8].asText().takeIf { it.length > 8 && !l.streamIds.containsKey(interaction) }?.let { l.streamIds[interaction] = it }
+        l.simplified = m[30] != false
         val visual = Visual.from(m)
         say("Heard \"$transcript\" (request ${describe(body)}, understanding ${describeRead(m[2])})")
         // The glasses' own understanding of the request, e.g. IN:REPLY_MESSAGE, and its slots.
@@ -681,10 +702,12 @@ class Assistant(
             Reply(fallback(l.locale, store.config.value.apiKey.isBlank() && store.config.value.provider == Provider.CLAUDE))
         }
         val text = reply.text
-        waiting.cancel()
+        // Without simplified forwarding the VARM follows the audio, and the glasses keep waiting for it until then.
+        if (l.simplified) waiting.cancel()
         val modelMs = System.currentTimeMillis() - started
         if (problem.isNotEmpty()) say("The model did not answer: $problem")
         if (interaction in l.closed) {
+            waiting.cancel()
             say("The glasses closed this turn before the answer was ready (${modelMs / 1000} s); not sending it")
             update(interaction) { it.copy(answer = text, problem = ANSWER_TOO_LATE, modelMs = modelMs, remembered = reply.remembered, actions = reply.actions) }
             if (link === l) _phase.value = AssistantPhase.LISTENING
@@ -700,6 +723,7 @@ class Assistant(
             say("The answer did not reach the glasses: ${error.message}")
             update(interaction) { it.copy(problem = error.message.orEmpty()) }
         } finally {
+            waiting.cancel()
             if (link === l) _phase.value = AssistantPhase.LISTENING
         }
     }
@@ -831,10 +855,13 @@ class Assistant(
         preamble(l, interaction, transcript, text)
         _phase.value = AssistantPhase.SPEAKING
         val voiceId = glassesVoice()
-        l.mux.send(m0, netEvent(EV_VOICE_ACTION_RESPONSE, varm(interaction, transcript, text, onGlasses = true, voiceId = voiceId)), messageType = MT_NET_EVENT)
-        delay(20)
-        l.mux.send(m0, netEvent(EV_MWA_VOICE_INTERACTION_COMPLETE, interactionComplete(interaction, text)), messageType = MT_NET_EVENT)
-        delay(20)
+        val answer = netEvent(EV_VOICE_ACTION_RESPONSE, varm(interaction, transcript, text, onGlasses = true, voiceId = voiceId))
+        val complete = netEvent(EV_MWA_VOICE_INTERACTION_COMPLETE, interactionComplete(interaction, text))
+        // Without simplified forwarding the VARM is acted on as it lands, so the text must be there before it.
+        for (event in if (l.simplified) listOf(answer, complete) else listOf(complete, answer)) {
+            l.mux.send(m0, event, messageType = MT_NET_EVENT)
+            delay(20)
+        }
         val mono = System.nanoTime() / 1_000_000
         val e392 = ThriftWriter().str(1, "VoiceActionResponseMessage").i32(2, (mono and 0xFFFF).toInt()).i32(3, 1).done()
         l.mux.send(m0, netEvent(EV_KEEP_AIR_SESSION_ALIVE, e392), messageType = MT_NET_EVENT)
@@ -872,8 +899,9 @@ class Assistant(
             }
             if (i == 0) {
                 mux.send(s0, frame, messageType = MT_STREAM_AUDIO)
-                // The VARM goes after the first audio message, never before.
-                mux.send(m0, answer, messageType = MT_NET_EVENT)
+                // The VARM goes after the first audio message, never before; without simplified forwarding it would
+                // end the turn on arrival, so it waits for the end of the audio.
+                if (l.simplified) mux.send(m0, answer, messageType = MT_NET_EVENT)
             } else {
                 // A bare header: tagged with type 0, only the first 40 ms would ever play.
                 mux.send(s0, frame)
@@ -883,6 +911,7 @@ class Assistant(
             if (wait > 0) delay(wait)
         }
         mux.send(s0, ByteArray(0), messageType = MT_STREAM_END)
+        if (!l.simplified) mux.send(m0, answer, messageType = MT_NET_EVENT)
 
         val e389 = ThriftWriter().i64(1, System.currentTimeMillis()).i64(2, mono).i64(3, 7000).str(4, interaction).done()
         val e392 = ThriftWriter().str(1, "VoiceActionResponseMessage").i32(2, (mono and 0xFFFF).toInt()).i32(3, 1).done()
@@ -904,11 +933,9 @@ class Assistant(
         if (pcm < ms * 96 - 960) say("The glasses played only ${pcm / 96} ms of $ms ms")
     }
 
-    private fun fallback(locale: Locale, noKey: Boolean): String = when {
-        locale.language == "it" && noKey -> "Visor è collegato, ma non c'è ancora un modello. Aggiungi una chiave API nell'app."
-        locale.language == "it" -> "Scusa, non sono riuscito a ottenere una risposta."
-        noKey -> "Visor is connected, but no AI model is set up yet. Add an API key in the app."
-        else -> "Sorry, I couldn't get an answer."
+    private fun fallback(locale: Locale, noKey: Boolean): String {
+        val (none, sorry) = FALLBACKS[locale.language] ?: FALLBACKS.getValue("en")
+        return if (noKey) none else sorry
     }
 
     /** Ask the model from the phone, without the glasses or the diary. */
@@ -1009,6 +1036,21 @@ class Assistant(
     private fun update(interaction: String, change: (TurnRecord) -> TurnRecord) = diary.update(interaction, change)
 
     private companion object {
+        // What the glasses say when there is no model, and when the model fails, in each of their languages.
+        val FALLBACKS = mapOf(
+            "en" to ("Visor is connected, but no AI model is set up yet. Add an API key in the app." to "Sorry, I couldn't get an answer."),
+            "it" to ("Visor è collegato, ma non c'è ancora un modello. Aggiungi una chiave API nell'app." to "Scusa, non sono riuscito a ottenere una risposta."),
+            "es" to ("Visor está conectado, pero aún no hay ningún modelo configurado. Añade una clave de API en la app." to "Lo siento, no he podido obtener una respuesta."),
+            "fr" to ("Visor est connecté, mais aucun modèle n'est encore configuré. Ajoutez une clé API dans l'application." to "Désolé, je n'ai pas pu obtenir de réponse."),
+            "de" to ("Visor ist verbunden, aber es ist noch kein Modell eingerichtet. Füge in der App einen API-Schlüssel hinzu." to "Entschuldigung, ich konnte keine Antwort bekommen."),
+            "pt" to ("O Visor está conectado, mas ainda não há um modelo configurado. Adicione uma chave de API no app." to "Desculpe, não consegui obter uma resposta."),
+            "nl" to ("Visor is verbonden, maar er is nog geen model ingesteld. Voeg een API-sleutel toe in de app." to "Sorry, ik kon geen antwoord krijgen."),
+            "tr" to ("Visor bağlı, ancak henüz bir model ayarlanmadı. Uygulamada bir API anahtarı ekleyin." to "Üzgünüm, bir yanıt alamadım."),
+            "hi" to ("Visor कनेक्ट है, लेकिन अभी कोई मॉडल सेट नहीं है। ऐप में एक API कुंजी जोड़ें।" to "माफ़ कीजिए, मुझे जवाब नहीं मिल सका।"),
+            "ja" to ("Visorは接続されていますが、まだモデルが設定されていません。アプリでAPIキーを追加してください。" to "すみません、回答を取得できませんでした。"),
+            "ko" to ("Visor가 연결되었지만 아직 모델이 설정되지 않았습니다. 앱에서 API 키를 추가하세요." to "죄송합니다. 답변을 받지 못했습니다."),
+            "zh" to ("Visor 已连接，但还没有设置模型。请在应用中添加 API 密钥。" to "抱歉，我没能获得回答。"),
+        )
         // The glasses give the whole turn 20 s; speech and streaming need some of it.
         const val TURN_BUDGET_MS = 16_000L
         const val HOLD_ON_MS = 3_000L
