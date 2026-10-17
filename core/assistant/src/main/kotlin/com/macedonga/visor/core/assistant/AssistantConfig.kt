@@ -20,6 +20,8 @@ data class AssistantConfig(
     // Answers in the glasses' own voice, the one that reads notifications; off, the phone's voice streamed to them.
     val glassesVoice: Boolean = true,
     val spokenProgress: Boolean = false,
+    val generatedProgress: Boolean = false,
+    val nativeProgress: Boolean = false,
     val instructions: String = "",
     // How long a conversation is remembered after its last question.
     val memoryMinutes: Int = 10,
@@ -45,6 +47,8 @@ class AssistantConfigStore(context: Context) {
             .putBoolean("vision", next.vision)
             .putBoolean("glasses_voice", next.glassesVoice)
             .putBoolean("spoken_progress", next.spokenProgress)
+            .putBoolean("generated_progress", next.generatedProgress)
+            .putBoolean("native_progress", next.nativeProgress)
             .putString("instructions", next.instructions)
             .putInt("memory_minutes", next.memoryMinutes)
             .apply()
@@ -64,6 +68,8 @@ class AssistantConfigStore(context: Context) {
             vision = prefs.getBoolean("vision", d.vision),
             glassesVoice = prefs.getBoolean("glasses_voice", d.glassesVoice),
             spokenProgress = prefs.getBoolean("spoken_progress", d.spokenProgress),
+            generatedProgress = prefs.getBoolean("generated_progress", d.generatedProgress),
+            nativeProgress = prefs.getBoolean("native_progress", d.nativeProgress),
             instructions = prefs.getString("instructions", d.instructions).orEmpty(),
             memoryMinutes = prefs.getInt("memory_minutes", d.memoryMinutes),
         )

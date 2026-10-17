@@ -96,7 +96,7 @@ class Backups @Inject constructor(
                 "assistant",
                 JSONObject()
                     .put("enabled", a.enabled).put("provider", a.provider.name).put("model", a.model).put("linesModel", a.linesModel)
-                    .put("baseUrl", a.baseUrl).put("webSearch", a.webSearch).put("vision", a.vision).put("glassesVoice", a.glassesVoice).put("spokenProgress", a.spokenProgress)
+                    .put("baseUrl", a.baseUrl).put("webSearch", a.webSearch).put("vision", a.vision).put("glassesVoice", a.glassesVoice).put("spokenProgress", a.spokenProgress).put("generatedProgress", a.generatedProgress).put("nativeProgress", a.nativeProgress)
                     .put("instructions", a.instructions).put("memoryMinutes", a.memoryMinutes),
             )
             .put("notifications", JSONObject().put("enabled", notify.enabled.value).put("muted", JSONArray(apps.muted.value.sorted())))
@@ -146,6 +146,8 @@ class Backups @Inject constructor(
                     vision = o.optBoolean("vision", it.vision),
                     glassesVoice = o.optBoolean("glassesVoice", it.glassesVoice),
                     spokenProgress = o.optBoolean("spokenProgress", it.spokenProgress),
+                    generatedProgress = o.optBoolean("generatedProgress", it.generatedProgress),
+                    nativeProgress = o.optBoolean("nativeProgress", it.nativeProgress),
                     instructions = o.optString("instructions", it.instructions),
                     memoryMinutes = o.optInt("memoryMinutes", it.memoryMinutes),
                 )

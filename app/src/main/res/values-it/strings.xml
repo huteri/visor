@@ -753,4 +753,8 @@
     <string name="ai_spoken_progress">Avanzamento vocale (sperimentale)</string>
     <string name="ai_spoken_progress_sub">Solo per le domande dagli occhiali. Usa la sintesi vocale del telefono per una conferma iniziale, brevi aggiornamenti ogni 15 secondi e la risposta reale in un unico flusso. Limite totale di due minuti. La voce abituale resta invariata.</string>
     <string name="ai_spoken_progress_unavailable">Solo con un provider compatibile OpenAI</string>
+    <string name="ai_generated_progress">Aggiornamenti generati da Hermes (facoltativi)</string>
+    <string name="ai_generated_progress_sub">Con avanzamento vocale attivo, prova un breve aggiornamento ogni 15 secondi dalle ultime categorie di attività e dai conteggi noti. Invia solo metadati filtrati in una richiesta separata e limitata, non la domanda o la cronologia. Gli aggiornamenti non riusciti o tardivi vengono saltati. Hermes può comunque usare gli strumenti predefiniti del server.</string>
+    <string name="ai_native_progress">Voce selezionata sugli occhiali per avanzamento (sperimentale)</string>
+    <string name="ai_native_progress_sub">Usa la voce selezionata sugli occhiali per conferme, aggiornamenti e risposta finale al posto della voce del telefono. Il parlato nativo ripetuto nella stessa interazione non è ancora verificato su hardware e gli aggiornamenti potrebbero non essere udibili. Limite di due minuti; le impostazioni vocali abituali non cambiano.</string>
 </resources>

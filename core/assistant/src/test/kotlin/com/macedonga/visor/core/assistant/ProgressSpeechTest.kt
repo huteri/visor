@@ -48,6 +48,119 @@ class ProgressSpeechTest {
         }
     }
 
+    @Test fun `long final is synthesized as bounded clips without losing text or resetting encoder`() = runBlocking {
+        val h = Harness()
+        val text = (1..80).joinToString(" ") { "Sentence $it." }
+        val clips = mutableListOf<String>()
+        h.synth = { clip ->
+            if (clip != "ack") clips += clip
+            // This complete answer represents well over 25 seconds; each small clip is safe.
+            ShortArray(clip.length * 1_920) { 3 }
+        }
+        val result = h.controller().run(h.lease, "ack", "working") { Reply(text, emptyList()) }
+        assertEquals(text, clips.joinToString(""))
+        assertTrue(clips.size > 1)
+        assertTrue(clips.all { it.length <= 160 })
+        assertEquals(text.length * 1_920, h.samples.count { it == 3.toShort() })
+        assertTrue(result.audioMs > 25_000)
+        assertEquals(1, h.encoders)
+        assertEquals(1, h.eos)
+        assertEquals(1, h.released)
+        assertEquals(1, h.events.count { it.first == "end" })
+    }
+
+    @Test fun `controller retries duration overflow and streams every accepted final clip once`() = runBlocking {
+        val h = Harness()
+        val text = "A long final speech. ".repeat(20)
+        val accepted = mutableListOf<String>()
+        var oversized = 0
+        h.synth = { clip ->
+            if (clip == "ack") ShortArray(960) else {
+                if (clip.length > 40) { oversized++; throw DiagnosticWav.SpeechTooLong() }
+                accepted += clip
+                ShortArray(960) { 3 }
+            }
+        }
+        val result = h.controller().run(h.lease, "ack", "working") { Reply(text) }
+        assertEquals(text, accepted.joinToString(""))
+        assertEquals(text, result.reply.text)
+        assertTrue(oversized > 0)
+        assertEquals(accepted.size * 960, h.samples.count { it == 3.toShort() })
+        assertEquals(1, h.encoders)
+        assertEquals(1, h.eos)
+        assertEquals(1, h.events.count { it.first == "end" })
+    }
+
+    @Test fun `new turn revokes long final and cancels prefetched clip without contaminating followup`() = runBlocking {
+        val h = Harness()
+        val lifetime = DiagnosticLifetime()
+        val firstLease = checkNotNull(lifetime.begin(lifetime.ticket(), setOf("first"), { h.ms }, budgetMs = ProgressSpeech.BUDGET_MS))
+        val controller = h.controller()
+        var clips = 0
+        var pending = false
+        var cancelled = false
+        h.synth = { text ->
+            if (text != "ack" && ++clips > 1) {
+                pending = true
+                try { awaitCancellation() } finally { cancelled = true }
+            }
+            ShortArray(48_000) { 6 }
+        }
+        h.onAudio = { if (pending) lifetime.invalidate("new-microphone") }
+        try {
+            controller.run(firstLease, "ack", "working") { Reply("old answer ".repeat(80), emptyList()) }
+            fail("old generation must stop")
+        } catch (_: CancellationException) { }
+        assertTrue("prefetched synthesis must be cancelled", cancelled)
+        assertEquals(0, h.events.count { it.first == "end" })
+        val oldSampleCount = h.samples.size
+        h.onAudio = {}
+        h.synth = { ShortArray(960) { 7 } }
+        val nextLease = checkNotNull(lifetime.begin(lifetime.ticket(), setOf("followup"), { h.ms }, budgetMs = ProgressSpeech.BUDGET_MS))
+        val result = controller.run(nextLease, "ack", "working") { Reply("new answer", emptyList()) }
+        assertEquals("new answer", result.reply.text)
+        assertTrue(h.samples.drop(oldSampleCount).all { it == 7.toShort() })
+        assertEquals(2, h.encoders)
+        assertEquals(2, h.released)
+        assertEquals(1, h.eos)
+        assertEquals(1, h.events.count { it.first == "end" })
+    }
+
+    @Test fun `long final remains subject to total turn budget rather than a per clip deadline`() = runBlocking {
+        val h = Harness()
+        var clips = 0
+        h.synth = { clips++; ShortArray(48_000 * 10) { 3 } }
+        try {
+            h.controller().run(h.lease, "ack", "working") { Reply("long answer ".repeat(1_000), emptyList()) }
+            fail("total turn must expire")
+        } catch (_: CancellationException) { }
+        assertEquals(120_000L, h.ms)
+        assertTrue(clips > 1)
+        assertTrue("must not synthesize the entire remaining answer", clips < 20)
+        assertEquals(1, h.encoders)
+        assertEquals(1, h.released)
+        assertEquals(0, h.eos)
+        assertEquals(0, h.events.count { it.first == "end" })
+    }
+
+    @Test fun `revoked lease cannot retry synthesis for an oversized clip`() = runBlocking {
+        val h = Harness()
+        var attempts = 0
+        h.synth = { text ->
+            if (text == "ack") ShortArray(960) else {
+                attempts++
+                h.lease.revoke()
+                ShortArray(48_000 * 25)
+            }
+        }
+        try {
+            h.controller().run(h.lease, "ack", "working") { Reply("final", emptyList()) }
+            fail("revocation must cancel the turn")
+        } catch (_: CancellationException) { }
+        assertEquals(1, attempts)
+        assertEquals(0, h.events.count { it.first == "end" })
+    }
+
     @Test fun `cancelling stale synthesis does not suspend the ongoing silence stream`() = runBlocking {
         val h = Harness()
         var cancelling = false

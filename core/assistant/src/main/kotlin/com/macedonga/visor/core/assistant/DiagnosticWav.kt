@@ -7,6 +7,7 @@ import java.nio.ByteOrder
 
 /** Strict bounded PCM reader. Validate the complete container before allocating audio. */
 internal object DiagnosticWav {
+    internal class SpeechTooLong : IllegalArgumentException("diagnostic speech too long")
     private const val MAX_BYTES = 8L * 1024 * 1024
     private const val OUTPUT_RATE = 48_000
     private val rates = setOf(8_000, 11_025, 12_000, 16_000, 22_050, 24_000, 32_000, 44_100, 48_000)
@@ -55,7 +56,7 @@ internal object DiagnosticWav {
                     0x64617461 -> {
                         require(rate != 0 && dataAt == -1L && size > 0 && size % (channels * 2) == 0L) { "invalid diagnostic data" }
                         val frames = size / (channels * 2)
-                        require(frames < rate.toLong() * maxSeconds) { "diagnostic speech too long" }
+                        if (frames >= rate.toLong() * maxSeconds) throw SpeechTooLong()
                         dataAt = body
                         dataSize = size
                     }

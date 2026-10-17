@@ -336,11 +336,10 @@ class Assistant(
             }
         }
         scope.launch {
-            var selected = store.config.value.usesSpokenProgress()
+            var selected = store.config.value
             store.config.collect { config ->
-                val next = config.usesSpokenProgress()
-                if (selected && !next) link?.progress?.invalidate("progress-disabled")
-                selected = next
+                if (selected != config) link?.progress?.invalidate("progress-settings-changed")
+                selected = config
             }
         }
         scope.launch { camera?.frames?.collect { if (it) liveAi.onFirstFrame() } }
@@ -768,17 +767,49 @@ class Assistant(
         val monotonicStart = SystemClock.elapsedRealtime()
         var owned: DiagnosticLease? = null
         var picture: ByteArray? = null
+        var status: ProgressStatus? = null
+        val selectedVoice = glassesVoice()
+        val marker = "visor-progress-${java.util.UUID.randomUUID()}"
+        suspend fun <T> step(stage: ProgressStage, block: suspend () -> T): T = try { block() }
+            catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (error: Exception) { say("Spoken progress ${progressFailure(stage, error)}"); throw error }
+        fun activate(lease: DiagnosticLease) {
+            owned = lease
+            say("Spoken progress mode=${if (config.nativeProgress) "selected-glasses-native-experimental" else "phone-stream"} event=start")
+            if (config.generatedProgress) status = ProgressStatus(lease, SystemClock::elapsedRealtime,
+                { snapshot, elapsed -> brain.statusPhrase(snapshot, elapsed, turnLocale, config) },
+                { stage, error -> say("Spoken progress ${progressFailure(stage, error)}") })
+            l.progress.publish(ticket) {
+                record(TurnRecord(interaction, started, transcript))
+                _phase.value = AssistantPhase.THINKING
+            }
+        }
+        suspend fun modelRequest(): Reply {
+            val lease = checkNotNull(owned)
+            try {
+                val live = if (config.vision) {
+                    try { lease.prepare { liveFrame()?.let { toModelJpeg(it) } } }
+                    catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                    catch (_: Exception) { null }
+                } else null
+                val visualQuestion = live != null || (config.vision && (visual.glassesCaptured || visual.glassesWantImage || soundsVisual(transcript)))
+                val image = live ?: if (visualQuestion) step(ProgressStage.PHOTO) { lease.prepare { photo(l, interaction, visual, lease) } } else null
+                picture = image
+                val note = if (visualQuestion && image == null) "The wearer seems to ask about what they see, but the photo from the glasses did not arrive; say so briefly." else ""
+                say("Spoken progress stage=model event=start")
+                return step(ProgressStage.MODEL) {
+                    lease.prepare { brain.answer(transcript, turnLocale, pastOf(interaction), image, note, configuration = config,
+                        onProgress = { snapshot -> status?.observe(snapshot) }) }
+                }.also { say("Spoken progress stage=model event=completed") }
+            } finally { status?.stop() }
+        }
         try {
             ProgressTurn(SystemClock::elapsedRealtime).run(l.progress, ticket, aliases, streamId,
                 controller = { lease, stream ->
-                    owned = lease
-                    l.progress.publish(ticket) {
-                        record(TurnRecord(interaction, started, transcript))
-                        _phase.value = AssistantPhase.THINKING
-                    }
+                    activate(lease)
                     val wire = ProgressWire(lease, interaction, transcript, acknowledgement, stream,
                         checkNotNull(l.m0), checkNotNull(l.s0), SystemClock::elapsedRealtime, System::currentTimeMillis,
-                        { delay(it) }) { channel, bytes, type -> l.mux.send(channel, bytes, messageType = type) }
+                        { delay(it) }) { channel, bytes, type -> step(ProgressStage.DELIVERY) { l.mux.send(channel, bytes, messageType = type) } }
                     val sink = object : ProgressSink by wire {
                         override suspend fun start() {
                             wire.start()
@@ -786,22 +817,16 @@ class Assistant(
                         }
                     }
                     ProgressSpeech(SystemClock::elapsedRealtime, { delay(it) },
-                        { voice.speechPcm(it, turnLocale) }, { AndroidProgressEncoder() }, sink)
-                }, acknowledgement = acknowledgement, progress = progress,
-                model = {
-                    val lease = checkNotNull(owned)
-                    val live = if (config.vision) {
-                        try { lease.prepare { liveFrame()?.let { toModelJpeg(it) } } }
-                        catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-                        catch (_: Exception) { null }
-                    } else null
-                    val visualQuestion = live != null || (config.vision && (visual.glassesCaptured || visual.glassesWantImage || soundsVisual(transcript)))
-                    val image = live ?: if (visualQuestion) lease.prepare { photo(l, interaction, visual, lease) } else null
-                    picture = image
-                    val note = if (visualQuestion && image == null) "The wearer seems to ask about what they see, but the photo from the glasses did not arrive; say so briefly." else ""
-                    lease.prepare { brain.answer(transcript, turnLocale, pastOf(interaction), image, note, configuration = config) }
-                },
+                        { text ->
+                            // The marker is turn-local, never sent to a model or spoken. Failed auxiliary work is silent.
+                            if (config.generatedProgress && text == marker) {
+                                status?.pcm { voice.speechPcm(it, turnLocale) } ?: ShortArray(960)
+                            } else step(ProgressStage.SYNTHESIS) { voice.speechPcm(text, turnLocale) }
+                        }, { AndroidProgressEncoder() }, sink)
+                }, acknowledgement = acknowledgement, progress = if (config.generatedProgress) marker else progress,
+                model = { modelRequest() },
                 completed = { result ->
+                    say("Spoken progress event=finished modelMs=${result.modelMs} audioMs=${result.audioMs}")
                     val imagePath = picture?.let { bytes ->
                         val file = File(photos, "$interaction.jpg")
                         runCatching { photos.mkdirs(); file.writeBytes(bytes); file.path }.getOrDefault("")
@@ -811,18 +836,29 @@ class Assistant(
                     l.answered.add(interaction)
                     l.sessionOf[interaction]?.let { l.answered.add(it) }
                 },
-                failed = { error -> update(interaction) { it.copy(problem = "Spoken progress failed (${error.javaClass.simpleName})",
+                failed = { error -> update(interaction) { it.copy(problem = "Spoken progress ${progressFailure(ProgressStage.START, error)}",
                     modelMs = SystemClock.elapsedRealtime() - monotonicStart) } },
-                ownership = { link === l && store.config.value.usesSpokenProgress() && !liveAi.active && aliases.none { it in l.closed } },
+                ownership = { link === l && store.config.value == config && store.config.value.usesSpokenProgress() &&
+                    glassesVoice() == selectedVoice && !liveAi.active && aliases.none { it in l.closed } },
+                native = if (!config.nativeProgress) null else { lease ->
+                    activate(lease)
+                    val wire = NativeProgressWire(lease, interaction, transcript, selectedVoice, { delay(it) }) { bytes, type ->
+                        step(ProgressStage.DELIVERY) { l.mux.send(checkNotNull(l.m0), bytes, messageType = type) }
+                    }
+                    NativeProgress(SystemClock::elapsedRealtime, { delay(it) }).run(lease, wire, acknowledgement,
+                        { if (config.generatedProgress) status?.next() else progress }, { modelRequest() })
+                },
             )
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             if (cancelled is kotlinx.coroutines.TimeoutCancellationException || SystemClock.elapsedRealtime() - monotonicStart >= ProgressSpeech.BUDGET_MS) {
+                say("Spoken progress event=timeout")
                 l.progress.publish(ticket) { update(interaction) { it.copy(problem = "Spoken progress timed out") } }
             }
             throw cancelled
         } catch (error: Exception) {
-            say("Spoken progress failed: ${error.javaClass.simpleName}")
+            say("Spoken progress ${progressFailure(ProgressStage.START, error)}")
         } finally {
+            status?.stop()
             if (link === l) l.progress.publish(ticket) { _phase.value = AssistantPhase.LISTENING }
         }
     }
@@ -838,7 +874,7 @@ class Assistant(
                 runDiagnostic(l, interaction, transcript, diagnostic, diagnosticTicket)
                 return
             }
-            AnswerRoute.PROGRESS -> {
+            AnswerRoute.PROGRESS, AnswerRoute.NATIVE_PROGRESS -> {
                 progressAnswer(l, interaction, transcript, visual, progressTicket, turnConfig)
                 return
             }

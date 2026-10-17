@@ -3,6 +3,7 @@ package com.macedonga.visor.core.assistant
 internal enum class AnswerRoute {
     DIAGNOSTIC,
     PROGRESS,
+    NATIVE_PROGRESS,
     ORDINARY
 }
 
@@ -15,7 +16,7 @@ internal enum class FollowupAction {
 internal object AssistantTurnRouter {
     fun routeAnswer(transcript: String, config: AssistantConfig, liveAiActive: Boolean): AnswerRoute {
         if (TimeoutDiagnostic.recognize(transcript) != null) return AnswerRoute.DIAGNOSTIC
-        if (config.usesSpokenProgress(liveAiActive)) return AnswerRoute.PROGRESS
+        if (config.usesSpokenProgress(liveAiActive)) return if (config.nativeProgress) AnswerRoute.NATIVE_PROGRESS else AnswerRoute.PROGRESS
         return AnswerRoute.ORDINARY
     }
 

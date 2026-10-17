@@ -65,6 +65,7 @@ class Brain(private val config: () -> AssistantConfig, private val book: MemoryB
         note: String = "",
         audience: Audience = Audience.GLASSES,
         configuration: AssistantConfig? = null,
+        onProgress: ((ActivitySnapshot) -> Unit)? = null,
     ): Reply = withContext(Dispatchers.IO) {
         val c = configuration ?: config()
         check(c.apiKey.isNotBlank() || c.provider == Provider.OPENAI_COMPATIBLE) { "no API key is set" }
@@ -81,7 +82,7 @@ class Brain(private val config: () -> AssistantConfig, private val book: MemoryB
         val tokens = if (audience == Audience.PHONE) PHONE_TOKENS else GLASSES_TOKENS
         val text = when (c.provider) {
             Provider.CLAUDE -> claude(c, c.model.ifBlank { DEFAULT_CLAUDE_MODEL }, system, recent, question, image, tokens, c.webSearch, turn)
-            Provider.OPENAI_COMPATIBLE -> openAi(c, c.model, system, recent, question, image, tokens, turn)
+            Provider.OPENAI_COMPATIBLE -> openAi(c, c.model, system, recent, question, image, tokens, turn, onProgress)
         }.replace(VISOR_NOTE, "").trim()
         check(text.isNotEmpty()) { "the model gave an empty answer" }
         Reply(text, turn.remembered, turn.actions)
@@ -95,6 +96,34 @@ class Brain(private val config: () -> AssistantConfig, private val book: MemoryB
             "${locale.getDisplayLanguage(Locale.ENGLISH)}. Answer with that sentence only."
         write(c, c.model, system, what, 200)
     }
+
+    /** Metadata-only auxiliary request. No local tools, history, memory, retries or original question. */
+    suspend fun statusPhrase(snapshot: ActivitySnapshot, elapsedMs: Long, locale: Locale, configuration: AssistantConfig): String =
+        withContext(Dispatchers.IO) {
+            kotlinx.coroutines.withTimeout(ProgressStatus.STATUS_TIMEOUT_MS) {
+                check(configuration.provider == Provider.OPENAI_COMPATIBLE)
+                val system = "Write one short spoken status sentence in ${locale.getDisplayLanguage(Locale.ENGLISH)}. " +
+                    "The supplied metadata is the entire task. Describe only these activity categories and counts. " +
+                    "The original request is still running, never say it is finished. Completed activities mean ended, not necessarily successful; no results are known. " +
+                    "Unknown activity means still waiting, not an invented action. Do not perform any task, use tools, reason aloud, or add details. No markdown. At most 24 words."
+                val messages = JSONArray().put(JSONObject().put("role", "system").put("content", system))
+                    .put(JSONObject().put("role", "user").put("content", snapshot.metadata(elapsedMs)))
+                val c = configuration
+                val body = JSONObject().put("model", c.model).put("messages", messages).put("max_tokens", 80)
+                    .put("tools", JSONArray()).put("tool_choice", "none")
+                val headers = if (c.apiKey.isBlank()) emptyMap() else mapOf("Authorization" to "Bearer ${c.apiKey}")
+                // These fields are advisory: the installed Hermes adapter can still use server-default tools.
+                // Only benign, internally constructed metadata reaches it. Do not retry this auxiliary request.
+                val response = post(c.baseUrl.trimEnd('/') + "/chat/completions", headers,
+                    if ("api.openai.com" in c.baseUrl) completionTokens(body) else body)
+                val message = response.getJSONArray("choices").getJSONObject(0).getJSONObject("message")
+                check(!message.has("tool_calls"))
+                val text = message.optString("content").trim()
+                check(text.isNotBlank() && text.length <= 160 && text.none { it == '\n' || it == '<' || it == '>' } &&
+                    !text.contains("http", ignoreCase = true))
+                text
+            }
+        }
 
     /** A day's lines for the diary, in [locale]'s language, from [exchanges] in order; with the lines' own model if one is set. */
     suspend fun dayLines(exchanges: String, locale: Locale): String = withContext(Dispatchers.IO) {
@@ -207,7 +236,7 @@ class Brain(private val config: () -> AssistantConfig, private val book: MemoryB
 
     private suspend fun openAi(
         c: AssistantConfig, model: String, system: String, past: List<Exchange>, question: String, image: ByteArray?,
-        tokens: Int, turn: Turn?,
+        tokens: Int, turn: Turn?, onProgress: ((ActivitySnapshot) -> Unit)? = null,
     ): String {
         val messages = JSONArray().put(JSONObject().put("role", "system").put("content", system))
         for (e in past) {
@@ -238,14 +267,14 @@ class Brain(private val config: () -> AssistantConfig, private val book: MemoryB
             val body = JSONObject().put("model", model).put("messages", messages).put("max_tokens", tokens)
             tools?.let { body.put("tools", it) }
             val answer = try {
-                send(url, headers, body)
+                send(url, headers, body, onProgress)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: IllegalStateException) {
                 // A server without tools refuses the field; then the conversation goes on without memory.
                 if (tools == null || !TOOLS_REFUSED.containsMatchIn(error.message.orEmpty())) throw error
                 tools = null
-                send(url, headers, body.apply { remove("tools") })
+                send(url, headers, body.apply { remove("tools") }, onProgress)
             }
             val choice = answer.getJSONArray("choices").getJSONObject(0)
             val message = choice.getJSONObject("message")
@@ -267,30 +296,30 @@ class Brain(private val config: () -> AssistantConfig, private val book: MemoryB
     }
 
     /** A local reasoning model (LM Studio, llama.cpp) otherwise spends the whole answer thinking; OpenAI's own and some others refuse the field. */
-    private suspend fun send(url: String, headers: Map<String, String>, body: JSONObject): JSONObject {
+    private suspend fun send(url: String, headers: Map<String, String>, body: JSONObject, onProgress: ((ActivitySnapshot) -> Unit)? = null): JSONObject {
         // OpenAI's newer models refuse max_tokens, and every one of its models takes max_completion_tokens.
-        if ("api.openai.com" in url) return post(url, headers, completionTokens(body))
+        if ("api.openai.com" in url) return post(url, headers, completionTokens(body), onProgress)
         return try {
             try {
-                post(url, headers, JSONObject(body.toString()).put("reasoning_effort", "none"))
+                post(url, headers, JSONObject(body.toString()).put("reasoning_effort", "none"), onProgress)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: IllegalStateException) {
                 if ("reasoning" !in error.message.orEmpty()) throw error
-                post(url, headers, body)
+                post(url, headers, body, onProgress)
             }
         } catch (error: CancellationException) {
             throw error
         } catch (error: IllegalStateException) {
             // A server that relays those models (Azure, a proxy) says which field it wants.
             if ("max_completion_tokens" !in error.message.orEmpty()) throw error
-            post(url, headers, completionTokens(body))
+            post(url, headers, completionTokens(body), onProgress)
         }
     }
 
     private fun completionTokens(body: JSONObject) = JSONObject(body.toString()).apply { put("max_completion_tokens", remove("max_tokens")) }
 
-    private suspend fun post(url: String, headers: Map<String, String>, body: JSONObject): JSONObject =
+    private suspend fun post(url: String, headers: Map<String, String>, body: JSONObject, onProgress: ((ActivitySnapshot) -> Unit)? = null): JSONObject =
         suspendCancellableCoroutine { pending ->
             val http = URL(url).openConnection() as HttpURLConnection
             // disconnect may block behind a read on some JDKs; never block the cancelling thread.
@@ -300,7 +329,7 @@ class Brain(private val config: () -> AssistantConfig, private val book: MemoryB
             Dispatchers.IO.dispatch(pending.context, Runnable {
                 try {
                     pending.context.ensureActive()
-                    val answer = request(http, headers, body) { pending.context.ensureActive() }
+                    val answer = request(http, headers, body, onProgress) { pending.context.ensureActive() }
                     pending.context.ensureActive()
                     pending.resume(answer)
                 } catch (error: Exception) {
@@ -311,7 +340,7 @@ class Brain(private val config: () -> AssistantConfig, private val book: MemoryB
             })
         }
 
-    private fun request(http: HttpURLConnection, headers: Map<String, String>, body: JSONObject, checkCancelled: () -> Unit): JSONObject {
+    private fun request(http: HttpURLConnection, headers: Map<String, String>, body: JSONObject, onProgress: ((ActivitySnapshot) -> Unit)?, checkCancelled: () -> Unit): JSONObject {
         checkCancelled()
         http.requestMethod = "POST"
         http.connectTimeout = 5_000
@@ -332,7 +361,7 @@ class Brain(private val config: () -> AssistantConfig, private val book: MemoryB
             error("the model answered $code: $message")
         }
         return http.inputStream.reader(Charsets.UTF_8).use {
-            ModelResponse.read(it, headers.containsKey("anthropic-version"), checkCancelled)
+            ModelResponse.read(it, headers.containsKey("anthropic-version"), onProgress = onProgress, checkCancelled = checkCancelled)
         }
     }
 

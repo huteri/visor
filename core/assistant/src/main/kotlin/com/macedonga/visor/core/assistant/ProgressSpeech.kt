@@ -25,7 +25,10 @@ internal class ProgressSpeech(
             kotlinx.coroutines.coroutineScope {
                 val started = now()
                 val answer = async { runCatching { lease.prepare { model() } } }
-                var preparation: kotlinx.coroutines.Deferred<ShortArray>? = async { lease.prepare { synthesize(acknowledgement) } }
+                fun bounded(text: String) = BoundedSpeech(text) { clip -> lease.prepare { synthesize(clip) } }
+                var speech = bounded(acknowledgement)
+                fun prepare(source: BoundedSpeech) = async { lease.prepare { source.next() } }
+                var preparation: kotlinx.coroutines.Deferred<ShortArray>? = prepare(speech)
                 var finalQueued = false
                 var finalPlaying = false
                 var reply: Reply? = null
@@ -75,11 +78,12 @@ internal class ProgressSpeech(
                             modelMs = now() - started
                             preparation?.cancel()
                             lease.check()
-                            preparation = async { lease.prepare { synthesize(checkNotNull(reply).text) } }
+                            speech = bounded(checkNotNull(reply).text)
+                            preparation = prepare(speech)
                             finalQueued = true
                         }
                         if (offset >= pcm.size) {
-                            if (finalPlaying) {
+                            if (finalPlaying && preparation == null) {
                                 emit(checkNotNull(codec).encode(ShortArray(0), true))
                                 val left = if (anchorMs >= 0) (anchorMs + (timelineUs + 999) / 1000) - now() else 0L
                                 if (left > 0) pause(left)
@@ -91,12 +95,13 @@ internal class ProgressSpeech(
                                 require(pcm.isNotEmpty() && pcm.size < 48_000 * 25) { "speech PCM out of bounds" }
                                 lease.check()
                                 offset = 0
-                                preparation = null
+                                preparation = if (speech.hasNext()) prepare(speech) else null
                                 finalPlaying = finalQueued
                             } else if (preparation == null && reply == null && now() >= nextProgress) {
                                 // No backlog, and never start stale progress after a ready final.
                                 nextProgress = now() + 15_000
-                                preparation = async { lease.prepare { synthesize(progress) } }
+                                speech = bounded(progress)
+                                preparation = prepare(speech)
                             }
                         }
                         if (!opened && pcm.isNotEmpty()) {

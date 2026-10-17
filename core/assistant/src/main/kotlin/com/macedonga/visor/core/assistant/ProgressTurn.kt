@@ -14,13 +14,16 @@ internal class ProgressTurn(private val now: () -> Long) {
         completed: (ProgressResult) -> Unit,
         failed: (Throwable) -> Unit = {},
         ownership: () -> Boolean = { true },
+        native: (suspend (DiagnosticLease) -> ProgressResult)? = null,
     ) {
         val job = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]
         val lease = lifetime.begin(ticket, aliases, now, onCancel = { job?.cancel() }, budgetMs = ProgressSpeech.BUDGET_MS, allowed = ownership) ?: return
         try {
             lease.check()
-            require(streamId.isNotBlank()) { "no interaction-owned progress stream" }
-            val result = controller(lease, streamId).run(lease, acknowledgement, progress, model)
+            val result = if (native != null) native(lease) else {
+                require(streamId.isNotBlank()) { "no interaction-owned progress stream" }
+                controller(lease, streamId).run(lease, acknowledgement, progress, model)
+            }
             lease.prepare { lifetime.publish(ticket) { completed(result) } }
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled

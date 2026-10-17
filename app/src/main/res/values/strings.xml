@@ -755,4 +755,8 @@
     <string name="ai_spoken_progress">Spoken progress (experimental)</string>
     <string name="ai_spoken_progress_sub">Glasses questions only. Uses phone text-to-speech for an early acknowledgement, brief updates every 15 seconds and the real answer on one live stream. Two-minute total cap. Your ordinary voice preference is unchanged.</string>
     <string name="ai_spoken_progress_unavailable">OpenAI-compatible provider only</string>
+    <string name="ai_generated_progress">Hermes-generated status updates (opt-in)</string>
+    <string name="ai_generated_progress_sub">While spoken progress is on, try a short update every 15 seconds from the latest known activity categories and counts. Sends only sanitized metadata in a separate bounded request, not your question or history. Failed or late updates are skipped. Hermes may still use its server-default tools.</string>
+    <string name="ai_native_progress">Selected glasses voice for progress (experimental)</string>
+    <string name="ai_native_progress_sub">Use the voice selected on your glasses for acknowledgements, updates and the final answer, instead of phone speech. Repeated native speech in one interaction is not yet hardware-validated and interim speech may not play. Two-minute cap; ordinary voice settings are unchanged.</string>
 </resources>

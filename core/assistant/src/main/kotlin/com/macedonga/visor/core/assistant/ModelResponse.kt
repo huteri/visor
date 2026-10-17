@@ -6,7 +6,7 @@ import org.json.JSONObject
 
 /** Rebuild the non-streaming response consumed by Brain's tool loops. */
 internal object ModelResponse {
-    fun read(reader: Reader, claude: Boolean, checkCancelled: () -> Unit = {}): JSONObject {
+    fun read(reader: Reader, claude: Boolean, onProgress: ((ActivitySnapshot) -> Unit)? = null, checkCancelled: () -> Unit = {}): JSONObject {
         val input = java.io.PushbackReader(reader.buffered(), 1)
         var first: Int
         do {
@@ -27,10 +27,11 @@ internal object ModelResponse {
             if (result.has("error")) error(streamError(text.toString()))
             return result
         }
-        return if (claude) readClaude(input, checkCancelled) else readOpenAi(input, checkCancelled)
+        return if (claude) readClaude(input, checkCancelled) else readOpenAi(input, checkCancelled, onProgress)
     }
 
-    private fun readOpenAi(reader: Reader, checkCancelled: () -> Unit): JSONObject {
+    private fun readOpenAi(reader: Reader, checkCancelled: () -> Unit, onProgress: ((ActivitySnapshot) -> Unit)?): JSONObject {
+        val progress = HermesProgress()
         val message = JSONObject().put("role", "assistant").put("content", "")
         var finish = ""
         val calls = sortedMapOf<Int, JSONObject>()
@@ -39,6 +40,11 @@ internal object ModelResponse {
             if (type == "error") error(streamError(data))
             if (type == "approval.request") {
                 error("Hermes requires approval; approval is unsupported on glasses. Open an approval-capable Hermes client on your phone to review the request.")
+            }
+            if (type == "hermes.tool.progress") {
+                // Optional presentation metadata must never break the primary answer.
+                runCatching { progress.accept(JSONObject(data))?.let { onProgress?.invoke(it) } }
+                return@events false
             }
             // Named extensions are notifications, not Chat Completions chunks.
             if (type.isNotEmpty() && type != "message") return@events false
