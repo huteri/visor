@@ -41,6 +41,7 @@ import com.macedonga.visor.settings.SettingsPage
 import com.macedonga.visor.ui.VisorIcons
 import com.macedonga.visor.BuildConfig
 import dagger.hilt.android.lifecycle.HiltViewModel
+import com.macedonga.visor.login.MetaLogin
 import java.io.File
 import javax.inject.Inject
 
@@ -113,9 +114,11 @@ private fun LogRow(line: String) {
 private fun share(context: Context, text: String) {
     val webView = WebView.getCurrentWebViewPackage()?.let { "${it.packageName} ${it.versionName}" } ?: "unknown"
     val head = "Visor ${BuildConfig.VERSION_NAME}, ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE}, WebView $webView"
+    // The last Meta login's Bloks trace rides along: every call, request and failure of it.
+    val trace = MetaLogin.traceFile(context).takeIf { it.exists() && it.length() > 0 }?.readText()
     val file = File(context.cacheDir, "log/visor-log.txt").apply {
         parentFile?.mkdirs()
-        writeText(head + "\n\n" + text + "\n")
+        writeText(head + "\n\n" + text + "\n" + (trace?.let { "\n--- Bloks trace of the last Meta login ---\n$it" } ?: ""))
     }
     val intent = Intent(Intent.ACTION_SEND)
         .setType("text/plain")

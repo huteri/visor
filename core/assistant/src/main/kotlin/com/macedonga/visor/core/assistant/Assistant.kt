@@ -481,6 +481,7 @@ class Assistant(
                 ears?.finish()
             }
             MT_STREAM_STATUS -> streamStatus(payload.decodeToString())
+
             // Init answers, time stretch, TTS buffer config, MMAI enabled, assistant ready, stream consumed.
             1028, 1033, 1036, 1037, 6001 -> Unit
             else -> say("Assistant: message type $type, ${payload.size} bytes ${hex(payload)}")
@@ -533,7 +534,7 @@ class Assistant(
                 say("Assistant: remote interaction complete ${describe(event.body)}")
                 liveAi.end("the glasses completed the interaction")
             }
-            EV_FRAME_KEEP_ALIVE_RESPONSE -> Unit
+            EV_FRAME_KEEP_ALIVE_RESPONSE, EV_KEEP_MWA_ALIVE -> Unit
             EV_FULFILLMENT_REQUEST -> fulfillmentRequest(l, event.body)
             65 -> unsupportedVisualRequest(l, event.body, channel)
             EV_DEVICE_VOICE_STATE -> voiceState(event.body)
@@ -1100,7 +1101,7 @@ class Assistant(
     /** What the model has heard of [id]'s conversation before it. */
     private fun pastOf(id: String): List<Exchange> {
         val conversation = diary.turn(id)?.conversation ?: return emptyList()
-        return diary.past(conversation, before = id).map { Exchange(it.question, it.answer) }
+        return diary.past(conversation, before = id).map { Exchange(it.question, it.answer, it.actions) }
     }
 
     /** Into the diary, in the open conversation unless it names its own. */

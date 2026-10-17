@@ -600,6 +600,7 @@
     <string name="onboard_skip">Not now</string>
     <string name="onboard_continue">Continue</string>
     <string name="onboard_needed">Needed</string>
+    <string name="login_code">Code</string>
     <string name="onboard_login_title">Log in to Meta</string>
     <string name="onboard_login_body">Meta keeps the record of who owns each pair. Log in with the account that owns these glasses: Visor uses it to make this phone their owner.</string>
     <string name="onboard_login_button">Log in with Meta</string>

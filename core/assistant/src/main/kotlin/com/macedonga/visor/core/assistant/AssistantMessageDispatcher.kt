@@ -23,6 +23,7 @@ internal class AssistantMessageDispatcher(elapsedMs: () -> Long) {
         channel: Int,
         acknowledge: suspend (Long) -> Unit = {},
         onEvent: suspend (NetEvent, Int) -> Unit,
+        // Non-NetEvent inner messages, including bare start-interaction frames.
         onEnvelope: suspend (Int, ByteArray) -> Unit = { _, _ -> },
         onChunk: (Int, ByteArray, Int) -> Unit = { _, _, _ -> },
     ): Boolean {
@@ -45,6 +46,10 @@ internal class AssistantMessageDispatcher(elapsedMs: () -> Long) {
                     onChunk(inner, blob, channel)
                     val complete = chunks.accept(inner, blob, channel) ?: return true
                     blob = complete
+                }
+                MT_START_INTERACTION -> {
+                    onEnvelope(inner, blob)
+                    return true
                 }
                 MT_NET_EVENT -> Unit
                 else -> {

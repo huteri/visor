@@ -24,7 +24,7 @@ assistant_comms_provider_settings_protobuf	75	str		individual_device_settings	1
 assistant_detailed_logging_enabled	18	bool	false	individual_device_settings	1
 assistant_detailed_logging_mode	68	int	0	individual_device_settings	
 assistant_display_enabled		bool	true	individual_device_settings	
-assistant_enabled	2	bool	true	individual_device_settings	1
+assistant_enabled	2	bool	false	individual_device_settings	1
 assistant_follow_up_enabled	52	bool	true	individual_device_settings	1
 assistant_llm_enabled	30	bool	true	individual_device_settings	1
 assistant_multimodal_enabled	33	bool	false	individual_device_settings	

@@ -117,9 +117,25 @@ fun MetaLoginPage(onDone: () -> Unit, model: LoginViewModel = hiltViewModel()) {
                         val url = request.url.toString()
                         if (!loggedIn.get() || !request.url.path.orEmpty().startsWith("/oidc") || !askedDirectly.compareAndSet(false, true)) return null
                         val headers = request.requestHeaders.filterKeys { !it.equals("X-Requested-With", ignoreCase = true) }
-                        val location = askOidc(url, agent, headers, note) ?: return null
-                        view.post { take(location) }
-                        return WebResourceResponse("text/html", "utf-8", ByteArrayInputStream(ByteArray(0)))
+                        val answer = askOidc(url, agent, headers, note) ?: return null
+                        val code = answer.code
+                        val location = answer.location
+                        // The page gets Meta's answer to Visor's request and never sends the same eaac a second time.
+                        return when {
+                            code != null -> {
+                                view.post { take(code) }
+                                empty()
+                            }
+                            location != null -> {
+                                note("the page follows Meta's answer to ${Uri.parse(location).place()}")
+                                view.post { view.loadUrl(location) }
+                                empty()
+                            }
+                            else -> {
+                                note("the page shows Meta's answer, HTTP ${answer.status}")
+                                answer.page()
+                            }
+                        }
                     }
 
                     override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
@@ -197,11 +213,11 @@ private val SESSION = setOf("mt_active_sess", "mt_multi_sess", "sb")
 
 /**
  * /oidc/ asked by Visor, with the page's cookies and without `X-Requested-With`, the one header the WebView cannot
- * drop. Returns the app's redirect with the code when Meta gives it; otherwise logs what Meta answered and returns
- * null, and the page goes on to /oidc/ itself as before. A second try leaves `eaac` out, unless Meta has already
- * deleted the session.
+ * drop. Returns Meta's answer for the page: the app's redirect with the code when Meta gives it, otherwise the
+ * answer to the first request. A second try leaves `eaac` out, unless Meta has already deleted the session. Null
+ * when Visor got no answer at all, and the page asks itself.
  */
-private fun askOidc(url: String, agent: String, headers: Map<String, String>, note: (String) -> Unit): String? {
+private fun askOidc(url: String, agent: String, headers: Map<String, String>, note: (String) -> Unit): OidcAnswer? {
     val cookies = CookieManager.getInstance().getCookie(url)
     if (cookies.isNullOrEmpty()) {
         note("asking /oidc/ directly: no cookies to send")
@@ -219,16 +235,37 @@ private fun askOidc(url: String, agent: String, headers: Map<String, String>, no
     ) + headers + mapOf("User-Agent" to agent, "Cookie" to cookies)
     note("asking /oidc/ directly with ${sent.keys.filter { it != "Cookie" }.sorted().joinToString(" ")}")
     val first = getOidc(url, sent, "as the page would", note) ?: return null
-    if (first.code != null) return first.code
     val uri = Uri.parse(url)
-    if (first.deletedSession || "eaac" !in uri.queryParameterNames) return null
+    if (first.code != null || first.deletedSession || "eaac" !in uri.queryParameterNames) return first
     val bare = uri.buildUpon().clearQuery().apply {
         for (name in uri.queryParameterNames) if (name != "eaac") appendQueryParameter(name, uri.getQueryParameter(name))
     }.build().toString()
-    return getOidc(bare, sent, "without eaac", note)?.code
+    return getOidc(bare, sent, "without eaac", note)?.takeIf { it.code != null } ?: first
 }
 
-private class OidcAnswer(val code: String?, val deletedSession: Boolean)
+private class OidcAnswer(
+    val status: Int,
+    val reason: String,
+    val location: String?,
+    val deletedSession: Boolean,
+    val type: String?,
+    val headers: Map<String, String>,
+    val body: ByteArray,
+) {
+    val code: String? get() = location?.takeIf { it.startsWith("$META_REDIRECT_URI?") }
+
+    /** The answer as the page's own; never a redirect, which a WebView does not take from here. */
+    fun page(): WebResourceResponse {
+        val mime = type?.substringBefore(';')?.trim()?.ifEmpty { null } ?: "text/html"
+        val charset = type?.substringAfter("charset=", "")?.trim()?.ifEmpty { null } ?: "utf-8"
+        return WebResourceResponse(mime, charset, status, reason, headers, ByteArrayInputStream(body))
+    }
+}
+
+private fun empty() = WebResourceResponse("text/html", "utf-8", ByteArrayInputStream(ByteArray(0)))
+
+// Not passed on: the body is already decoded, and cookies go to the WebView's jar by hand.
+private val DROPPED = setOf("set-cookie", "content-type", "content-length", "content-encoding", "transfer-encoding")
 
 private fun getOidc(url: String, headers: Map<String, String>, label: String, note: (String) -> Unit): OidcAnswer? {
     val connection = URL(url).openConnection() as HttpURLConnection
@@ -240,18 +277,36 @@ private fun getOidc(url: String, headers: Map<String, String>, label: String, no
         val status = connection.responseCode
         val location = connection.getHeaderField("Location")?.let { URL(URL(url), it).toString() }
         val set = connection.headerFields.entries.firstOrNull { it.key.equals("Set-Cookie", ignoreCase = true) }?.value.orEmpty()
+        // The page would have stored these itself.
+        val jar = CookieManager.getInstance()
+        set.forEach { jar.setCookie(url, it) }
+        jar.flush()
+        val body = (if (status >= 400) connection.errorStream else connection.inputStream)?.use { it.readBytes() } ?: ByteArray(0)
         val (deleted, kept) = set.partition(::deletesCookie)
-        val code = location?.takeIf { it.startsWith("$META_REDIRECT_URI?") }
         val where = location?.let(Uri::parse)
+        val title = TITLE.find(String(body, Charsets.UTF_8))?.groupValues?.get(1)?.trim()?.takeIf { it.isNotEmpty() && '/' !in it && '?' !in it }
+        val answer = OidcAnswer(
+            status = status,
+            reason = connection.responseMessage?.ifBlank { null } ?: if (status < 400) "OK" else "Error",
+            location = location?.takeIf { status in 300..399 },
+            deletedSession = deleted.any { it.substringBefore('=').trim() in SESSION },
+            type = connection.contentType,
+            headers = connection.headerFields.mapNotNull { (name, values) ->
+                if (name == null || name.lowercase() in DROPPED || name.startsWith("X-Android-", ignoreCase = true)) null
+                else name to values.joinToString(", ")
+            }.toMap(),
+            body = body,
+        )
         val target = when {
             where == null -> "nowhere"
-            code != null -> "the app's redirect, params ${where.paramNames()}"
+            answer.code != null -> "the app's redirect, params ${where.paramNames()}"
             else -> "${where.place()}, params ${where.paramNames()}"
         }
         note(
-            "asked /oidc/ directly ($label): HTTP $status, sends to $target, sets ${kept.cookieNames()}, deletes ${deleted.cookieNames()}",
+            "asked /oidc/ directly ($label): HTTP $status, sends to $target, sets ${kept.cookieNames()}, deletes ${deleted.cookieNames()}" +
+                (title?.let { ", page title: ${it.take(80)}" } ?: ""),
         )
-        OidcAnswer(code, deleted.any { it.substringBefore('=').trim() in SESSION })
+        answer.takeIf { status !in 300..399 || location != null }
     } catch (error: Exception) {
         note("asked /oidc/ directly ($label): ${error.javaClass.simpleName}: ${error.message}")
         null
@@ -279,8 +334,14 @@ private fun withoutQueries(text: String): String = URL_QUERY.replace(text) { it.
 
 private val URL_QUERY = Regex("""(https?://[^\s?#"'<>]+)[?#][^\s"'<>]*""")
 
-/** The names of the query parameters, never their values. */
-private fun Uri.paramNames(): String = queryParameterNames.sorted().joinToString(" ").ifEmpty { "none" }
+private val TITLE = Regex("""<title[^>]*>([^<]*)</title>""", RegexOption.IGNORE_CASE)
+
+// Which app and redirect a request is for: no secret, and the one thing that tells two OIDC hops apart.
+private val PLAIN = setOf("app_id", "redirect_uri", "response_type", "scope")
+
+/** The names of the query parameters, with values only for [PLAIN]: never a state, code or token. */
+private fun Uri.paramNames(): String =
+    queryParameterNames.sorted().joinToString(" ") { if (it in PLAIN) "$it=${getQueryParameter(it)}" else it }.ifEmpty { "none" }
 
 /** A request worth a line: Meta's own endpoints, with the Bloks screen a fetch is for. Static files are not. */
 private fun Uri.described(): String? {

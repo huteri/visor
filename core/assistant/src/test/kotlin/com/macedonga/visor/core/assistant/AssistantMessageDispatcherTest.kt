@@ -12,6 +12,26 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AssistantMessageDispatcherTest {
+    @Test fun `bare starts reach the same lifecycle handler without an envelope ack`() = runBlocking {
+        val dispatcher = AssistantMessageDispatcher { 0L }
+        val body = ThriftWriter().str(1, "synthetic-bare-interaction").done()
+        var starts = 0
+        assertTrue(dispatcher.dispatch(MT_START_INTERACTION, body, 6,
+            acknowledge = { fail("a bare start must not be acknowledged as an envelope") },
+            onEvent = { _, _ -> fail("a start is not a NetEvent") },
+            onEnvelope = { type, bytes ->
+                assertEquals(MT_START_INTERACTION, type)
+                assertArrayEquals(body, bytes)
+                starts++
+            }))
+        assertEquals(1, starts)
+        dispatcher.close()
+        dispatcher.dispatch(MT_START_INTERACTION, body, 6,
+            onEvent = { _, _ -> fail("a closed link must not dispatch") },
+            onEnvelope = { _, _ -> fail("a closed link must not start another interaction") })
+        Unit
+    }
+
     @Test fun `direct enveloped and chunked requests reach the same event57 transcript handler`() = runBlocking {
         val raw = request()
         for (compressed in listOf(false, true)) {

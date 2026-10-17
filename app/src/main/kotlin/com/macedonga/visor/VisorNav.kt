@@ -31,7 +31,7 @@ import com.macedonga.visor.device.DeviceScreen
 import com.macedonga.visor.gallery.GalleryScreen
 import com.macedonga.visor.home.HomeScreen
 import com.macedonga.visor.log.EventLogScreen
-import com.macedonga.visor.login.MetaLoginPage
+import com.macedonga.visor.login.NativeLoginPage
 import com.macedonga.visor.media.LiveScreen
 import com.macedonga.visor.media.LiveSettingsScreen
 import com.macedonga.visor.metaai.LiveSessionScreen
@@ -216,7 +216,7 @@ fun VisorNav(opens: kotlinx.coroutines.flow.Flow<String>, markAtLaunch: Boolean)
                     )
                 }
                 entry<MetaLoginPageKey> {
-                    MetaLoginPage(onDone = { backStack.removeLastOrNull() })
+                    NativeLoginPage(onDone = { backStack.removeLastOrNull() })
                 }
                 entry<EventLogKey> { EventLogScreen() }
                 entry<MediaKey> { GalleryScreen() }
