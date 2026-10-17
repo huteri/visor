@@ -403,7 +403,6 @@
     <string name="sum_replay">replay %1$s</string>
     <string name="sum_location_on">Posizione attiva</string>
     <string name="sum_location_off">Posizione spenta</string>
-    <string name="sum_camera_off">fotocamera spenta</string>
     <string name="sum_access_all">Tutto concesso</string>
     <string name="sum_access_missing">%1$d non concessi</string>
 
@@ -609,6 +608,7 @@
     <string name="onboard_login_other">Usa un altro account</string>
     <string name="onboard_login_foot">Le passkey non funzionano in una pagina di accesso dentro un\'app: usa la password o un codice via email.</string>
     <string name="onboard_login_log">Qualcosa non va? Vedi cosa è successo</string>
+    <string name="native_login_stuck">Questo passaggio non si è caricato. Torna indietro e riprova.</string>
     <string name="event_log_lede">Tutto ciò che ha fatto l\'app, dal più vecchio. Niente qui contiene password, codici o token.</string>
     <string name="event_log_share">Condividi</string>
     <string name="event_log_clear">Svuota</string>

@@ -221,8 +221,21 @@ fun NativeLoginPage(onDone: () -> Unit, model: NativeLoginViewModel = hiltViewMo
             RoundIcon(VisorIcons.ChevronLeft, stringResource(R.string.settings_back), back)
         }
         if (s == null || screen.loading || screen.items.isEmpty()) {
+            // Nothing to draw and nothing on its way is a step Visor cannot show: say so instead of spinning forever.
+            var stuck by remember(s?.version) { mutableStateOf(false) }
+            LaunchedEffect(s?.version, s?.busy) {
+                if (s != null && !s.busy) {
+                    delay(STUCK_MS)
+                    stuck = true
+                    session.stuck()
+                }
+            }
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(Modifier.size(28.dp), color = Visor.colors.textSecondary, strokeWidth = 2.dp)
+                if (stuck) {
+                    Text(stringResource(R.string.native_login_stuck), style = Visor.type.body, color = Visor.colors.textSecondary, textAlign = TextAlign.Center)
+                } else {
+                    CircularProgressIndicator(Modifier.size(28.dp), color = Visor.colors.textSecondary, strokeWidth = 2.dp)
+                }
             }
         } else {
             Content(screen, s, session)
@@ -468,3 +481,6 @@ private fun Pill(text: String, enabled: Boolean, busy: Boolean, onClick: () -> U
 }
 
 private fun BloksSession.run(event: Event) = invoke(event.handler, event.args)
+
+// How long a screen may show nothing, with nothing on its way, before the page says it cannot show it.
+private const val STUCK_MS = 20_000L

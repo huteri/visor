@@ -15,8 +15,6 @@ import com.macedonga.visor.core.session.DataXMessage
 import com.macedonga.visor.core.session.LinkState
 import com.macedonga.visor.core.session.Responder
 import java.io.File
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.util.Collections
 import java.time.LocalDate
 import java.util.Locale
@@ -279,6 +277,9 @@ class Assistant(
         val closed: MutableSet<String> = Collections.newSetFromMap(ConcurrentHashMap())
         val taken: MutableSet<String> = Collections.newSetFromMap(ConcurrentHashMap())
         @Volatile var locale: Locale = Locale.US
+        // ev57's field 30, MobileConfig assistant_on_sn.simplify_mwa_message_forwarding. Off (the factory value),
+        // the glasses act on a VARM the moment it lands and end the turn there.
+        @Volatile var simplified = true
     }
 
     /** A photo this side is waiting for, for one interaction. */
@@ -619,6 +620,7 @@ class Assistant(
             l.taken.add(it)
         }
         m[8].asText().takeIf { it.length > 8 && !l.streamIds.containsKey(interaction) }?.let { l.streamIds[interaction] = it }
+        l.simplified = m[30] != false
         val visual = Visual.from(m)
         val diagnosticMode = TimeoutDiagnostic.recognize(transcript)
         if (diagnosticMode == null) say("Heard \"$transcript\" (request ${describe(body)}, understanding ${describeRead(m[2])})")
@@ -911,10 +913,12 @@ class Assistant(
             Reply(fallback(l.locale, store.config.value.apiKey.isBlank() && store.config.value.provider == Provider.CLAUDE))
         }
         val text = reply.text
-        waiting.cancel()
+        // Without simplified forwarding the VARM follows the audio, and the glasses keep waiting for it until then.
+        if (l.simplified) waiting.cancel()
         val modelMs = System.currentTimeMillis() - started
         if (problem.isNotEmpty()) say("The model did not answer: $problem")
         if (interaction in l.closed) {
+            waiting.cancel()
             say("The glasses closed this turn before the answer was ready (${modelMs / 1000} s); not sending it")
             update(interaction) { it.copy(answer = text, problem = ANSWER_TOO_LATE, modelMs = modelMs, remembered = reply.remembered, actions = reply.actions) }
             if (link === l) _phase.value = AssistantPhase.LISTENING
@@ -930,6 +934,7 @@ class Assistant(
             say("The answer did not reach the glasses: ${error.message}")
             update(interaction) { it.copy(problem = error.message.orEmpty()) }
         } finally {
+            waiting.cancel()
             if (link === l) _phase.value = AssistantPhase.LISTENING
         }
     }
@@ -1053,18 +1058,18 @@ class Assistant(
     }
 
     /**
-     * The answer in the glasses' own voice: a VARM that streams nothing, then ev60 with the text, which is what makes
-     * them speak it with their own TTS.
+     * The answer in the glasses' own voice: ev60 supplies the text for native TTS; field 30 determines
+     * whether the non-streaming VARM must follow that text or precede it.
      */
     private suspend fun speakOnGlasses(l: Link, interaction: String, transcript: String, text: String, diagnostic: DiagnosticLease? = null) {
         val m0 = checkNotNull(l.m0)
         preamble(l, interaction, transcript, text, diagnostic)
         _phase.value = AssistantPhase.SPEAKING
         val voiceId = glassesVoice()
-        sendSpeech(l, diagnostic, m0, netEvent(EV_VOICE_ACTION_RESPONSE, varm(interaction, transcript, text, onGlasses = true, voiceId = voiceId)), MT_NET_EVENT)
-        delay(20)
-        sendSpeech(l, diagnostic, m0, netEvent(EV_MWA_VOICE_INTERACTION_COMPLETE, interactionComplete(interaction, text)), MT_NET_EVENT)
-        delay(20)
+        // Diagnostics intentionally keep their pre-sync ordering for comparable hardware probes.
+        AnswerWire(if (diagnostic != null) true else l.simplified, { delay(it) }) { channel, bytes, type ->
+            sendSpeech(l, diagnostic, channel, bytes, type)
+        }.native(m0, interaction, transcript, text, voiceId)
         val mono = System.nanoTime() / 1_000_000
         val e392 = ThriftWriter().str(1, "VoiceActionResponseMessage").i32(2, (mono and 0xFFFF).toInt()).i32(3, 1).done()
         sendSpeech(l, diagnostic, m0, netEvent(EV_KEEP_AIR_SESSION_ALIVE, e392), MT_NET_EVENT)
@@ -1112,25 +1117,9 @@ class Assistant(
                 end = { sendSpeech(l, diagnostic, s0, ByteArray(0), MT_STREAM_END) },
                 note = diagnosticNote)
         } else {
-            val start = System.nanoTime()
-            var dueUs = 0L
-            for ((i, chunk) in packets.chunked(2).withIndex()) {
-                val frame = chunk.fold(ByteArray(0)) { acc, p ->
-                    acc + ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(p.data.size).array() + p.data
-                }
-                if (i == 0) {
-                    mux.send(s0, frame, messageType = MT_STREAM_AUDIO)
-                    // The VARM goes after the first audio message, never before.
-                    mux.send(m0, answer, messageType = MT_NET_EVENT)
-                } else {
-                    // A bare header: tagged with type 0, only the first 40 ms would ever play.
-                    mux.send(s0, frame)
-                }
-                dueUs += chunk.sumOf { it.durationUs }
-                val wait = dueUs / 1000 - (System.nanoTime() - start) / 1_000_000
-                if (wait > 0) delay(wait)
-            }
-            mux.send(s0, ByteArray(0), messageType = MT_STREAM_END)
+            AnswerWire(l.simplified, { delay(it) }) { channel, bytes, type ->
+                mux.send(channel, bytes, messageType = type)
+            }.phone(m0, s0, answer, packets) { System.nanoTime() / 1_000_000 }
         }
 
         val e389 = ThriftWriter().i64(1, System.currentTimeMillis()).i64(2, mono).i64(3, 7000).str(4, interaction).done()
@@ -1153,11 +1142,9 @@ class Assistant(
         if (pcm < ms * 96 - 960) say("The glasses played only ${pcm / 96} ms of $ms ms")
     }
 
-    private fun fallback(locale: Locale, noKey: Boolean): String = when {
-        locale.language == "it" && noKey -> "Visor è collegato, ma non c'è ancora un modello. Aggiungi una chiave API nell'app."
-        locale.language == "it" -> "Scusa, non sono riuscito a ottenere una risposta."
-        noKey -> "Visor is connected, but no AI model is set up yet. Add an API key in the app."
-        else -> "Sorry, I couldn't get an answer."
+    private fun fallback(locale: Locale, noKey: Boolean): String {
+        val (none, sorry) = FALLBACKS[locale.language] ?: FALLBACKS.getValue("en")
+        return if (noKey) none else sorry
     }
 
     /** Ask the model from the phone, without the glasses or the diary. */
@@ -1258,6 +1245,21 @@ class Assistant(
     private fun update(interaction: String, change: (TurnRecord) -> TurnRecord) = diary.update(interaction, change)
 
     private companion object {
+        // What the glasses say when there is no model, and when the model fails, in each of their languages.
+        val FALLBACKS = mapOf(
+            "en" to ("Visor is connected, but no AI model is set up yet. Add an API key in the app." to "Sorry, I couldn't get an answer."),
+            "it" to ("Visor è collegato, ma non c'è ancora un modello. Aggiungi una chiave API nell'app." to "Scusa, non sono riuscito a ottenere una risposta."),
+            "es" to ("Visor está conectado, pero aún no hay ningún modelo configurado. Añade una clave de API en la app." to "Lo siento, no he podido obtener una respuesta."),
+            "fr" to ("Visor est connecté, mais aucun modèle n'est encore configuré. Ajoutez une clé API dans l'application." to "Désolé, je n'ai pas pu obtenir de réponse."),
+            "de" to ("Visor ist verbunden, aber es ist noch kein Modell eingerichtet. Füge in der App einen API-Schlüssel hinzu." to "Entschuldigung, ich konnte keine Antwort bekommen."),
+            "pt" to ("O Visor está conectado, mas ainda não há um modelo configurado. Adicione uma chave de API no app." to "Desculpe, não consegui obter uma resposta."),
+            "nl" to ("Visor is verbonden, maar er is nog geen model ingesteld. Voeg een API-sleutel toe in de app." to "Sorry, ik kon geen antwoord krijgen."),
+            "tr" to ("Visor bağlı, ancak henüz bir model ayarlanmadı. Uygulamada bir API anahtarı ekleyin." to "Üzgünüm, bir yanıt alamadım."),
+            "hi" to ("Visor कनेक्ट है, लेकिन अभी कोई मॉडल सेट नहीं है। ऐप में एक API कुंजी जोड़ें।" to "माफ़ कीजिए, मुझे जवाब नहीं मिल सका।"),
+            "ja" to ("Visorは接続されていますが、まだモデルが設定されていません。アプリでAPIキーを追加してください。" to "すみません、回答を取得できませんでした。"),
+            "ko" to ("Visor가 연결되었지만 아직 모델이 설정되지 않았습니다. 앱에서 API 키를 추가하세요." to "죄송합니다. 답변을 받지 못했습니다."),
+            "zh" to ("Visor 已连接，但还没有设置模型。请在应用中添加 API 密钥。" to "抱歉，我没能获得回答。"),
+        )
         // Experimental ordinary-answer budget; firmware may close the interaction earlier.
         const val TURN_BUDGET_MS = 120_000L
         const val HOLD_ON_MS = 3_000L

@@ -33,6 +33,12 @@ class Script(val source: String) {
     override fun toString() = "Script(${source.length})"
 }
 
+/**
+ * A `component_queries` entry: a part of the screen fetched on its own (an async component), whose tree replaces the
+ * children of the component [target]. Until it comes the screen shows a skeleton.
+ */
+class ComponentQuery(val id: String, val target: String?, val appId: Script?, val params: Script?, val clientParams: Script?)
+
 /** A local ("ls") or global ("gs") variable the payload declares. A global in mode "p" is reset when declared. */
 class Variable(val id: String, val type: String, val initial: Any?, val initialScript: Script?, val key: String?, val mode: String?)
 
@@ -50,9 +56,10 @@ class Payload(
     val constants: Map<String, Any?> = emptyMap(),
     /** `templates`: trees `template.Make` instantiates, by id. */
     val templates: Map<String, Node> = emptyMap(),
+    val componentQueries: List<ComponentQuery> = emptyList(),
 ) {
     /** The same payload drawn from another root, as a bottom sheet shows the content node of its parse result. */
-    fun withTree(root: Node?): Payload = Payload(root, null, variables, scripts, embedded, props, values, constants, templates)
+    fun withTree(root: Node?): Payload = Payload(root, null, variables, scripts, embedded, props, values, constants, templates, componentQueries)
 
     companion object {
         /** `{"layout":{"bloks_payload":{...}}}`, the JSON string a Bloks query answers with. */
@@ -99,6 +106,17 @@ class Payload(
                     else -> emptyMap()
                 },
                 templates = (p["templates"] as? JsonObject).orEmpty().mapNotNull { (id, tree) -> (convert(tree) as? Node)?.let { id to it } }.toMap(),
+                componentQueries = (p["component_queries"] as? JsonArray).orEmpty().mapNotNull { e ->
+                    val o = e as? JsonObject ?: return@mapNotNull null
+                    fun script(key: String) = (o[key] as? JsonPrimitive)?.contentOrNull()?.let(::Script)
+                    ComponentQuery(
+                        id = (o["id"] as? JsonPrimitive)?.contentOrNull().orEmpty(),
+                        target = ((o["targets"] as? JsonObject)?.get("component") as? JsonPrimitive)?.contentOrNull(),
+                        appId = script("app_id_expr"),
+                        params = script("params"),
+                        clientParams = script("client_params"),
+                    )
+                },
             )
         }
 

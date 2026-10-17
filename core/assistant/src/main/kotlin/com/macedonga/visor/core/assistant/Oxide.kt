@@ -10,6 +10,9 @@ const val SVC_ASSISTANT = 15
 internal const val MT_PAIRED_DEVICE_ANDROID = 11
 internal const val MT_INIT_MESSAGE_REQUEST = 1000
 internal const val MT_INIT_MESSAGE_RESPONSE = 1001
+// A message too big for one frame: a header {1 type, 2 total size, 3 id}, then buffers {1 bytes, 2 id, 3 last}.
+internal const val MT_SEGMENTED_HEADER = 1002
+internal const val MT_SEGMENTED_BUFFER = 1003
 internal const val MT_NET_EVENT = 1010
 internal const val MT_DEVICE_ACTIVE = 1016
 internal const val MT_RUNNING_LOCALE = 1026

@@ -561,10 +561,7 @@ private fun summary(topic: Topic, model: SettingsViewModel, state: SettingsState
                 stringResource(R.string.sum_replay, spanWords(live.replaySeconds.toLong())),
             ).joinToString(" · ")
         }
-        Topic.PRIVACY -> listOfNotNull(
-            stringResource(if (isOn("location_global_enabled") == true) R.string.sum_location_on else R.string.sum_location_off),
-            stringResource(R.string.sum_camera_off).takeIf { isOn("camera_use_enabled") == false },
-        ).joinToString(" · ")
+        Topic.PRIVACY -> stringResource(if (isOn("location_global_enabled") == true) R.string.sum_location_on else R.string.sum_location_off)
         Topic.PHONE -> {
             var missing by remember { mutableStateOf(missingNeeds(context).size) }
             LifecycleResumeEffect(Unit) {
@@ -615,9 +612,11 @@ private fun androidx.compose.foundation.lazy.LazyListScope.searchResults(
         val toggles = model.toggles.all.filter { t -> needle in stringResource(t.label).lowercase() || (t.note?.let { needle in stringResource(it).lowercase() } ?: false) }
         val display = hasDisplay(glasses.info?.build)
         val keys = remember(needle, state.stored.keys) {
+            // The glasses' camera switches follow Visor's own, which the toggles above find.
             allKeys(model.settings, state).filter { key ->
                 val spec = specOf(model.settings, key)
-                needle in spec.label.lowercase() || needle.replace(' ', '_') in key || needle in spec.note.orEmpty().lowercase() || needle in spec.group.lowercase()
+                key !in GLASSES_CAMERA_KEYS &&
+                    (needle in spec.label.lowercase() || needle.replace(' ', '_') in key || needle in spec.note.orEmpty().lowercase() || needle in spec.group.lowercase())
             }.sortedWith(compareBy({ Topic.of(it) == null || !specOf(model.settings, it).offeredOn(state.product) }, { specOf(model.settings, it).group in DISPLAY_GROUPS && !display }, { specOf(model.settings, it).label }))
                 .take(MAX_RESULTS)
         }

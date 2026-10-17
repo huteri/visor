@@ -55,7 +55,7 @@ enum class Topic(val title: Int, val icon: ImageVector, val keys: List<String> =
     PRIVACY(
         R.string.topic_privacy, VisorIcons.Shield,
         listOf(
-            "camera_use_enabled", "location_global_enabled", "location_chatbot_enabled", "assistant_store_voice_recordings",
+            "location_global_enabled", "location_chatbot_enabled", "assistant_store_voice_recordings",
             "assistant_store_voice_transcripts", "cloud_media_processing_enabled", "media_cloud_enabled",
             "device_share_additional_data_enabled", "passive_visual_capture_enabled", "passive_phone_unlock_enabled",
             "verified_session_enabled",
