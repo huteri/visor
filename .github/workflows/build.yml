@@ -19,6 +19,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      apk-url: ${{ steps.apk.outputs.artifact-url }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -40,7 +42,43 @@ jobs:
         run: ./gradlew :core:assistant:testDebugUnitTest :app:assembleDebug
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: apk
         with:
-          name: visor-debug-${{ github.sha }}
           path: app/build/outputs/apk/debug/app-debug.apk
+          archive: false
+          if-no-files-found: error
           retention-days: 14
+
+  comment:
+    needs: build
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Update PR APK download
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          APK_URL: ${{ needs.build.outputs.apk-url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python - <<'PY'
+          import json, os, subprocess
+          marker = '<!-- visor-debug-apk -->'
+          repo, number = os.environ['GH_REPO'], os.environ['PR_NUMBER']
+          body = (f"{marker}\n## Debug APK\n\n[Download app-debug.apk]({os.environ['APK_URL']}) — raw APK, no ZIP.\n\n"
+                  f"PR head: `{os.environ['HEAD_SHA']}`. [Build]({os.environ['RUN_URL']}).\n\n"
+                  "Package: `com.macedonga.visor`; app: **Visor (d)**. Debug signing differs from release: "
+                  "this APK cannot update an installed fork release or coexist with it. Do not uninstall the working release. "
+                  "Use the fork-signed release APK for device testing. Meta application constants are absent from this debug CI build. "
+                  "Hardware unverified. Download requires GitHub sign-in and expires after 14 days.")
+          pages = json.loads(subprocess.check_output(['gh', 'api', '--paginate', '--slurp', f'repos/{repo}/issues/{number}/comments'], text=True))
+          previous = next((c for page in pages for c in page if c['user']['login'] == 'github-actions[bot]' and marker in c['body']), None)
+          endpoint = f"repos/{repo}/issues/comments/{previous['id']}" if previous else f'repos/{repo}/issues/{number}/comments'
+          subprocess.run(['gh', 'api', '--method', 'PATCH' if previous else 'POST', endpoint, '--input', '-'],
+                         input=json.dumps({'body': body}), text=True, check=True)
+          PY

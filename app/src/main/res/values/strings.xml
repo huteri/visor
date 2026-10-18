@@ -620,15 +620,6 @@
     <string name="event_log_share">Share</string>
     <string name="event_log_clear">Clear</string>
     <string name="event_log_empty">Nothing has happened yet.</string>
-    <string name="visual_capture_start">Capture visual request (2 min)</string>
-    <string name="visual_capture_share">Share private visual capture</string>
-    <string name="visual_capture_delete">Delete private visual capture</string>
-    <string name="visual_capture_help">For unsupported glasses visual requests only. Start capture, ask the glasses a visual question, then share privately before 10 minutes pass. This is separate from the event log.</string>
-    <string name="visual_capture_warning">This captures full request data, which may include transcripts, images or other private information. Only assistant event 65 and message types 1002/1003 are captured, up to 2 MB. Capture and exports stay only in memory, for at most 10 minutes from Start; no capture file is stored by Visor. Delete, a new capture or expiry revokes export links; app process death also makes them unreadable. Nothing is uploaded automatically. Share only with someone you trust, never in a public issue. Already opened reads and copies received by another app cannot be recalled.</string>
-    <string name="visual_capture_started">Private capture started for 2 minutes. Ask the glasses a visual question, then share the capture privately.</string>
-    <string name="visual_capture_empty">No visual request was captured, or the capture expired. Start capture before asking the glasses.</string>
-    <string name="visual_capture_deleted">Private visual capture deleted from this app.</string>
-    <string name="visual_capture_export_failed">Could not export the private visual capture.</string>
     <string name="event_log_bug_report">Get a bug report from the glasses</string>
     <string name="onboard_pair_title">Put them in pairing mode</string>
     <string name="onboard_pair_fold">Fold both arms.</string>
