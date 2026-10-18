@@ -28,7 +28,8 @@ class SpokenProgressTest {
             nativeFinal = { events += "native:$it" },
         )
         controller.run(0, 20, "working") { delay(11_000); "final" }
-        assertEquals(listOf("working"), synthesized)
+        assertTrue(synthesized.isNotEmpty())
+        assertTrue(synthesized.all { it == "working" })
         assertEquals(listOf("eos", "audio:9", "end", "native:final", "close"), events.takeLast(5))
     }
 

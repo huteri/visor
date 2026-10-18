@@ -17,6 +17,8 @@ internal object SpokenProgressPolicy {
     fun eligible(config: AssistantConfig, live: Boolean, session: Boolean): Boolean =
         config.enabled && config.spokenProgress && !live && !session
     fun startMs(timeoutS: Long): Long = minOf(SPOKEN_PROGRESS_INTERVAL_MS, timeoutS * 1000 - 10_000).coerceAtLeast(0)
+    // A device-reported wait can be shorter than the offered settings; never spin at zero.
+    fun repeatMs(timeoutS: Long): Long = startMs(timeoutS).coerceAtLeast(1_000L)
 }
 
 internal interface ProgressEncoder {
@@ -60,7 +62,9 @@ internal class SpokenProgress(
                     note("Spoken progress unavailable: no interaction-owned stream id; using normal final")
                     return@withTimeout normal(work.await())
                 }
-                val target = started + SpokenProgressPolicy.startMs(timeoutS)
+                val startDelay = SpokenProgressPolicy.startMs(timeoutS)
+                val repeatInterval = SpokenProgressPolicy.repeatMs(timeoutS)
+                val target = started + startDelay
                 val early = (target - nowMs() - 15_000).coerceAtLeast(0)
                 select<Unit> { work.onAwait { }; onTimeoutCompat(early) { } }
                 if (work.isCompleted) return@withTimeout normal(work.await())
@@ -120,7 +124,7 @@ internal class SpokenProgress(
                         }
                         speech(clip, true)
                         val silence = ShortArray(960)
-                        var nextProgress = target + SPOKEN_PROGRESS_INTERVAL_MS
+                        var nextProgress = target + repeatInterval
                         var pending: Deferred<Result<ShortArray>>? = null
                         try {
                             while (!work.isCompleted) {
@@ -134,7 +138,7 @@ internal class SpokenProgress(
                                     pending?.cancelAndJoin()
                                     pending = null
                                     val onTime = now - nextProgress < 100
-                                    do { nextProgress += SPOKEN_PROGRESS_INTERVAL_MS } while (nextProgress <= now)
+                                    do { nextProgress += repeatInterval } while (nextProgress <= now)
                                     if (onTime && ready != null && !work.isCompleted) speech(ready, true)
                                 } else if (pending == null && now >= nextProgress - 15_000) {
                                     pending = async { runCatching { withTimeout(15_000) { synthesize(phrase) } } }

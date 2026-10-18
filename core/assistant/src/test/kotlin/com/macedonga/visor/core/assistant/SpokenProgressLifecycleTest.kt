@@ -86,7 +86,7 @@ class SpokenProgressLifecycleTest {
         var ended = 0
         val controller = SpokenProgress({testScheduler.currentTime}, {true}, {parts += it; ShortArray(960)}, {codecs++; encoder()}, sink(finish = {ended++}))
         controller.run(0, 20, "working") {delay(11_000); text}
-        assertEquals(text, parts.drop(1).joinToString(""))
+        assertEquals(text, parts.filterNot { it == "working" }.joinToString(""))
         assertTrue(parts.all {it.length <= 240})
         assertEquals(1, codecs); assertEquals(1, ended)
     }

@@ -21,7 +21,7 @@ class SpokenProgressWiringTest {
         val ui = File(root, "kotlin/com/macedonga/visor/settings/AssistantSettings.kt").readText()
         val strings = File(root, "res/values/strings.xml").readText()
         assertTrue(ui.contains("spokenProgress"))
-        assertTrue(strings.contains("repeats phone text-to-speech progress every 40 seconds"))
+        assertTrue(strings.contains("repeats phone text-to-speech progress at intervals based on Meta AI Wait for answer"))
         assertTrue(strings.contains("Limited to 300 seconds"))
         assertTrue(strings.contains("final answer uses your selected voice"))
         assertTrue(strings.contains("native handoff is experimental"))

@@ -21,6 +21,24 @@ class SpokenProgressRepeatTest {
         override suspend fun finish(text: String) = Unit
     }, nativeFinal = { finished() })
 
+    @Test fun `30 second wait repeats at anchored 20 40 and 60 seconds`() = runTest {
+        val speech = mutableListOf<Long>()
+        controller(speech).run(0, 30, "working") { delay(70_000); "final" }
+        assertEquals(listOf(20_000L, 40_000L, 60_000L), speech)
+    }
+
+    @Test fun `short wait boundary keeps positive anchored cadence`() = runTest {
+        val speech = mutableListOf<Long>()
+        controller(speech).run(0, 11, "working") { delay(3_500); "final" }
+        assertEquals(listOf(1_000L, 2_000L, 3_000L), speech)
+    }
+
+    @Test fun `20 second supported wait repeats every 10 seconds`() = runTest {
+        val speech = mutableListOf<Long>()
+        controller(speech).run(0, 20, "working") { delay(35_000); "final" }
+        assertEquals(listOf(10_000L, 20_000L, 30_000L), speech)
+    }
+
     @Test fun `initial synthesis missing due time falls back without late progress`() = runTest {
         val speech = mutableListOf<Long>()
         val result = controller(speech, synth = { delay(12_000); ShortArray(960) { 1 } })
