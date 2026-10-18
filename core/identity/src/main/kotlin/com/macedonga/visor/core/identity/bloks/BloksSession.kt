@@ -128,9 +128,10 @@ class BloksSession(
             "waterfall_id" to UUID.randomUUID().toString(),
             "next" to next,
         )
+        // With no first screen there is nothing to show the error on, so the login ends with it.
         request("action $START", { client.action(START, BloksJson.encode(first, boolsAsInts = false)) }, then = { payload ->
             runAction(payload, null, null)
-        })
+        }, failed = { error -> finish(Outcome.Failed(error.message ?: error.javaClass.simpleName)) })
     }
 
     /** A script handler from the UI: a click, a text change. Runs on the Bloks thread. */
@@ -147,12 +148,13 @@ class BloksSession(
         val top = screens.lastOrNull()
         when {
             dialog != null -> dialog = null
-            top?.backOverride != null -> {
+            top == null -> finish(Outcome.Cancelled)
+            top.backOverride != null -> {
                 trace("back: ${top.appId} handles it")
                 interpreter.call(top.backOverride, listOf(top))
             }
             else -> {
-                trace("back: closing ${top?.appId}")
+                trace("back: closing ${top.appId}")
                 pop()
             }
         }
@@ -248,7 +250,7 @@ class BloksSession(
         onOutcome(outcome)
     }
 
-    internal fun request(label: String, call: () -> Payload, then: (Payload) -> Unit, failed: (() -> Unit)? = null) {
+    internal fun request(label: String, call: () -> Payload, then: (Payload) -> Unit, failed: ((Throwable) -> Unit)? = null) {
         pending++
         log("asking $label")
         trace("REQUEST $label")
@@ -267,7 +269,7 @@ class BloksSession(
                     onFailure = { error ->
                         log("$label failed: ${error.message}")
                         trace("ANSWER $label FAILED: ${error.javaClass.simpleName}: ${error.message}")
-                        if (failed != null) failed() else dialog = Dialog(null, error.message ?: "Request failed", listOf("OK" to null))
+                        if (failed != null) failed(error) else dialog = Dialog(null, error.message ?: "Request failed", listOf("OK" to null))
                     },
                 )
             }

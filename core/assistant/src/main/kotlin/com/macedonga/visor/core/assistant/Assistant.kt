@@ -3,6 +3,7 @@ package com.macedonga.visor.core.assistant
 import android.content.Context
 import com.macedonga.visor.core.assistant.mcp.ToolAction
 import com.macedonga.visor.core.connection.GlassesConnection
+import com.macedonga.visor.core.connection.GlassesLink
 import com.macedonga.visor.core.media.AirshipReceiver
 import com.macedonga.visor.core.media.ExtraFiles
 import com.macedonga.visor.core.media.Received
@@ -102,6 +103,8 @@ class Assistant(
     private val hearing: Hearing? = null,
     /** How long the glasses wait for an answer (assistant_on_sn.default_processing_timeout_s), when known. */
     private val processingTimeoutS: () -> Long? = { null },
+    /** The phone's player, for pausing, resuming and skipping by voice. */
+    private val phone: Phone? = null,
 ) : Responder {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -121,14 +124,19 @@ class Assistant(
     val notes: SharedFlow<String> = _notes.asSharedFlow()
 
     /** The glasses' custom wake word enrolment, over this session. */
-    val wakeWord = CustomWakeWord { id, body ->
-        val l = link
-        val m0 = l?.m0
-        if (l == null || m0 == null) false
-        else runCatching { sendNetEvent(l, m0, netEvent(id, body)) }
-            .onFailure { say("Custom wake word: event $id did not go: ${it.message}") }
-            .isSuccess
-    }
+    val wakeWord = CustomWakeWord(
+        send = { id, body ->
+            val l = link
+            val m0 = l?.m0
+            if (l == null || m0 == null) false
+            else runCatching { sendNetEvent(l, m0, netEvent(id, body)) }
+                .onFailure { say("Custom wake word: event $id did not go: ${it.message}") }
+                .isSuccess
+        },
+        headset = { ms, note, peak ->
+            headsetTake(context, (connection.state.value.target?.link as? GlassesLink.Bluetooth)?.address, ms, note, peak)
+        },
+    )
 
     /**
      * A NetEvent onto the session; one bigger than a frame carries goes as a segmented message, a header (1002)
@@ -219,6 +227,7 @@ class Assistant(
                             delay(QUESTION_GRACE_MS)
                             if (interaction in l.taken || interaction in l.closed || !l.fallback.allowed(recognition)) return@launch
                             l.taken.add(interaction)
+                            l.fresh.add(interaction)
                             say("Heard \"$text\" myself: the glasses left this question to the server")
                             answer(l, interaction, text, Visual(null, "", "", false, ""))
                         }
@@ -259,6 +268,8 @@ class Assistant(
         // Interactions the glasses have closed: an answer that comes later would talk over the next one.
         val closed: MutableSet<String> = Collections.newSetFromMap(ConcurrentHashMap())
         val taken: MutableSet<String> = Collections.newSetFromMap(ConcurrentHashMap())
+        // Questions asked with the wake word rather than as a follow-up: they continue a conversation only right after it.
+        val fresh: MutableSet<String> = Collections.newSetFromMap(ConcurrentHashMap())
         @Volatile var locale: Locale = Locale.US
         // ev57's field 30, MobileConfig assistant_on_sn.simplify_mwa_message_forwarding. Off (the factory value),
         // the glasses act on a VARM the moment it lands and end the turn there.
@@ -539,6 +550,12 @@ class Assistant(
                 liveAi.end("the glasses completed the interaction")
             }
             EV_FRAME_KEEP_ALIVE_RESPONSE, EV_KEEP_MWA_ALIVE -> Unit
+            // The answer's display action, passed on to the phone; the glasses wait for the phone to take it.
+            EV_ACTION_FULFILLMENT_REQUEST -> {
+                val id = runCatching { Thrift.loads(event.body)[1].asStruct()[1].asText() }.getOrDefault("")
+                l.mux.send(m0, netEvent(EV_ACTION_FULFILLMENT_RESPONSE, ThriftWriter().str(1, id).bool(2, true).done()), messageType = MT_NET_EVENT)
+            }
+            EV_MWA_VOICE_INTERACTION_CLOSE_REQUEST -> closed(l, event.body)
             EV_FULFILLMENT_REQUEST -> fulfillmentRequest(l, event.body)
             EV_MMAI_INTERACTION_REQUEST -> {
                 if (!mmaiRequest(l, event.body)) unsupportedVisualRequest(l, event.body)
@@ -551,6 +568,20 @@ class Assistant(
             CustomWakeWord.EV_RESULT -> wakeWord.onResult(runCatching { Thrift.loads(event.body) }.getOrDefault(emptyMap()))
             else -> say("Assistant: ${eventName(event.id)} (${event.id}), ${event.body.size} bytes ${describe(event.body)}")
         }
+    }
+
+    /**
+     * ev59 MwaVoiceInteractionCloseRequest {1 interactionId, 2 audioLogData {3 transcription}}: the glasses end a turn. One
+     * they never asked about they did themselves, as "play something": it goes in the diary with its words.
+     */
+    private fun closed(l: Link, body: ByteArray) {
+        val f = runCatching { Thrift.loads(body) }.getOrNull() ?: return
+        val interaction = f[1].asText().takeIf { it.isNotEmpty() } ?: return
+        l.closed.add(interaction)
+        val words = f[2].asStruct()[3].asText().trim()
+        if (interaction in l.taken || words.isEmpty() || WAKE_WORD_ONLY.matches(words)) return
+        say("The glasses did \"$words\" themselves")
+        record(TurnRecord(interaction, System.currentTimeMillis(), words, problem = ON_GLASSES))
     }
 
     /** 1002 opens a segmented message, 1003 carries its pieces; the whole one goes on as its own type. */
@@ -629,6 +660,7 @@ class Assistant(
         val interaction = m[1].asText()
         val transcript = m[2].asStruct()[1].asStruct()[1].asText()
         if (interaction.isEmpty() || !l.taken.add(interaction)) return
+        if (m[11] != FOLLOW_UP_INVOCATION) l.fresh.add(interaction)
         // In a session the request has its own id; the microphone's is the session's, and it is the same turn.
         l.listening?.takeIf { it != interaction }?.let {
             l.sessionOf[interaction] = it
@@ -639,9 +671,12 @@ class Assistant(
         l.simplified = m[30] != false
         val visual = Visual.from(m)
         say("Heard \"$transcript\" (request ${describe(body)}, understanding ${describeRead(m[2])})")
-        // The glasses' own understanding of the request, e.g. IN:REPLY_MESSAGE, and its slots.
-        val intent = m[23].asText()
-        say("Understood $intent, slots ${deep(m[26])}")
+        // The glasses' own understanding of the request, e.g. IN:REPLY_MESSAGE, and its slots: fields 23 and 26, or the
+        // OnDeviceIntent {1 name, 4 slots} that Meta's schema puts in 55 and in understanding.nluResult, with 23 and 26 flags.
+        val nlu = m[55].asStruct().ifEmpty { m[2].asStruct()[2].asStruct()[2].asStruct() }
+        val intent = m[23].asText().ifEmpty { nlu[1].asText() }
+        val slots = m[26] as? Map<*, *> ?: nlu[4]
+        say("Understood $intent, slots ${deep(slots)}")
         val waiting = awaitingReply?.takeIf { System.currentTimeMillis() < it.until }
         // The glasses fulfil this one themselves, by switching the session to Live AI; an answer would talk over it.
         if (intent == "IN:START_LIVE_AI") {
@@ -675,9 +710,11 @@ class Assistant(
             }
             // The message itself, as the glasses heard it: their content slot, else the whole utterance.
             waiting != null -> scope.launch {
-                sendReply(l, interaction, transcript, waiting.conversation, slot(m[26], "SL:CONTENT_EXACT").ifEmpty { transcript })
+                sendReply(l, interaction, transcript, waiting.conversation, slot(slots, "SL:CONTENT_EXACT").ifEmpty { transcript })
             }
-            intent == "IN:REPLY_MESSAGE" -> scope.launch { replyRequested(l, interaction, transcript, slot(m[26], "SL:CONTENT_EXACT")) }
+            intent == "IN:REPLY_MESSAGE" -> scope.launch { replyRequested(l, interaction, transcript, slot(slots, "SL:CONTENT_EXACT")) }
+            // Left to the server by the glasses: the phone's player does them at once.
+            phone != null && intent in MEDIA_CONTROLS -> scope.launch { mediaControl(l, interaction, transcript, phone, MEDIA_CONTROLS.getValue(intent)) }
             else -> scope.launch { answer(l, interaction, transcript, visual) }
         }
     }
@@ -708,6 +745,17 @@ class Assistant(
         speakTurn(
             l, interaction, transcript,
             if (why == null) "Tell the wearer the reply to ${conversation.sender} was sent." else "Tell the wearer the reply to ${conversation.sender} could not be sent.",
+        )
+    }
+
+    private suspend fun mediaControl(l: Link, interaction: String, transcript: String, phone: Phone, control: MediaControl) {
+        val done = phone.control(control)
+        record(TurnRecord(interaction, System.currentTimeMillis(), transcript, actions = listOf(control.action(done))))
+        say(if (done.failure == null) "${control.what}: done in ${done.app.ifEmpty { "the phone's player" }}" else "${control.what} did not work: ${done.failure}")
+        speakTurn(
+            l, interaction, transcript,
+            if (done.failure == null) "Tell the wearer in two or three words that ${control.done}."
+            else "Tell the wearer briefly that it did not work: ${done.failure}.",
         )
     }
 
@@ -917,7 +965,8 @@ class Assistant(
         _phase.value = AssistantPhase.SPEAKING
         val voiceId = glassesVoice()
         val answer = netEvent(EV_VOICE_ACTION_RESPONSE, varm(interaction, transcript, text, onGlasses = true, voiceId = voiceId))
-        val complete = netEvent(EV_MWA_VOICE_INTERACTION_COMPLETE, interactionComplete(interaction, text))
+        // An answer that asks something has the glasses listen for the reply, without the wake word.
+        val complete = netEvent(EV_MWA_VOICE_INTERACTION_COMPLETE, interactionComplete(interaction, text, expectsAnswer = ASKS.containsMatchIn(text)))
         // Without simplified forwarding the VARM is acted on as it lands, so the text must be there before it.
         for (event in if (l.simplified) listOf(answer, complete) else listOf(complete, answer)) {
             l.mux.send(m0, event, messageType = MT_NET_EVENT)
@@ -1093,7 +1142,10 @@ class Assistant(
 
     /** Into the diary, in the open conversation unless it names its own. */
     private fun record(turn: TurnRecord) {
-        diary.record(if (turn.conversation.isNotEmpty()) turn else turn.copy(conversation = diary.conversationAt(turn.at, windowMs())))
+        if (turn.conversation.isNotEmpty()) return diary.record(turn)
+        // A follow-up continues the open conversation; a new "Hey Meta" only if it comes right after the last turn.
+        val window = if (link?.fresh?.contains(turn.interactionId) == true) minOf(windowMs(), FRESH_WINDOW_MS) else windowMs()
+        diary.record(turn.copy(conversation = diary.conversationAt(turn.at, window)))
     }
 
     private fun update(interaction: String, change: (TurnRecord) -> TurnRecord) = diary.update(interaction, change)
@@ -1124,6 +1176,9 @@ class Assistant(
         const val REGISTER_AGAIN_MS = 2_500L
         val CHANNEL_CLOSED = Regex("service 15 answered status 0xc0(?:02|10) on channel 0x([0-9a-f]{4})")
         const val QUESTION_GRACE_MS = 3_000L
+        // ev57 field 11, invocationMethod: 1 for the wake word, 3 for a follow-up the glasses listened for.
+        const val FOLLOW_UP_INVOCATION = 3L
+        const val FRESH_WINDOW_MS = 2 * 60_000L
         val WAKE_WORD_ONLY = Regex("^(hey|hi|ehi|ei|ok|okay)?[ ,]*(meta|mata|metta|matta|meda)[.!?]*$", RegexOption.IGNORE_CASE)
         const val MIN_MODEL_MS = 6_000L
         const val PHOTO_WAIT_MS = 8_000L
@@ -1191,9 +1246,27 @@ private fun describeRead(value: Any?): String {
 /** The problem of an answer that came after the glasses had closed its turn: kept, never spoken. */
 const val ANSWER_TOO_LATE = "too late for the glasses"
 
+/** The problem of a turn the glasses did themselves, with no answer from Visor. */
+const val ON_GLASSES = "done on the glasses"
+
+/** An answer that ends on a question. */
+private val ASKS = Regex("""[?？؟][\s"'”’»)]*$""")
+
 /** What the glasses understand as a request for conversation focus. */
 private val FOCUS_INTENTS = setOf(
     "IN:START_CONVERSATION_FOCUS", "IN:STOP_CONVERSATION_FOCUS", "IN:PAUSE_CONVERSATION_FOCUS", "IN:RESUME_CONVERSATION_FOCUS",
+)
+
+/** What the glasses understand as pausing, resuming or skipping what plays. */
+private val MEDIA_CONTROLS = mapOf(
+    "IN:PAUSE_MUSIC" to MediaControl.PAUSE, "IN:PAUSE_MEDIA" to MediaControl.PAUSE,
+    "IN:PAUSE_PODCAST" to MediaControl.PAUSE, "IN:PAUSE_AUDIOBOOK" to MediaControl.PAUSE,
+    "IN:RESUME_MUSIC" to MediaControl.RESUME, "IN:RESUME_MEDIA" to MediaControl.RESUME, "IN:RESUME_PODCAST" to MediaControl.RESUME,
+    "IN:STOP_MUSIC" to MediaControl.STOP, "IN:STOP_MEDIA" to MediaControl.STOP,
+    "IN:STOP_PODCAST" to MediaControl.STOP, "IN:STOP_AUDIOBOOK" to MediaControl.STOP,
+    "IN:SKIP_TRACK_MUSIC" to MediaControl.NEXT, "IN:PLAY_NEXT_SONG" to MediaControl.NEXT,
+    "IN:PREVIOUS_TRACK_MUSIC" to MediaControl.PREVIOUS, "IN:PLAY_PREVIOUS_SONG" to MediaControl.PREVIOUS,
+    "IN:REPLAY_MUSIC" to MediaControl.RESTART, "IN:START_OVER_MEDIA" to MediaControl.RESTART,
 )
 
 /** What the glasses understand as starting, joining or leaving a group conversation. */

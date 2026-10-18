@@ -37,7 +37,7 @@ class ConversationFocusHostScopeTest(unittest.TestCase):
         start = source.index("fun ConversationFocusScreen(")
         end = source.index("/** Where conversation focus stands", start)
         screen = source[start:end]
-        consumers = list(re.finditer(r"LocalHost\.current|LaunchedEffect\(ready\)", screen))
+        consumers = list(re.finditer(r"LocalHost\.current|LaunchedEffect\(host\.ready\)", screen))
         self.assertGreaterEqual(len(consumers), 2, "host read and readiness effect must remain")
         for consumer in consumers:
             with self.subTest(consumer=consumer.group(), line=screen.count("\n", 0, consumer.start()) + 1):
@@ -50,11 +50,11 @@ class ConversationFocusHostScopeTest(unittest.TestCase):
 
     def test_readiness_check_retains_existing_guards_and_key(self):
         source = SCREEN.read_text()
-        effect = re.search(r"LaunchedEffect\(ready\)\s*\{([^}]+)}", source)
+        effect = re.search(r"LaunchedEffect\(host\.ready\)\s*\{([^}]+)}", source)
         self.assertIsNotNone(effect)
         assert effect is not None
         self.assertRegex(effect.group(1),
-                         r"if\s*\(ready\s*&&\s*!state\.configRead\s*&&\s*!state\.busy\)\s*model\.features\.check\(\)")
+                         r"if\s*\(host\.ready\s*&&\s*!state\.configRead\s*&&\s*!state\.busy\)\s*model\.features\.check\(\)")
 
 
 if __name__ == "__main__":
