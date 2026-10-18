@@ -335,7 +335,7 @@ class Brain(
             Dispatchers.IO.dispatch(pending.context, Runnable {
                 try {
                     pending.context.ensureActive()
-                    val answer = request(http, headers, body) { pending.context.ensureActive() }
+                    val answer = request(http, headers, body, progressReadTimeout(pending.context)) { pending.context.ensureActive() }
                     pending.context.ensureActive()
                     pending.resume(answer)
                 } catch (error: Exception) {
@@ -346,12 +346,12 @@ class Brain(
             })
         }
 
-    private fun request(http: HttpURLConnection, headers: Map<String, String>, body: JSONObject, checkCancelled: () -> Unit): JSONObject {
+    private fun request(http: HttpURLConnection, headers: Map<String, String>, body: JSONObject, readTimeoutMs: Int, checkCancelled: () -> Unit): JSONObject {
         checkCancelled()
         http.requestMethod = "POST"
         http.connectTimeout = 5_000
         // A local model reading a picture can take a while; each turn still has its own budget above.
-        http.readTimeout = 45_000
+        http.readTimeout = readTimeoutMs
         http.doOutput = true
         http.setRequestProperty("content-type", "application/json")
         headers.forEach(http::setRequestProperty)

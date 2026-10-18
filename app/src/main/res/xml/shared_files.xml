@@ -3,4 +3,5 @@
 <paths>
     <files-path name="assistant" path="assistant/photos/" />
     <cache-path name="log" path="log/" />
+    <cache-path name="app_logcat" path="app-logcat/" />
 </paths>

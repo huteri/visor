@@ -45,23 +45,45 @@ class Voice(private val context: Context) {
         withContext(Dispatchers.Default) { encodeOpus(resample(pcm.samples, pcm.rate, 48_000)) }
     }
 
+    /** Bounded PCM for a continuous response; encoding belongs to the turn, not the clip. */
+    internal suspend fun progressPcm(text: String, locale: Locale): ShortArray = lock.withLock {
+        require(text.length <= 240) { "Spoken progress: TTS segment exceeds 240 characters" }
+        val wav = File(context.cacheDir, "assistant-progress-tts.wav")
+        try {
+            synthesize(text, locale, wav)
+            check(wav.length() <= 4_000_000) { "Spoken progress: WAV exceeds 4 MB" }
+            withContext(Dispatchers.Default) {
+                val pcm = readWav(wav)
+                check(pcm.samples.size.toLong() <= pcm.rate.toLong() * 20) { "Spoken progress: TTS exceeds 20 seconds" }
+                resample(pcm.samples, pcm.rate, 48_000)
+            }
+        } finally { wav.delete() }
+    }
+
+    internal fun progressEncoder(): ProgressEncoder = PhoneProgressEncoder()
+
     private suspend fun synthesize(text: String, locale: Locale, out: File) {
         val engine = ready()
         if (engine.isLanguageAvailable(locale) >= TextToSpeech.LANG_AVAILABLE) engine.language = locale
         val id = UUID.randomUUID().toString()
         val done = CompletableDeferred<Boolean>().also { pending[id] = it }
         out.delete()
-        check(engine.synthesizeToFile(text, Bundle(), out, id) == TextToSpeech.SUCCESS) { "the phone's text to speech refused the sentence" }
-        val ok = withTimeout(15_000) { done.await() }
-        pending.remove(id)
-        check(ok && out.length() > 44) { "the phone's text to speech failed" }
+        try {
+            check(engine.synthesizeToFile(text, Bundle(), out, id) == TextToSpeech.SUCCESS) { "the phone's text to speech refused the sentence" }
+            val ok = withTimeout(15_000) { done.await() }
+            check(ok && out.length() > 44) { "the phone's text to speech failed" }
+        } finally {
+            pending.remove(id)
+            if (!done.isCompleted) engine.stop()
+        }
     }
 
     private suspend fun ready(): TextToSpeech {
         tts?.let { return it }
         var made: TextToSpeech? = null
         val status = suspendCancellableCoroutine { cont ->
-            made = TextToSpeech(context) { cont.resume(it) }
+            made = TextToSpeech(context) { if (cont.isActive) cont.resume(it) }
+            cont.invokeOnCancellation { made?.shutdown() }
         }
         val engine = checkNotNull(made)
         check(status == TextToSpeech.SUCCESS) { "the phone has no working text to speech" }
@@ -108,11 +130,12 @@ class Voice(private val context: Context) {
             val size = b.getInt(at + 4)
             val body = at + 8
             if (id == "fmt ") {
+                check(body + 16 <= bytes.size) { "truncated WAV format" }
                 channels = b.getShort(body + 2).toInt()
                 rate = b.getInt(body + 4)
                 bits = b.getShort(body + 14).toInt()
             } else if (id == "data") {
-                check(bits == 16 && rate > 0) { "the speech is $bits-bit at $rate Hz" }
+                check(bits == 16 && rate in 8_000..192_000 && channels in 1..8) { "the speech is $bits-bit at $rate Hz" }
                 val end = if (size <= 0 || body + size > bytes.size) bytes.size else body + size
                 val frames = (end - body) / (2 * channels)
                 val out = ShortArray(frames)
@@ -123,6 +146,7 @@ class Voice(private val context: Context) {
                 }
                 return Pcm(out, rate)
             }
+            check(size >= 0 && size.toLong() + body <= bytes.size) { "invalid WAV chunk" }
             at = body + size + (size and 1)
         }
         error("the WAV has no data")

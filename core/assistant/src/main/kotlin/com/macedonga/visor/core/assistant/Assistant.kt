@@ -29,6 +29,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -197,6 +198,7 @@ class Assistant(
     private fun listen(l: Link, interaction: String) {
         ears?.stop()
         val ended = CompletableDeferred<Unit>().also { micEnded = it }
+        if (l.listening != null && l.listening != interaction) progressTurn.incrementAndGet()
         l.listening = interaction
         val recognition = l.fallback.listen(interaction)
         if (interaction.isEmpty() || !store.config.value.enabled) return
@@ -217,6 +219,7 @@ class Assistant(
                             l.mux.send(checkNotNull(l.m0), netEvent(EV_START_OF_USER_SPEECH, ThriftWriter().str(1, sub).i64(2, startMs).done()), messageType = MT_NET_EVENT)
                             if (!l.fallback.allowed(recognition)) return@launch
                             l.taken.add(sub)
+                            l.sessionOf[sub] = interaction
                             answer(l, sub, text, Visual(null, "", "", false, ""))
                         }
                         // Nothing came from the glasses: the whole question was left to the server. Their own
@@ -343,6 +346,7 @@ class Assistant(
                 val channel = CHANNEL_CLOSED.find(warning)?.groupValues?.get(1)?.toIntOrNull(16) ?: return@collect
                 val l = link ?: return@collect
                 if (channel != (l.m0 ?: -1) and 0x7FFF && channel != (l.s0 ?: -1) and 0x7FFF) return@collect
+                progressTurn.incrementAndGet() // Channel closure revokes queued audio immediately.
                 again?.cancel()
                 again = scope.launch {
                     delay(REGISTER_AGAIN_MS)
@@ -501,6 +505,7 @@ class Assistant(
         // Bare frames use the same initialized-control-channel gate as enveloped frames.
         val m0 = l.m0 ?: return
         if (type == MT_START_INTERACTION) {
+            progressTurn.incrementAndGet() // New interaction revokes previous delayed audio.
             val fields = runCatching { Thrift.loads(blob) }.getOrDefault(emptyMap())
             // Use case 3 is LIVE_AI_INTERACTION; after a switch to LIVE_AI the next interaction is the session's.
             if (fields[5] == 3L || liveAi.phase.value == LiveAiPhase.STARTING) liveAi.onStartInteraction(fields, l.locale)
@@ -775,16 +780,39 @@ class Assistant(
 
     // --- answering -----------------------------------------------------------
 
+    private val progressTurn = java.util.concurrent.atomic.AtomicLong()
+
     private suspend fun answer(l: Link, interaction: String, transcript: String, visual: Visual) {
+        val turn = progressTurn.incrementAndGet()
+        val startedMono = android.os.SystemClock.elapsedRealtime()
+        // Bind opt-in ownership before image/OCR suspension. A revoked opt-in turn must never
+        // fall through to baseline when settings change while its input is being prepared.
+        val configGeneration = store.generation.get()
+        val config = store.config.value
+        val voiceId = glassesVoice()
+        val session = l.sessionOf[interaction]
+        val progressOwned: (() -> Boolean)? = if (SpokenProgressPolicy.eligible(config, liveAi.active, l.sessionTurn)) {
+            { link === l && progressTurn.get() == turn && store.generation.get() == configGeneration && store.config.value == config &&
+                glassesVoice() == voiceId && interaction !in l.closed && (session == null || session !in l.closed) &&
+                !liveAi.active && !l.sessionTurn && connection.state.value.link == LinkState.READY }
+        } else null
+        fun preparationRevoked(): Boolean {
+            if (progressOwned == null || progressOwned()) return false
+            update(interaction) { it.copy(problem = "Spoken progress turn stopped: ownership lost during preparation; limit ${SPOKEN_PROGRESS_TURN_MS / 1000} s") }
+            if (link === l) _phase.value = AssistantPhase.LISTENING
+            return true
+        }
         val started = System.currentTimeMillis()
         record(TurnRecord(interaction, started, transcript))
         _phase.value = AssistantPhase.THINKING
         var problem = ""
         // During the Live every question comes with the picture: the wearer is showing it.
         val live = if (store.config.value.vision) runCatching { liveFrame() }.getOrNull()?.let { toModelJpeg(it) } else null
+        if (preparationRevoked()) return
         if (live != null) say("Answering with the Live view's picture")
         val visualQuestion = live != null || (store.config.value.vision && (visual.glassesCaptured || visual.glassesWantImage || soundsVisual(transcript)))
         val image = live ?: if (visualQuestion) photo(l, interaction, visual) else null
+        if (preparationRevoked()) return
         if (image != null) {
             val file = File(photos, "$interaction.jpg")
             runCatching {
@@ -800,6 +828,11 @@ class Assistant(
                 .takeIf { visualQuestion && image == null && read.isNullOrBlank() },
             read?.takeIf { it.isNotBlank() }?.let { "The glasses' OCR read this text in what the wearer sees, line by line, with errors: ${it.take(MAX_OCR)}" },
         ).joinToString(" ")
+        if (preparationRevoked()) return
+        if (progressOwned != null) {
+            answerWithProgress(l, interaction, transcript, image, note, startedMono, config, progressOwned)
+            return
+        }
         val waiting = scope.launch { holdOn(l) }
         val reply = try {
             // The glasses give up after their processing timeout; speech and streaming need the last seconds of it.
@@ -837,15 +870,121 @@ class Assistant(
         }
     }
 
+    private suspend fun answerWithProgress(
+        l: Link, interaction: String, transcript: String, image: ByteArray?, note: String,
+        started: Long, config: AssistantConfig, owned: () -> Boolean,
+    ) {
+        val streamId = l.streamIds[interaction] ?: l.sessionOf[interaction]?.let { l.streamIds[it] }
+        val session = l.sessionOf[interaction]
+        val nativeFinal = config.glassesVoice && !l.sessionTurn
+        val m0 = checkNotNull(l.m0)
+        val s0 = checkNotNull(l.s0)
+        suspend fun send(channel: Int, bytes: ByteArray, type: Int? = null) {
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            check(owned()) { "Spoken progress: turn ownership lost" }
+            if (type == null) l.mux.send(channel, bytes) else l.mux.send(channel, bytes, messageType = type)
+        }
+        var first = true
+        var streamOpened = false
+        var mono = 0L
+        var reply = Reply("")
+        val waiting = scope.launch {
+            try { holdOn(l) { check(owned()) { "Spoken progress: keepalive ownership lost" } } }
+            catch (_: Exception) { /* Turn controller owns the visible cancellation result. */ }
+        }
+        val sink = object : ProgressSink {
+            override suspend fun open() {
+                check(!streamId.isNullOrEmpty()) { "Spoken progress: no interaction-owned stream id" }
+                // Same proven preamble, but each write validates this turn's ownership.
+                val events = listOf(
+                    Triple(MT_NET_EVENT, EV_START_OF_USER_SPEECH, ThriftWriter().str(1, interaction).done()),
+                    Triple(0, EV_FINAL_TRANSCRIPTION, ThriftWriter().str(1, transcript).i32(2, 0).str(4, "").bool(7, false).str(8, interaction).done()),
+                    Triple(0, EV_ON_PHONE_UNDERSTANDING, ThriftWriter().str(1, interaction).bool(2, false).str(3, REPLY_INTENT).bool(4, false).done()),
+                )
+                for ((type, event, body) in events) { send(m0, netEvent(event, body), type); delay(20) }
+                mono = android.os.SystemClock.elapsedRealtime()
+                send(m0, netEvent(EV_TTS_START_INFO, ThriftWriter().i64(1, System.currentTimeMillis()).i64(2, mono).str(3, interaction).done()), MT_NET_EVENT)
+                delay(20)
+                val header = Wire.fieldBytes(1, streamId.toByteArray()) + Wire.fieldBytes(2, interaction.toByteArray()) +
+                    Wire.fieldVarint(4, 1) + Wire.fieldVarint(7, 1) + Wire.fieldVarint(19, 1)
+                send(s0, header, MT_STREAM_HEADER)
+                streamOpened = true
+                _phase.value = AssistantPhase.SPEAKING
+            }
+            override suspend fun audio(packet: OpusPacket) {
+                val frame = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(packet.data.size).array() + packet.data
+                send(s0, frame, if (first) MT_STREAM_AUDIO else null)
+                if (first && l.simplified) {
+                    send(m0, netEvent(EV_VOICE_ACTION_RESPONSE, varm(interaction, transcript, "")), MT_NET_EVENT)
+                    waiting.cancel()
+                }
+                first = false
+            }
+            override suspend fun finish(text: String) {
+                if (nativeFinal) {
+                    say("Spoken progress: native handoff begin (experimental)")
+                    waiting.cancel()
+                }
+                send(s0, ByteArray(0), MT_STREAM_END)
+                if (!nativeFinal && !l.simplified) send(m0, netEvent(EV_VOICE_ACTION_RESPONSE, varm(interaction, transcript, text)), MT_NET_EVENT)
+                send(m0, netEvent(EV_TTS_END_INFO, ThriftWriter().i64(1, System.currentTimeMillis()).i64(2, mono).i64(3, 7000).str(4, interaction).done()), MT_NET_EVENT)
+                if (!nativeFinal) send(m0, netEvent(EV_KEEP_AIR_SESSION_ALIVE, ThriftWriter().str(1, "VoiceActionResponseMessage").i32(2, (mono and 0xFFFF).toInt()).i32(3, 1).done()), MT_NET_EVENT)
+            }
+        }
+        try {
+            val result = SpokenProgress(
+                nowMs = { android.os.SystemClock.elapsedRealtime() }, owned = owned,
+                synthesize = { voice.progressPcm(it, l.locale) }, encoder = { voice.progressEncoder() }, sink = sink, note = ::say,
+                canStream = !streamId.isNullOrEmpty(),
+                nativeFinal = if (nativeFinal) { text ->
+                    val context = kotlinx.coroutines.currentCoroutineContext()
+                    speakOnGlasses(l, interaction, transcript, text) {
+                        context.ensureActive() // Check cancellation and ownership before every native wire write.
+                        check(owned()) { "Spoken progress: native final ownership lost" }
+                    }
+                    say("Spoken progress: native completion sent (not playback confirmation)")
+                } else null,
+                normalFinal = { text -> deliver(l, interaction, transcript, text) { check(owned()) { "Spoken progress: final ownership lost" } } },
+            ).run(started, minOf(config.answerWaitSeconds.toLong(), processingTimeoutS() ?: config.answerWaitSeconds.toLong()), progressPhrase(l.locale)) {
+                reply = try { kotlinx.coroutines.withContext(ProgressNetworkBudget()) { brain.answer(transcript, l.locale, pastOf(interaction), image, note) } }
+                catch (cancel: kotlinx.coroutines.CancellationException) { throw cancel }
+                catch (error: Exception) {
+                    say("Spoken progress: model failed: ${error.message}")
+                    Reply(fallback(l.locale, config.apiKey.isBlank() && config.provider == Provider.CLAUDE))
+                }
+                reply.text
+            }
+            check(owned()) { "Spoken progress: ownership lost before final" }
+            val sent = result.durationMs
+            check(owned()) { "Spoken progress: ownership lost after delivery" }
+            l.answered.add(interaction)
+            session?.let { l.answered.add(it) }
+            update(interaction) { it.copy(answer = reply.text, sentMs = sent, modelMs = android.os.SystemClock.elapsedRealtime() - started, remembered = reply.remembered, actions = reply.actions) }
+        } catch (error: Exception) {
+            val reason = "Spoken progress ${if (streamOpened) "stream" else "turn"} stopped: ${error.message ?: error::class.simpleName}; limit ${SPOKEN_PROGRESS_TURN_MS / 1000} s"
+            say(reason)
+            update(interaction) { it.copy(answer = reply.text, problem = reason) }
+        } finally {
+            waiting.cancel()
+            if (owned()) _phase.value = AssistantPhase.LISTENING
+        }
+    }
+
+    private fun progressPhrase(locale: Locale): String = when (locale.language) {
+        "it" -> "Sto ancora preparando la risposta."
+        else -> "Still working on your answer."
+    }
+
     /**
      * While the model thinks: KeepWearableAirSessionAlive every few seconds, which the server sends to keep the
      * glasses waiting for an answer that is on its way.
      */
-    private suspend fun holdOn(l: Link) {
+    private suspend fun holdOn(l: Link, validate: () -> Unit = {}) {
         var seq = 1
         while (true) {
             delay(HOLD_ON_MS)
             val m0 = l.m0 ?: return
+            validate()
             l.mux.send(m0, netEvent(EV_KEEP_AIR_SESSION_ALIVE, ThriftWriter().str(1, "AwaitingResponse").i32(2, 20_000).i32(3, seq++).done()), messageType = MT_NET_EVENT)
         }
     }
@@ -929,18 +1068,19 @@ class Assistant(
     }
 
     /** Speak [text] as [interaction]'s answer in the voice chosen. The milliseconds of audio sent, 0 in the glasses' voice. */
-    private suspend fun deliver(l: Link, interaction: String, transcript: String, text: String): Long {
+    private suspend fun deliver(l: Link, interaction: String, transcript: String, text: String, validate: () -> Unit = {}): Long {
+        validate()
         if (store.config.value.glassesVoice && !l.sessionTurn) {
-            speakOnGlasses(l, interaction, transcript, text)
+            speakOnGlasses(l, interaction, transcript, text, validate)
             return 0
         }
         val packets = voice.speak(text, l.locale)
-        stream(l, interaction, transcript, text, packets)
+        stream(l, interaction, transcript, text, packets, validate)
         return packets.sumOf { it.durationUs } / 1000
     }
 
     /** ev71, ev52 and ev342, which open every answer. ev52 and ev342 go at a tagged type 0, as the app sends them. */
-    private suspend fun preamble(l: Link, interaction: String, transcript: String, text: String) {
+    private suspend fun preamble(l: Link, interaction: String, transcript: String, text: String, validate: () -> Unit = {}) {
         val m0 = checkNotNull(l.m0)
         val e71 = ThriftWriter().str(1, interaction).done()
         val e52 = ThriftWriter().str(1, transcript.ifEmpty { text }).i32(2, 0).str(4, "").bool(7, false).str(8, interaction).done()
@@ -950,6 +1090,7 @@ class Assistant(
             Triple(0, EV_FINAL_TRANSCRIPTION, e52),
             Triple(0, EV_ON_PHONE_UNDERSTANDING, e342),
         )) {
+            validate()
             l.mux.send(m0, netEvent(event, body), messageType = type)
             delay(20)
         }
@@ -959,9 +1100,9 @@ class Assistant(
      * The answer in the glasses' own voice: a VARM that streams nothing, then ev60 with the text, which is what makes
      * them speak it with their own TTS.
      */
-    private suspend fun speakOnGlasses(l: Link, interaction: String, transcript: String, text: String) {
+    private suspend fun speakOnGlasses(l: Link, interaction: String, transcript: String, text: String, validate: () -> Unit = {}) {
         val m0 = checkNotNull(l.m0)
-        preamble(l, interaction, transcript, text)
+        preamble(l, interaction, transcript, text, validate)
         _phase.value = AssistantPhase.SPEAKING
         val voiceId = glassesVoice()
         val answer = netEvent(EV_VOICE_ACTION_RESPONSE, varm(interaction, transcript, text, onGlasses = true, voiceId = voiceId))
@@ -969,11 +1110,13 @@ class Assistant(
         val complete = netEvent(EV_MWA_VOICE_INTERACTION_COMPLETE, interactionComplete(interaction, text, expectsAnswer = ASKS.containsMatchIn(text)))
         // Without simplified forwarding the VARM is acted on as it lands, so the text must be there before it.
         for (event in if (l.simplified) listOf(answer, complete) else listOf(complete, answer)) {
+            validate()
             l.mux.send(m0, event, messageType = MT_NET_EVENT)
             delay(20)
         }
         val mono = System.nanoTime() / 1_000_000
         val e392 = ThriftWriter().str(1, "VoiceActionResponseMessage").i32(2, (mono and 0xFFFF).toInt()).i32(3, 1).done()
+        validate()
         l.mux.send(m0, netEvent(EV_KEEP_AIR_SESSION_ALIVE, e392), messageType = MT_NET_EVENT)
         say("Answered in the glasses' voice${voiceId?.let { " ($it)" }.orEmpty()}: \"$text\"")
     }
@@ -982,14 +1125,18 @@ class Assistant(
      * The answer, in the app's order: ev71, ev52, ev342, ev388; the stream header and the first
      * audio message; the VARM; the rest of the audio as bare frames in real time; 6000; ev389, ev392.
      */
-    private suspend fun stream(l: Link, interaction: String, transcript: String, text: String, packets: List<OpusPacket>) {
+    private suspend fun stream(l: Link, interaction: String, transcript: String, text: String, packets: List<OpusPacket>, validate: () -> Unit = {}) {
         val mux = l.mux
+        suspend fun checkedSend(channel: Int, payload: ByteArray, messageType: Int? = null) {
+            validate()
+            if (messageType == null) mux.send(channel, payload) else mux.send(channel, payload, messageType = messageType)
+        }
         val m0 = checkNotNull(l.m0)
         val s0 = checkNotNull(l.s0)
-        preamble(l, interaction, transcript, text)
+        preamble(l, interaction, transcript, text, validate)
         val mono = System.nanoTime() / 1_000_000
         val e388 = ThriftWriter().i64(1, System.currentTimeMillis()).i64(2, mono).str(3, interaction).done()
-        mux.send(m0, netEvent(EV_TTS_START_INFO, e388), messageType = MT_NET_EVENT)
+        checkedSend(m0, netEvent(EV_TTS_START_INFO, e388), messageType = MT_NET_EVENT)
         delay(20)
 
         // Field 1 is the stream the glasses allocated. Without it they drop the stream silently.
@@ -997,7 +1144,7 @@ class Assistant(
         val header = (if (streamId.isNotEmpty()) Wire.fieldBytes(1, streamId.toByteArray()) else ByteArray(0)) +
             Wire.fieldBytes(2, interaction.toByteArray()) + Wire.fieldVarint(4, 1) + Wire.fieldVarint(7, 1) + Wire.fieldVarint(19, 1)
         if (streamId.isEmpty()) say("No stream id from the glasses for this answer; it may not play")
-        mux.send(s0, header, messageType = MT_STREAM_HEADER)
+        checkedSend(s0, header, messageType = MT_STREAM_HEADER)
 
         _phase.value = AssistantPhase.SPEAKING
         val answer = netEvent(EV_VOICE_ACTION_RESPONSE, varm(interaction, transcript, text))
@@ -1008,25 +1155,25 @@ class Assistant(
                 acc + ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(p.data.size).array() + p.data
             }
             if (i == 0) {
-                mux.send(s0, frame, messageType = MT_STREAM_AUDIO)
+                checkedSend(s0, frame, messageType = MT_STREAM_AUDIO)
                 // The VARM goes after the first audio message, never before; without simplified forwarding it would
                 // end the turn on arrival, so it waits for the end of the audio.
-                if (l.simplified) mux.send(m0, answer, messageType = MT_NET_EVENT)
+                if (l.simplified) checkedSend(m0, answer, messageType = MT_NET_EVENT)
             } else {
                 // A bare header: tagged with type 0, only the first 40 ms would ever play.
-                mux.send(s0, frame)
+                checkedSend(s0, frame)
             }
             dueUs += chunk.sumOf { it.durationUs }
             val wait = dueUs / 1000 - (System.nanoTime() - start) / 1_000_000
             if (wait > 0) delay(wait)
         }
-        mux.send(s0, ByteArray(0), messageType = MT_STREAM_END)
-        if (!l.simplified) mux.send(m0, answer, messageType = MT_NET_EVENT)
+        checkedSend(s0, ByteArray(0), messageType = MT_STREAM_END)
+        if (!l.simplified) checkedSend(m0, answer, messageType = MT_NET_EVENT)
 
         val e389 = ThriftWriter().i64(1, System.currentTimeMillis()).i64(2, mono).i64(3, 7000).str(4, interaction).done()
         val e392 = ThriftWriter().str(1, "VoiceActionResponseMessage").i32(2, (mono and 0xFFFF).toInt()).i32(3, 1).done()
         for ((event, body) in listOf(EV_TTS_END_INFO to e389, EV_KEEP_AIR_SESSION_ALIVE to e392)) {
-            mux.send(m0, netEvent(event, body), messageType = MT_NET_EVENT)
+            checkedSend(m0, netEvent(event, body), messageType = MT_NET_EVENT)
             delay(20)
         }
         say("Answered: \"$text\"")
