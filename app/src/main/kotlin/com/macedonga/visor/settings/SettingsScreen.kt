@@ -119,6 +119,7 @@ import com.macedonga.visor.core.settings.display
 import com.macedonga.visor.core.settings.offeredOn
 import com.macedonga.visor.features.Feature
 import com.macedonga.visor.features.Standing
+import com.macedonga.visor.features.featureFace
 import com.macedonga.visor.gallery.ImportChoice
 import com.macedonga.visor.gallery.ProgressRing
 import com.macedonga.visor.gallery.RoundIcon
@@ -171,6 +172,7 @@ class SettingsViewModel @Inject constructor(
     val backups: Backups,
     val updates: com.macedonga.visor.update.Updates,
     val features: com.macedonga.visor.features.Features,
+    val hearing: com.macedonga.visor.core.assistant.Hearing,
 ) : ViewModel()
 
 /**
@@ -237,7 +239,7 @@ fun SettingsScreen(open: (NavKey) -> Unit, model: SettingsViewModel = hiltViewMo
                 SearchField(query, { query = it }, stringResource(R.string.settings_search), Modifier.padding(horizontal = 16.dp).padding(top = 20.dp, bottom = 18.dp))
             }
             if (query.isBlank()) {
-                item(key = "tiles") { Tiles(model) }
+                item(key = "tiles") { Tiles(model, open) }
                 for ((i, card) in Topic.CARDS.withIndex()) {
                     item(key = "card-$i") {
                         Column(Modifier.padding(top = if (i == 0) 18.dp else 14.dp)) {
@@ -321,10 +323,19 @@ fun placeOf(topic: Topic): NavKey = when (topic) {
  * held and moved, it follows the finger and the others make room.
  */
 @Composable
-private fun Tiles(model: SettingsViewModel) {
+private fun Tiles(model: SettingsViewModel, open: (NavKey) -> Unit) {
     val host = LocalHost.current
     val ids by model.pins.ids.collectAsStateWithLifecycle()
-    val shown = ids.filter { it.startsWith("v:") && model.toggles.byId(it.removePrefix("v:")) != null || it.startsWith("g:") }
+    val shown = ids.filter {
+        it.startsWith("v:") && model.toggles.byId(it.removePrefix("v:")) != null || it.startsWith("g:") ||
+            it.startsWith("f:") && Feature.byId(it.removePrefix("f:")) != null
+    }
+    // A pinned feature's switches come in the glasses' configuration: read it once they are there.
+    val features by model.features.state.collectAsStateWithLifecycle()
+    LaunchedEffect(host.ready) {
+        val pinned = shown.filter { it.startsWith("f:") }.mapNotNull { Feature.byId(it.removePrefix("f:")) }
+        if (host.ready && !features.configRead && !features.busy && pinned.any { it.needsConfig }) model.features.check()
+    }
     BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
         val gap = 10.dp
         val cellW = (maxWidth - gap * (COLUMNS - 1)) / COLUMNS
@@ -365,7 +376,7 @@ private fun Tiles(model: SettingsViewModel) {
                         },
                 ) {
                     Tile(
-                        id, model,
+                        id, model, open,
                         onLift = {
                             host.haptics.tick(0.6f)
                             dragging = id
@@ -407,7 +418,7 @@ private fun Tiles(model: SettingsViewModel) {
  * ([onDrop], with how far it travelled). One detector for all three, so a hold never also counts as a tap.
  */
 @Composable
-private fun Tile(id: String, model: SettingsViewModel, onLift: () -> Unit, onMove: (Offset) -> Unit, onDrop: (Float) -> Unit) {
+private fun Tile(id: String, model: SettingsViewModel, open: (NavKey) -> Unit, onLift: () -> Unit, onMove: (Offset) -> Unit, onDrop: (Float) -> Unit) {
     val host = LocalHost.current
     val blocked = stringResource(R.string.settings_locked)
     var sheet by remember { mutableStateOf(false) }
@@ -415,6 +426,7 @@ private fun Tile(id: String, model: SettingsViewModel, onLift: () -> Unit, onMov
     val state: String
     val on: Boolean?
     val locked: Boolean
+    val busy: Boolean
     val act: () -> Unit
     if (id.startsWith("v:")) {
         val toggle = model.toggles.byId(id.removePrefix("v:")) ?: return
@@ -423,7 +435,16 @@ private fun Tile(id: String, model: SettingsViewModel, onLift: () -> Unit, onMov
         on = now
         state = stringResource(if (now) R.string.sum_on else R.string.sum_off)
         locked = false
+        busy = false
         act = { toggle.set(!now) }
+    } else if (id.startsWith("f:")) {
+        val face = featureFace(Feature.byId(id.removePrefix("f:")) ?: return, model.features, model.hearing, open)
+        title = face.title
+        on = face.on
+        state = face.state
+        locked = !host.ready
+        busy = face.busy
+        act = face.act
     } else {
         val key = id.removePrefix("g:")
         val info = host.settings.catalogue[key]
@@ -431,6 +452,7 @@ private fun Tile(id: String, model: SettingsViewModel, onLift: () -> Unit, onMov
         val value = host.state.valueOf(key, info)
         title = spec.label
         locked = !host.ready || info?.writable != true
+        busy = key in host.state.pending
         on = if (spec.control == Control.Toggle) value?.let { asBool(it) != spec.invert } else null
         state = value?.let { spec.display(it) } ?: stringResource(R.string.settings_not_read)
         act = {
@@ -500,7 +522,7 @@ private fun Tile(id: String, model: SettingsViewModel, onLift: () -> Unit, onMov
             Icon(tileIcon(id), null, Modifier.size(22.dp), tint = ink)
             Spacer(Modifier.weight(1f))
             // Sent to the glasses and not yet seen back.
-            if (id.startsWith("g:") && id.removePrefix("g:") in host.state.pending) ProgressRing(null, Modifier.size(16.dp), color = ink)
+            if (busy) ProgressRing(null, Modifier.size(16.dp), color = ink)
         }
         Column {
             Text(title, style = Visor.type.label, color = ink, maxLines = 2, overflow = TextOverflow.Ellipsis)

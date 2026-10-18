@@ -43,6 +43,7 @@ import com.macedonga.visor.core.settings.RlDriveResponder
 import com.macedonga.visor.core.settings.SVC_RLDRIVE
 import com.macedonga.visor.core.transport.FileWireLog
 import com.macedonga.visor.core.transport.LinkMeter
+import com.macedonga.visor.phone.PhoneActions
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -166,8 +167,9 @@ object ConnectionModule {
         hub: McpHub,
         hearing: Hearing,
         glassesConfig: GlassesConfig,
+        phone: PhoneActions,
     ): Assistant = Assistant(
-        context, connection, Voice(context), Brain({ config.config.value }, diary, hub, config), config, airship, diary,
+        context, connection, Voice(context), Brain({ config.config.value }, diary, hub, config, phone), config, airship, diary,
         live.wifiSession, live::frameNow,
         object : LiveAiCamera {
             // A Live view already running is the camera; only a stream Live AI opened is Live AI's to close.
@@ -182,6 +184,7 @@ object ConnectionModule {
         { com.macedonga.visor.core.settings.asBool(settings.value("detailed_responses_live_ai_enabled")) },
         hearing,
         { (glassesConfig.state.value.values[com.macedonga.visor.language.PROCESSING_TIMEOUT] as? Number)?.toLong() },
+        phone,
     )
 
     @Provides

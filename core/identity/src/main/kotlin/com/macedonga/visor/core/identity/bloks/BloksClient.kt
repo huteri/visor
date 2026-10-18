@@ -41,6 +41,7 @@ class BloksClient(
     }
 
     private fun query(doc: String, query: String, appId: String, params: String, screen: Boolean, component: Boolean = false): String {
+        if (token.isEmpty()) throw BloksError("This build has no Meta app token. Add VISOR_META_FRL_TOKEN to local.properties and build again.")
         val variables = buildJsonObject {
             put("params", buildJsonObject {
                 put("app_id", appId)

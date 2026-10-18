@@ -55,13 +55,13 @@ fun ConversationFocusScreen(model: FeaturesModel = hiltViewModel()) {
     val standing = state.standings[feature] ?: Standing.UNKNOWN
     val allowed = standing == Standing.ON
     val (style, volume) = tuning
+
     SettingsPage(stringResource(R.string.feature_cf), stringResource(R.string.cf_lede)) {
         item(key = "now") {
-            // LocalHost is provided by SettingsPage, so read it in the composed item.
-            val ready = LocalHost.current.ready
+            val host = LocalHost.current
             // The minimum build focus needs is one of Meta's switches: read them once the glasses are there.
-            LaunchedEffect(ready) {
-                if (ready && !state.configRead && !state.busy) model.features.check()
+            LaunchedEffect(host.ready) {
+                if (host.ready && !state.configRead && !state.busy) model.features.check()
             }
             FocusNow(hearing, allowed, model)
         }
@@ -158,7 +158,8 @@ private fun FocusNow(hearing: HearingState, allowed: Boolean, model: FeaturesMod
             hearing.volume?.let { stringResource(R.string.cf_now_volume, if (it > 0) "+$it" else "$it") },
         ).joinToString(" · ").ifEmpty { stringResource(R.string.cf_now_on_sub) }
         paused -> stringResource(causeWords(hearing.cause))
-        else -> stringResource(R.string.cf_now_off_sub)
+        model.features.holdStartsFocus(host.state) -> stringResource(R.string.cf_now_off_sub)
+        else -> stringResource(R.string.cf_now_off_here)
     }
     Card {
         Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -202,6 +203,7 @@ private fun causeWords(cause: HearingCause): Int = when (cause) {
 
 private fun refusalWords(refusal: HearingRefusal): Int = when (refusal) {
     HearingRefusal.NUX_REQUIRED -> R.string.cf_refused_setup
+    HearingRefusal.NO_ACCESS -> R.string.cf_refused_access
     HearingRefusal.GEOGATED -> R.string.cf_refused_region
     HearingRefusal.INVALID_DEVICE -> R.string.cf_refused_device
     HearingRefusal.BT_REQUIRED -> R.string.cf_refused_bluetooth

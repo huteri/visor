@@ -66,7 +66,7 @@ SHA-256: F6:01:C7:FE:63:EF:04:E0:7F:66:8A:EC:BA:5A:2B:9C:23:90:C4:C0:22:B5:2B:5F
 
 You need JDK 21 (the one bundled with Android Studio works) and the Android SDK with platform 37.
 
-Setup logs in to Meta with the Meta AI app's own client tokens. They are not in this repository. Add them to `local.properties` before you build:
+Setup logs in to Meta with the Meta AI app's own client tokens. They are not in this repository: extract them from the official Meta AI app, where they are the strings that start with `HW|`, `AR|` and `FRL|`. Add them to `local.properties` before you build:
 
 ```
 VISOR_META_HW_TOKEN=HW|...
