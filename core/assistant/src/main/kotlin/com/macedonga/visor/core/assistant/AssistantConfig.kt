@@ -4,6 +4,7 @@ import android.content.Context
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import org.json.JSONObject
 
 /** How the assistant answers. The key stays in this app's private storage. */
 data class AssistantConfig(
@@ -22,18 +23,39 @@ data class AssistantConfig(
     val instructions: String = "",
     // How long a conversation is remembered after its last question.
     val memoryMinutes: Int = 10,
+    // How long the glasses wait for an answer before they give up, written to them on connect.
+    val answerWaitSeconds: Int = 45,
 )
 
-class AssistantConfigStore(context: Context) {
+/** The waits offered: 20 is the glasses' own; their watchdog ends a turn still processing at 60. */
+val ANSWER_WAITS = listOf(20, 30, 45, 55)
+
+class AssistantConfigStore(context: Context) : FieldBook {
 
     private val prefs = context.getSharedPreferences("assistant", Context.MODE_PRIVATE)
 
     private val _config = MutableStateFlow(load())
     val config: StateFlow<AssistantConfig> = _config.asStateFlow()
 
+    override fun fields(key: String): Fields? = runCatching {
+        JSONObject(prefs.getString(FIELDS, null) ?: return null).optJSONObject(key)
+            ?.let { Fields(it.getBoolean("reasoning_off"), it.getBoolean("completion_tokens")) }
+    }.getOrNull()
+
+    override fun keep(key: String, fields: Fields) {
+        val all = runCatching { JSONObject(prefs.getString(FIELDS, null) ?: "{}") }.getOrDefault(JSONObject())
+        all.put(key, JSONObject().put("reasoning_off", fields.reasoningOff).put("completion_tokens", fields.completionTokens))
+        prefs.edit().putString(FIELDS, all.toString()).apply()
+    }
+
     fun update(change: (AssistantConfig) -> AssistantConfig) {
-        val next = change(_config.value)
+        val before = _config.value
+        val next = change(before)
+        // What a server took holds for the address and models it was found with.
+        val moved = next.provider != before.provider || next.baseUrl != before.baseUrl || next.model != before.model ||
+            next.linesModel != before.linesModel
         prefs.edit()
+            .apply { if (moved) remove(FIELDS) }
             .putBoolean("enabled", next.enabled)
             .putString("provider", next.provider.name)
             .putString("api_key", next.apiKey)
@@ -45,6 +67,7 @@ class AssistantConfigStore(context: Context) {
             .putBoolean("glasses_voice", next.glassesVoice)
             .putString("instructions", next.instructions)
             .putInt("memory_minutes", next.memoryMinutes)
+            .putInt("answer_wait_s", next.answerWaitSeconds)
             .apply()
         _config.value = next
     }
@@ -63,6 +86,11 @@ class AssistantConfigStore(context: Context) {
             glassesVoice = prefs.getBoolean("glasses_voice", d.glassesVoice),
             instructions = prefs.getString("instructions", d.instructions).orEmpty(),
             memoryMinutes = prefs.getInt("memory_minutes", d.memoryMinutes),
+            answerWaitSeconds = prefs.getInt("answer_wait_s", d.answerWaitSeconds),
         )
+    }
+
+    private companion object {
+        const val FIELDS = "server_fields"
     }
 }

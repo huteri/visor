@@ -119,7 +119,7 @@ class GlassesService : Service() {
             holdLe()
             com.macedonga.visor.gallery.notePlaces(this, scope, connection, media.places)
             com.macedonga.visor.gallery.importOnItsOwn(this, scope, connection, media, importChoice)
-            com.macedonga.visor.language.keepOwnVoicePath(scope, connection, glassesConfig, media, glassesSettings, assistantConfig, log)
+            com.macedonga.visor.language.keepAssistantConfig(scope, connection, glassesConfig, media, glassesSettings, assistantConfig, log)
             com.macedonga.visor.settings.keepCameraInLine(scope, glassesSettings, assistantConfig, log)
             notifications = scope.launch {
                 combine(connection.state, liveNow()) { state, now -> state to now }.collect { (state, now) ->

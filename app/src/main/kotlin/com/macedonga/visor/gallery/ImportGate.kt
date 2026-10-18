@@ -71,4 +71,6 @@ fun importProblemText(problem: ImportProblem): String = when (problem.kind) {
     ImportProblem.Kind.NOT_ALLOWED -> stringResource(R.string.import_problem_not_allowed)
     ImportProblem.Kind.FAILED -> stringResource(R.string.import_problem_failed, problem.detail)
     ImportProblem.Kind.CUT_OFF -> stringResource(R.string.import_problem_cut_off)
+    ImportProblem.Kind.DAMAGED -> stringResource(R.string.import_problem_damaged)
+    ImportProblem.Kind.NOT_SAVED -> stringResource(R.string.import_problem_not_saved, problem.detail)
 }

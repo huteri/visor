@@ -117,6 +117,8 @@ import com.macedonga.visor.core.settings.SettingsState
 import com.macedonga.visor.core.settings.asBool
 import com.macedonga.visor.core.settings.display
 import com.macedonga.visor.core.settings.offeredOn
+import com.macedonga.visor.features.Feature
+import com.macedonga.visor.features.Standing
 import com.macedonga.visor.gallery.ImportChoice
 import com.macedonga.visor.gallery.ProgressRing
 import com.macedonga.visor.gallery.RoundIcon
@@ -168,6 +170,7 @@ class SettingsViewModel @Inject constructor(
     val toggles: VisorToggles,
     val backups: Backups,
     val updates: com.macedonga.visor.update.Updates,
+    val features: com.macedonga.visor.features.Features,
 ) : ViewModel()
 
 /**
@@ -195,10 +198,11 @@ fun SettingsScreen(open: (NavKey) -> Unit, model: SettingsViewModel = hiltViewMo
         val stageHeight = maxWidth / STAGE_ASPECT
         val top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
         val bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-        val strip = top + BAR + STRIP
+        val strip = top + BAR + STRIP + STRIP_GAP
         val fullPx = with(density) { stageHeight.toPx() }
         val stripPx = with(density) { strip.toPx() }
         val barPx = with(density) { (top + BAR).toPx() }
+        val pairPx = with(density) { STRIP.toPx() }
         val screenPx = with(density) { maxHeight.toPx() }
         val scrollFold by rememberTrailingFold(fullPx - stripPx) {
             if (list.firstVisibleItemIndex == 0) list.firstVisibleItemScrollOffset.toFloat() else fullPx
@@ -206,7 +210,7 @@ fun SettingsScreen(open: (NavKey) -> Unit, model: SettingsViewModel = hiltViewMo
         fun restHeight() = fullPx - scrollFold * (fullPx - stripPx)
         // Folded, the pair sits in the strip under the bar.
         val spot = StageSpot(closedOf(glasses, mood, stage.lastFolded), liveliness(mood)) {
-            folding(fullPx, stripPx, scrollFold, STRIP_SCALE, barPx + (stripPx - barPx) / 2)
+            folding(fullPx, stripPx, scrollFold, STRIP_SCALE, barPx + pairPx / 2)
         }
         val sheetTop = remember {
             derivedStateOf {
@@ -539,6 +543,11 @@ private fun summary(topic: Topic, model: SettingsViewModel, state: SettingsState
             shown("notification_volume")?.let { stringResource(R.string.sum_sound_volume, it) },
             stringResource(R.string.sum_headphone).takeIf { isOn("sg_headphone_mode_enabled") == true },
         ).joinToString(" · ")
+        Topic.HEARING -> {
+            val features by model.features.state.collectAsStateWithLifecycle()
+            Feature.entries.filter { it.topic == Topic.HEARING && features.standings[it] == Standing.ON }
+                .map { stringResource(it.title) }.joinToString(" · ").ifEmpty { stringResource(R.string.sum_all_off) }
+        }
         Topic.WEAR -> listOfNotNull(
             stringResource(R.string.sum_wear_detection).takeIf { isOn("wear_detection_enabled") == true },
             stringResource(R.string.sum_battery_saver).takeIf { isOn("battery_saver_mode_enabled") == true },
@@ -654,6 +663,11 @@ private fun pageHits(): List<Triple<Int, List<String>, NavKey>> = Topic.entries.
     Triple(R.string.about_title, listOf("version", "versione", "licen"), AboutKey),
     Triple(R.string.notify_apps_title, listOf("app", "notification", "notifiche", "mute"), NotifyAppsKey),
     Triple(R.string.settings_flags, listOf("flag", "mobileconfig", "gate"), FlagsKey),
+    Triple(
+        R.string.topic_hearing,
+        listOf("conversation focus", "focus", "hearing correction", "hearing aid", "group conversation", "udito", "conversazion", "apparecchio"),
+        TopicKey(Topic.HEARING.name),
+    ),
     Triple(R.string.settings_diagnostics, listOf("diagnos", "link", "verdict"), DeviceKey),
     Triple(R.string.settings_event_log, listOf("log", "events", "eventi"), EventLogKey),
     Triple(R.string.meta_ai_memories, listOf("memor", "ricord", "remember"), MemoriesKey),
@@ -665,6 +679,8 @@ private const val COLUMNS = 3
 private const val STILL_PX = 24f
 /** The strip the stage folds into under the bar, and the pair in it, never smaller than on the home. */
 private val STRIP = 148.dp
+/** Under the folded pair, before the sheet. */
+private val STRIP_GAP = 20.dp
 private const val STRIP_SCALE = HOME_STRIP_SCALE
 
 internal fun timeWords(at: Long): String = DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(at))

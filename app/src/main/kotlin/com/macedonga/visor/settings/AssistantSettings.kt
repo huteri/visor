@@ -37,6 +37,7 @@ import androidx.navigation3.runtime.NavKey
 import com.macedonga.visor.IntegrationsKey
 import com.macedonga.visor.MemoriesKey
 import com.macedonga.visor.R
+import com.macedonga.visor.features.featureSection
 import com.macedonga.visor.core.assistant.Assistant
 import com.macedonga.visor.core.assistant.AssistantConfigStore
 import com.macedonga.visor.core.assistant.AssistantPhase
@@ -201,6 +202,14 @@ fun AssistantSettingsScreen(open: (NavKey) -> Unit, model: AssistantViewModel = 
                         )
                     },
                     {
+                        PillsRow(
+                            stringResource(R.string.ai_answer_wait),
+                            com.macedonga.visor.core.assistant.ANSWER_WAITS.map { it to stringResource(R.string.ai_seconds, it) },
+                            config.answerWaitSeconds,
+                            onPick = { s -> model.store.update { it.copy(answerWaitSeconds = s) } },
+                        )
+                    },
+                    {
                         ValueRow(
                             stringResource(R.string.ai_instructions),
                             config.instructions.lineSequence().firstOrNull()?.takeIf { it.isNotBlank() } ?: stringResource(R.string.ai_instructions_none),
@@ -218,6 +227,11 @@ fun AssistantSettingsScreen(open: (NavKey) -> Unit, model: AssistantViewModel = 
                 )
             }
         }
+        item(key = "wake-word") {
+            Column(Modifier.padding(top = 28.dp)) {
+                Rows(row { WakeWordRow(onClick = { open(com.macedonga.visor.WakeWordKey) }) })
+            }
+        }
         item(key = "glasses") {
             Column {
                 SectionLabel(stringResource(R.string.section_on_glasses))
@@ -225,6 +239,7 @@ fun AssistantSettingsScreen(open: (NavKey) -> Unit, model: AssistantViewModel = 
                 Footnote(stringResource(R.string.ai_glasses_note))
             }
         }
+        featureSection(Topic.META_AI, open)
     }
 
     when (sheet) {

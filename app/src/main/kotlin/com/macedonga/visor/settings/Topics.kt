@@ -33,10 +33,13 @@ enum class Topic(val title: Int, val icon: ImageVector, val keys: List<String> =
             "spotify_tap_enabled",
         ),
     ),
+    // Spatial audio is the feature row: the setting does nothing while Meta's switch is off.
     SOUND(
         R.string.topic_sound, VisorIcons.Speaker,
-        listOf("notification_volume", "spatial_media_enabled", "mono_audio_enabled", "sg_headphone_mode_enabled"),
+        listOf("notification_volume", "avc_enabled", "mono_audio_enabled", "sg_headphone_mode_enabled"),
     ),
+    // Conversation focus, hearing correction and group conversations, all the glasses' hearing app.
+    HEARING(R.string.topic_hearing, VisorIcons.Ear),
     WEAR(
         R.string.topic_wear, VisorIcons.Battery,
         listOf("battery_saver_mode_enabled", "wear_detection_enabled", "auto_play_pause_on_don_doff", "water_eject_enabled", "posture_detection_enabled"),
@@ -68,7 +71,7 @@ enum class Topic(val title: Int, val icon: ImageVector, val keys: List<String> =
         /** The main page's cards. */
         val CARDS = listOf(
             listOf(META_AI, LANGUAGE),
-            listOf(NOTIFICATIONS, CONTROLS, SOUND, WEAR),
+            listOf(NOTIFICATIONS, CONTROLS, SOUND, HEARING, WEAR),
             listOf(CAMERA, PHOTOS, LIVE),
             listOf(PRIVACY, PHONE),
         )

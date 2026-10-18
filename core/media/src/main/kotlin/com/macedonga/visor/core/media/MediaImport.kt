@@ -111,11 +111,21 @@ class MediaImport(
     /** Where photos are edited from their originals. */
     val darkroom = Darkroom(context, index)
 
-    private val assembly = Assembly(context, index, places, ::say) { handle ->
-        _saved.update { it + 1 }
+    private val assembly = Assembly(
+        context, index, places, ::say,
+        onSaved = { handle ->
+            _saved.update { it + 1 }
+            _inFlight.update { it - handle }
+            // A problem about captures that have now arrived is no longer one.
+            _problem.update { p -> p?.copy(handles = p.handles - handle)?.takeIf { it.handles.isNotEmpty() } }
+        },
+        onFailed = { handle, why -> report(handle, ImportProblem.Kind.NOT_SAVED, why) },
+    )
+
+    /** [handle] is no longer coming: it joins the problem on show, or starts one of [kind]. */
+    private fun report(handle: String, kind: ImportProblem.Kind, detail: String = "") {
         _inFlight.update { it - handle }
-        // A problem about captures that have now arrived is no longer one.
-        _problem.update { p -> p?.copy(handles = p.handles - handle)?.takeIf { it.handles.isNotEmpty() } }
+        _problem.update { p -> p?.copy(handles = p.handles + handle) ?: ImportProblem(kind, detail, setOf(handle)) }
     }
 
     private val _previews = MutableStateFlow(
@@ -271,7 +281,7 @@ class MediaImport(
                     val missing = handles.filterTo(HashSet()) { it in _inFlight.value && !assembly.waiting(it) }
                     if (missing.isNotEmpty()) {
                         say("${missing.size} did not come: the glasses went quiet")
-                        _problem.value = ImportProblem(ImportProblem.Kind.CUT_OFF, handles = missing)
+                        _problem.update { p -> ImportProblem(ImportProblem.Kind.CUT_OFF, handles = missing + p?.handles.orEmpty()) }
                     }
                 }
             }
@@ -282,7 +292,9 @@ class MediaImport(
             if (!overBluetooth(captures)) {
                 // Glasses that are gone are the thing to fix, whatever Wi-Fi did.
                 val gone = connection.state.value.link != LinkState.READY
-                _problem.value = (if (gone) ImportProblem(ImportProblem.Kind.CUT_OFF) else why).copy(handles = handles intersect _inFlight.value)
+                _problem.update { p ->
+                    (if (gone) ImportProblem(ImportProblem.Kind.CUT_OFF) else why).copy(handles = (handles intersect _inFlight.value) + p?.handles.orEmpty())
+                }
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -458,7 +470,8 @@ class MediaImport(
      * Ask the glasses for a bug report, the way the Meta app does: svc7006 REQUEST_BUG_REPORT. The zip
      * comes back over airship in the "bugreport" namespace and goes to Download/Visor.
      */
-    fun requestBugReport() {
+    /** [mode] is BugReportParams.mode (field 6.1), which the Meta app never sends; null leaves the glasses' default. */
+    fun requestBugReport(mode: Int? = null) {
         val id = java.util.UUID.randomUUID().toString()
         fun entry(key: String, value: String) = ProtoWriter().string(1, key).string(2, value).build()
         val request = ProtoWriter()
@@ -469,6 +482,7 @@ class MediaImport(
             .bytes(5, entry("bug_category_label", "visor"))
             .bytes(5, entry("is_constellation", "false"))
             .bytes(5, entry("bug_report_id", id))
+            .apply { if (mode != null) bytes(6, ProtoWriter().varint(1, mode.toLong()).build()) }
             .build()
         connection.submit { it.sendOnService(SVC_BUG_REPORTER, MT_REQUEST_BUG_REPORT, request) }
         say("Asked the glasses for a bug report. It comes over airship: minutes over Bluetooth, seconds over Wi-Fi.")
@@ -525,18 +539,26 @@ class MediaImport(
                     refresh()
                 }
             }
+            val asked = capture?.takeIf { c -> c.wanted.any { it.id == received.offer.uuid } }
             when {
-                !received.verified -> say("A file arrived damaged and was not saved. Import it again.")
-                capture != null && capture.wanted.any { it.id == received.offer.uuid } -> {
-                    assembly.take(capture, received.offer.uuid, received.file)
-                    markDelivered(capture.handle, received.offer.uuid)
+                !received.verified -> {
+                    say("A file arrived damaged and was not saved${describe(received.offer.uuid)}")
+                    if (asked != null) {
+                        // Delivered as far as the glasses know: the next import asks for it by name.
+                        markDelivered(asked.handle, received.offer.uuid)
+                        report(asked.handle, ImportProblem.Kind.DAMAGED)
+                    }
+                }
+                asked != null -> {
+                    assembly.take(asked, received.offer.uuid, received.file)
+                    markDelivered(asked.handle, received.offer.uuid)
                 }
                 capture != null -> Unit
                 // Not in the list: the full still is always HEIC and the video MP4, the thumbnail JPEG.
                 ext == "heic" || ext == "mp4" -> {
-                    save(received.file, ext, null)
+                    val where = save(received.file, ext, null)
                     _saved.update { it + 1 }
-                    say(if (ext == "mp4") "Saved a video to Movies/Visor" else "Saved a photo to Pictures/Visor")
+                    say(if (ext == "mp4") "Saved a video: $where" else "Saved a photo: $where")
                 }
                 ext == null -> say("Skipped a ${sizeWords(received.offer.size)} file nothing asked for")
             }
@@ -562,7 +584,7 @@ class MediaImport(
         }
     }
 
-    private fun save(file: File, ext: String, capture: Capture?) {
+    private fun save(file: File, ext: String, capture: Capture?): String {
         val video = ext == "mp4"
         val taken = capture?.takenAtMillis ?: System.currentTimeMillis()
         val values = ContentValues().apply {
@@ -581,7 +603,7 @@ class MediaImport(
         val uri = resolver.insert(collection, values) ?: error("the gallery would not take it")
         try {
             checkNotNull(resolver.openOutputStream(uri)).use { out -> file.inputStream().use { it.copyTo(out) } }
-            resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+            return publish(resolver, uri)
         } catch (error: Exception) {
             resolver.delete(uri, null, null)
             throw error

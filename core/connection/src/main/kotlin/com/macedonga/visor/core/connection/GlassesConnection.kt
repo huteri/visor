@@ -228,11 +228,12 @@ class GlassesConnection(
 
     /** Ask svc100, then start the clock on the answer. */
     private suspend fun onReady(host: SessionHost, bundle: IdentityBundle?, scope: CoroutineScope) {
-        // One piece of work, so the two go out in this order every time. The desktop's
-        // run_status submits both at READY as well; neither needs identity auth.
+        // One piece of work, so they go out in this order every time. The desktop's
+        // run_status submits the first two at READY as well; none needs identity auth.
         host.submit { connection ->
             announcePeerAppInfo(connection)
             statusChannel = subscribeOn(connection, null)
+            syncClock(connection)
         }
         if (canaryAnswered) {
             judge(host, bundle)

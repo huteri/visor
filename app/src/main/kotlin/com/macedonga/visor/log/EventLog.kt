@@ -5,6 +5,8 @@ import android.util.Log
 import com.macedonga.visor.BuildConfig
 import com.macedonga.visor.connection.words
 import com.macedonga.visor.core.assistant.Assistant
+import com.macedonga.visor.core.assistant.Hearing
+import com.macedonga.visor.core.assistant.Timers
 import com.macedonga.visor.core.connection.GlassesConnection
 import com.macedonga.visor.core.connection.GlassesState
 import com.macedonga.visor.core.media.LiveStream
@@ -38,6 +40,8 @@ class EventLog @Inject constructor(
     live: LiveStream,
     assistant: Assistant,
     tools: com.macedonga.visor.core.assistant.mcp.McpHub,
+    timers: Timers,
+    hearing: Hearing,
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -86,6 +90,15 @@ class EventLog @Inject constructor(
         }
         scope.launch {
             keeper.notes.collect { add(it) }
+        }
+        scope.launch {
+            timers.notes.collect { add("Timers: $it") }
+        }
+        scope.launch {
+            hearing.notes.collect { add("Hearing: $it") }
+        }
+        scope.launch {
+            assistant.wakeWord.notes.collect { add(it) }
         }
     }
 

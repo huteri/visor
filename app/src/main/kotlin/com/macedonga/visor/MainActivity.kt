@@ -6,13 +6,18 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import com.macedonga.visor.core.design.VisorTheme
+import com.macedonga.visor.update.Updates
+import com.macedonga.visor.update.downloadIntent
 import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.receiveAsFlow
 
 /** The only activity. */
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
+
+    @Inject lateinit var updates: Updates
 
     /** Places to open, from a notification: each is taken once. */
     private val opens = Channel<String>(Channel.CONFLATED)
@@ -21,7 +26,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val open = if (savedInstanceState == null) intent?.getStringExtra(EXTRA_OPEN) else null
-        open?.let(opens::trySend)
+        open?.let(::take)
         // The mark opens the app where the system splash leaves it, unless the launch goes straight somewhere else.
         val mark = savedInstanceState == null && (open == null || open == OPEN_ONBOARDING)
         setContent {
@@ -31,10 +36,16 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        intent.getStringExtra(EXTRA_OPEN)?.let(opens::trySend)
+        intent.getStringExtra(EXTRA_OPEN)?.let(::take)
+    }
+
+    // The update notification comes here, not to the browser: a PendingIntent stays explicit.
+    private fun take(open: String) {
+        if (open == OPEN_UPDATE) updates.newer.value?.let { runCatching { startActivity(downloadIntent(it)) } } else opens.trySend(open)
     }
 
     companion object {
+        const val OPEN_UPDATE = "update"
         const val EXTRA_OPEN = "open"
         const val OPEN_GALLERY = "gallery"
         const val OPEN_LIVE = "live"

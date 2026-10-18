@@ -39,6 +39,7 @@ internal const val EV_VOICE_ACTION_RESPONSE = 53
 internal const val EV_FULFILLMENT_REQUEST = 57
 internal const val EV_MWA_VOICE_INTERACTION_COMPLETE = 60
 internal const val EV_KEEP_MWA_ALIVE = 63
+internal const val EV_MMAI_INTERACTION_REQUEST = 65
 internal const val EV_START_OF_USER_SPEECH = 71
 internal const val EV_REMOTE_IMAGE_CAPTURE_REQUEST = 73
 internal const val EV_REMOTE_IMAGE_CAPTURE_RESPONSE = 74

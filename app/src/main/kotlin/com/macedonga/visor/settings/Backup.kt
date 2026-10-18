@@ -97,7 +97,8 @@ class Backups @Inject constructor(
                 JSONObject()
                     .put("enabled", a.enabled).put("provider", a.provider.name).put("model", a.model).put("linesModel", a.linesModel)
                     .put("baseUrl", a.baseUrl).put("webSearch", a.webSearch).put("vision", a.vision).put("glassesVoice", a.glassesVoice)
-                    .put("instructions", a.instructions).put("memoryMinutes", a.memoryMinutes),
+                    .put("instructions", a.instructions).put("memoryMinutes", a.memoryMinutes)
+                    .put("answerWaitSeconds", a.answerWaitSeconds),
             )
             .put("notifications", JSONObject().put("enabled", notify.enabled.value).put("muted", JSONArray(apps.muted.value.sorted())))
             .put("import", import.mode.value.name)
@@ -147,6 +148,7 @@ class Backups @Inject constructor(
                     glassesVoice = o.optBoolean("glassesVoice", it.glassesVoice),
                     instructions = o.optString("instructions", it.instructions),
                     memoryMinutes = o.optInt("memoryMinutes", it.memoryMinutes),
+                    answerWaitSeconds = o.optInt("answerWaitSeconds", it.answerWaitSeconds),
                 )
             }
         }

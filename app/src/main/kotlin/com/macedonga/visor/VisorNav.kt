@@ -28,6 +28,9 @@ import com.macedonga.visor.connection.GlassesService
 import com.macedonga.visor.core.connection.GlassesTarget
 import com.macedonga.visor.core.design.Visor
 import com.macedonga.visor.device.DeviceScreen
+import com.macedonga.visor.features.ConversationFocusScreen
+import com.macedonga.visor.features.HearingCorrectionScreen
+import com.macedonga.visor.features.HearingTestScreen
 import com.macedonga.visor.gallery.GalleryScreen
 import com.macedonga.visor.home.HomeScreen
 import com.macedonga.visor.log.EventLogScreen
@@ -89,6 +92,18 @@ data object LiveKey : NavKey
 
 @Serializable
 data object FlagsKey : NavKey
+
+@Serializable
+data object ConversationFocusKey : NavKey
+
+@Serializable
+data object HearingCorrectionKey : NavKey
+
+@Serializable
+data object HearingTestKey : NavKey
+
+@Serializable
+data object WakeWordKey : NavKey
 
 @Serializable
 data object LiveSettingsKey : NavKey
@@ -157,7 +172,7 @@ fun VisorNav(opens: kotlinx.coroutines.flow.Flow<String>, markAtLaunch: Boolean)
     CompositionLocalProvider(LocalStage provides stage, LocalBack provides { backStack.removeLastOrNull() }) {
       // The one stage under every screen: those that show the pair leave it a hole and say where it goes.
       Box(Modifier.fillMaxSize().background(Visor.colors.canvas)) {
-        SharedStage(stage, shown = backStack.lastOrNull().let { it == HomeKey || it == SettingsKey || it == LiveKey || it is OnboardingKey })
+        SharedStage(stage, shown = backStack.lastOrNull().let { it == HomeKey || it == SettingsKey || it == LiveKey || it == HearingTestKey || it == WakeWordKey || it is OnboardingKey })
         NavDisplay(
             backStack = backStack,
             onBack = { backStack.removeLastOrNull() },
@@ -266,6 +281,10 @@ fun VisorNav(opens: kotlinx.coroutines.flow.Flow<String>, markAtLaunch: Boolean)
                 entry<LiveSettingsKey> { LiveSettingsScreen() }
                 entry<LanguageKey> { com.macedonga.visor.language.LanguageScreen() }
                 entry<FlagsKey> { FlagsScreen() }
+                entry<ConversationFocusKey> { ConversationFocusScreen() }
+                entry<HearingCorrectionKey> { HearingCorrectionScreen(open) }
+                entry<HearingTestKey> { HearingTestScreen() }
+                entry<WakeWordKey> { com.macedonga.visor.settings.WakeWordScreen() }
                 entry<AssistantSettingsKey> { AssistantSettingsScreen(open) }
                 entry<IntegrationsKey> { com.macedonga.visor.settings.IntegrationsScreen(open) }
                 entry<IntegrationKey> { key ->

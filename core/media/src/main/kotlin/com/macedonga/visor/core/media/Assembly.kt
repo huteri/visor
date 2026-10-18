@@ -28,6 +28,8 @@ class Assembly(
     private val places: PlaceLog,
     private val say: (String) -> Unit,
     private val onSaved: (String) -> Unit,
+    /** A capture that could not be saved, and why. Its pieces stay for the next try. */
+    private val onFailed: (String, String) -> Unit,
 ) {
     private val staging = File(context.filesDir, "staging")
     private val scratch = File(context.cacheDir, "develop")
@@ -72,7 +74,10 @@ class Assembly(
 
     private fun safely(dir: File) {
         if (!dir.isDirectory) return
-        runCatching { assemble(dir) }.onFailure { say("Could not save ${dir.name.take(8)}: ${it.message}") }
+        runCatching { assemble(dir) }.onFailure {
+            say("Could not save ${dir.name.take(8)}: ${it.message}")
+            onFailed(dir.name, it.message ?: it.javaClass.simpleName)
+        }
     }
 
     private fun assemble(dir: File) {
@@ -83,37 +88,23 @@ class Assembly(
         val place = places.near(takenAt)
         val keep = index.originals(handle).apply { mkdirs() }
         val main = File(dir, MAIN)
+        var format = if (type == CaptureType.VIDEO) Format.MP4 else Format.JPEG
         val kept = when (type) {
             CaptureType.VIDEO -> {
-                val uri = insert(video = true, takenAt) { out -> main.inputStream().use { it.copyTo(out) } }
-                say("Saved a video to Movies/Visor")
+                val (uri, where) = insert(format, takenAt) { out -> main.inputStream().use { it.copyTo(out) } }
+                say("Saved a video: $where")
                 Kept(handle, uri.toString(), type, takenAt, lat = place?.lat, lon = place?.lon)
             }
             else -> {
-                val bitmap = decodeStill(main)
-                val motion = File(dir, MOTION).takeIf { type == CaptureType.LIVE && it.exists() }
-                val frames = readFrames(File(dir, FRAMES)).orEmpty()
-                val key = motion?.let { matchFrame(it, bitmap) }
-                val jpeg = try {
-                    jpegWithExif(bitmap, main, takenAt, place, File(scratch, "$handle.jpg"))
-                } finally {
-                    bitmap.recycle()
-                }
-                val keyUs = key?.second ?: -1
-                // The frame log has one record per clip frame, or a still's one record.
-                val shutterNs = when {
-                    key != null -> frames.getOrNull(key.first)?.timeNs ?: 0
-                    frames.size == 1 -> frames[0].timeNs
-                    else -> 0
-                }
-                val bytes = if (motion != null) motionPhoto(jpeg, motion.readBytes(), keyUs) else jpeg
-                val uri = insert(video = false, takenAt) { it.write(bytes) }
-                say(if (motion != null) "Saved a live photo to Pictures/Visor" else "Saved a photo to Pictures/Visor")
                 main.copyTo(File(keep, STILL), overwrite = true)
-                Kept(
-                    handle, uri.toString(), if (motion != null) CaptureType.LIVE else CaptureType.PHOTO, takenAt,
-                    clipBytes = motion?.length() ?: 0, keyFrameUs = keyUs, shutterNs = shutterNs, lat = place?.lat, lon = place?.lon,
-                )
+                runCatching { developed(dir, handle, type, takenAt, place) }.getOrElse { error ->
+                    // A photo this phone cannot develop still goes to the gallery, as the glasses' own HEIC.
+                    say("Could not develop ${handle.take(8)} (${error.message}): saving the HEIC as it came")
+                    format = Format.HEIC
+                    val (uri, where) = insert(format, takenAt) { out -> main.inputStream().use { it.copyTo(out) } }
+                    say("Saved a photo: $where")
+                    Kept(handle, uri.toString(), CaptureType.PHOTO, takenAt, lat = place?.lat, lon = place?.lon)
+                }
             }
         }
         File(dir, IMU).takeIf { it.exists() }?.copyTo(File(keep, IMU), overwrite = true)
@@ -123,17 +114,53 @@ class Assembly(
         if (old != null && old.toString() != kept.uri) {
             // The new copy took a "(1)" name beside the old one; with the old gone it takes the plain name.
             runCatching { context.contentResolver.delete(old, null, null) }
-            val name = ContentValues().apply { put(MediaStore.MediaColumns.DISPLAY_NAME, fileName(type == CaptureType.VIDEO, takenAt)) }
+            val name = ContentValues().apply { put(MediaStore.MediaColumns.DISPLAY_NAME, fileName(format, takenAt)) }
             runCatching { context.contentResolver.update(Uri.parse(kept.uri), name, null, null) }
         }
         dir.deleteRecursively()
         onSaved(handle)
     }
 
-    private fun insert(video: Boolean, takenAt: Long, write: (OutputStream) -> Unit): Uri {
+    /** A photo or live photo as the gallery keeps it: a JPEG, with the clip after it for a live photo. */
+    private fun developed(dir: File, handle: String, type: CaptureType, takenAt: Long, place: Place?): Kept {
+        val main = File(dir, MAIN)
+        val bitmap = decodeStill(main)
+        val motion = File(dir, MOTION).takeIf { type == CaptureType.LIVE && it.exists() }
+        val frames = readFrames(File(dir, FRAMES)).orEmpty()
+        val key = motion?.let { matchFrame(it, bitmap) }
+        val jpeg = try {
+            jpegWithExif(bitmap, main, takenAt, place, File(scratch, "$handle.jpg"))
+        } finally {
+            bitmap.recycle()
+        }
+        val keyUs = key?.second ?: -1
+        // The frame log has one record per clip frame, or a still's one record.
+        val shutterNs = when {
+            key != null -> frames.getOrNull(key.first)?.timeNs ?: 0
+            frames.size == 1 -> frames[0].timeNs
+            else -> 0
+        }
+        val bytes = if (motion != null) motionPhoto(jpeg, motion.readBytes(), keyUs) else jpeg
+        val (uri, where) = insert(Format.JPEG, takenAt) { it.write(bytes) }
+        say(if (motion != null) "Saved a live photo: $where" else "Saved a photo: $where")
+        return Kept(
+            handle, uri.toString(), if (motion != null) CaptureType.LIVE else CaptureType.PHOTO, takenAt,
+            clipBytes = motion?.length() ?: 0, keyFrameUs = keyUs, shutterNs = shutterNs, lat = place?.lat, lon = place?.lon,
+        )
+    }
+
+    private enum class Format(val ext: String, val mime: String, val video: Boolean) {
+        JPEG("jpg", "image/jpeg", false),
+        HEIC("heic", "image/heic", false),
+        MP4("mp4", "video/mp4", true),
+    }
+
+    /** The new row, and where it is as MediaStore has it. */
+    private fun insert(format: Format, takenAt: Long, write: (OutputStream) -> Unit): Pair<Uri, String> {
+        val video = format.video
         val values = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, fileName(video, takenAt))
-            put(MediaStore.MediaColumns.MIME_TYPE, if (video) "video/mp4" else "image/jpeg")
+            put(MediaStore.MediaColumns.DISPLAY_NAME, fileName(format, takenAt))
+            put(MediaStore.MediaColumns.MIME_TYPE, format.mime)
             put(MediaStore.MediaColumns.RELATIVE_PATH, if (video) "Movies/Visor" else "Pictures/Visor")
             put(MediaStore.MediaColumns.DATE_TAKEN, takenAt)
             put(MediaStore.MediaColumns.IS_PENDING, 1)
@@ -144,12 +171,11 @@ class Assembly(
         val uri = resolver.insert(collection, values) ?: error("the gallery would not take it")
         try {
             checkNotNull(resolver.openOutputStream(uri)).use(write)
-            resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+            return uri to publish(resolver, uri)
         } catch (error: Exception) {
             resolver.delete(uri, null, null)
             throw error
         }
-        return uri
     }
 
     companion object {
@@ -162,7 +188,7 @@ class Assembly(
 
         private val NAME: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss").withZone(ZoneId.systemDefault())
 
-        private fun fileName(video: Boolean, takenAt: Long) = "Visor_" + NAME.format(Instant.ofEpochMilli(takenAt)) + if (video) ".mp4" else ".jpg"
+        private fun fileName(format: Format, takenAt: Long) = "Visor_" + NAME.format(Instant.ofEpochMilli(takenAt)) + "." + format.ext
 
         private fun partName(capture: Capture, assetId: String): String? = when (assetId) {
             capture.main?.id -> MAIN

@@ -2,8 +2,11 @@ package com.macedonga.visor.log
 
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.webkit.WebView
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,6 +22,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.RectangleShape
@@ -43,7 +47,14 @@ import com.macedonga.visor.BuildConfig
 import dagger.hilt.android.lifecycle.HiltViewModel
 import com.macedonga.visor.login.MetaLogin
 import java.io.File
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 import javax.inject.Inject
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+private val FILE_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd-HHmmss")
 
 @HiltViewModel
 class EventLogViewModel @Inject constructor(
@@ -58,7 +69,13 @@ fun EventLogScreen(model: EventLogViewModel = hiltViewModel()) {
     val context = LocalContext.current
     val lines by model.log.lines.collectAsStateWithLifecycle()
     val list = rememberLazyListState()
+    val scope = rememberCoroutineScope()
     LaunchedEffect(Unit) { if (lines.isNotEmpty()) list.scrollToItem(lines.size + 1) }
+    val create = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+        if (uri != null) scope.launch {
+            runCatching { save(context, uri, model.log.text()) }.onFailure { model.log.add("Could not save the log: ${it.message}") }
+        }
+    }
 
     SettingsPage(
         stringResource(R.string.settings_event_log),
@@ -66,6 +83,7 @@ fun EventLogScreen(model: EventLogViewModel = hiltViewModel()) {
         light = 0.3f,
         list = list,
         actions = {
+            RoundIcon(VisorIcons.Download, stringResource(R.string.event_log_save), { create.launch("visor-log-${LocalDateTime.now().format(FILE_TIME)}.txt") })
             RoundIcon(VisorIcons.Share, stringResource(R.string.event_log_share), { share(context, model.log.text()) })
             RoundIcon(VisorIcons.Trash, stringResource(R.string.event_log_clear), model.log::clear)
         },
@@ -110,21 +128,38 @@ private fun LogRow(line: String) {
     }
 }
 
-/** The log as a text file for mail or chat, headed by what it came from. */
-private fun share(context: Context, text: String) {
+/** What the log came from: the first line of the file. */
+private fun head(): String {
     val webView = WebView.getCurrentWebViewPackage()?.let { "${it.packageName} ${it.versionName}" } ?: "unknown"
-    val head = "Visor ${BuildConfig.VERSION_NAME}, ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE}, WebView $webView"
+    // A work profile or Samsung's Secure Folder is another user: what Visor saves there, the main gallery never shows.
+    val user = android.os.Process.myUid() / 100_000
+    return "Visor ${BuildConfig.VERSION_NAME}, ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE}, WebView $webView" +
+        if (user != 0) ", user $user" else ""
+}
+
+/** The log as a text file, headed by what it came from. */
+private fun report(context: Context, text: String): String {
     // The last Meta login's Bloks trace rides along: every call, request and failure of it.
     val trace = MetaLogin.traceFile(context).takeIf { it.exists() && it.length() > 0 }?.readText()
+    return head() + "\n\n" + text + "\n" + (trace?.let { "\n--- Bloks trace of the last Meta login ---\n$it" } ?: "")
+}
+
+/** The log for mail or chat. */
+private fun share(context: Context, text: String) {
     val file = File(context.cacheDir, "log/visor-log.txt").apply {
         parentFile?.mkdirs()
-        writeText(head + "\n\n" + text + "\n" + (trace?.let { "\n--- Bloks trace of the last Meta login ---\n$it" } ?: ""))
+        writeText(report(context, text))
     }
     val intent = Intent(Intent.ACTION_SEND)
         .setType("text/plain")
         .putExtra(Intent.EXTRA_SUBJECT, "Visor event log")
-        .putExtra(Intent.EXTRA_TEXT, head)
+        .putExtra(Intent.EXTRA_TEXT, head())
         .putExtra(Intent.EXTRA_STREAM, FileProvider.getUriForFile(context, context.packageName + ".files", file))
         .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     context.startActivity(Intent.createChooser(intent, null))
+}
+
+/** The log into the file the save window made. */
+private suspend fun save(context: Context, uri: Uri, text: String) = withContext(Dispatchers.IO) {
+    checkNotNull(context.contentResolver.openOutputStream(uri)) { "the file could not be opened" }.use { it.write(report(context, text).toByteArray()) }
 }

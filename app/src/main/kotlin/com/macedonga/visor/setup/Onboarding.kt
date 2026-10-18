@@ -15,14 +15,19 @@ import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -62,6 +67,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
@@ -122,7 +129,7 @@ import kotlinx.coroutines.withContext
 enum class Page { WELCOME, ACCESS, LOGIN, PAIRING, LINKING }
 
 /** What the setup asks of the phone, in order. Nearby Wi-Fi goes with nearby devices: Android asks for both at once. */
-private val ASKED = listOf(Need.NEARBY, Need.NOTIFY, Need.LISTENER, Need.CONTACTS, Need.MIC, Need.LOCATION)
+private val ASKED = listOf(Need.NEARBY, Need.NOTIFY, Need.LISTENER, Need.CONTACTS, Need.MIC, Need.LOCATION, Need.LOCATION_ALWAYS)
 
 @HiltViewModel
 class OnboardingViewModel @Inject constructor(
@@ -461,20 +468,20 @@ private fun WelcomePage(firstRun: Boolean, modifier: Modifier, before: suspend (
 private fun AccessPage(model: OnboardingViewModel, tick: Int, onAnswered: () -> Unit, modifier: Modifier) {
     val context = LocalContext.current
     val given = remember(tick) { ASKED.filter { it.granted(context) }.toSet() }
-    // Nearby devices stays first until it is given: nothing works without it.
-    val next = ASKED.firstOrNull { it !in given && (it == Need.NEARBY || it !in model.asked) }
+    // Nearby devices stays first until it is given: nothing works without it. All the time comes after location, or not at all.
+    val next = ASKED.firstOrNull {
+        it !in given && (it == Need.NEARBY || it !in model.asked) && (it != Need.LOCATION_ALWAYS || Need.LOCATION in given)
+    }
     var asking by remember { mutableStateOf<Need?>(null) }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
         val need = asking
         // Turned down for good, Android asks no more: Visor's own page is the way left for what it cannot start without.
         if (need == Need.NEARBY && !need.granted(context) && result.values.none { it }) openAppPage(context)
-        if (need == Need.LOCATION && !context.allows(Manifest.permission.ACCESS_FINE_LOCATION)) model.asked += need
         if (need == Need.MIC) context.getSharedPreferences("home", Context.MODE_PRIVATE).edit().putBoolean("asked_hearing", true).apply()
         onAnswered()
     }
     fun ask(need: Need) {
-        // Location comes in two answers, the place and then all the time; it counts as asked at the second.
-        if (need != Need.LOCATION || context.allows(Manifest.permission.ACCESS_FINE_LOCATION)) model.asked += need
+        model.asked += need
         asking = need
         val wanted = need.ask(context) + if (need == Need.NEARBY) Need.WIFI.ask(context) else emptyArray()
         if (wanted.isEmpty()) openListenerPage(context) else launcher.launch(wanted)
@@ -489,9 +496,16 @@ private fun AccessPage(model: OnboardingViewModel, tick: Int, onAnswered: () -> 
         }
         val nearbyGiven = Need.NEARBY in given
         Row(Modifier.fillMaxWidth().padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            if (next != null && next != Need.NEARBY) {
-                QuietButton(stringResource(R.string.onboard_skip)) { model.asked += next }
-                Spacer(Modifier.width(12.dp))
+            // "Not now" slides in beside Allow for what can wait, and out again when only Continue is left.
+            AnimatedVisibility(
+                visible = next != null && next != Need.NEARBY,
+                enter = fadeIn(tween(240)) + expandHorizontally(tween(320, easing = SETTLE)),
+                exit = fadeOut(tween(160)) + shrinkHorizontally(tween(280, easing = SETTLE)),
+            ) {
+                Row {
+                    QuietButton(stringResource(R.string.onboard_skip)) { next?.let { model.asked += it } }
+                    Spacer(Modifier.width(12.dp))
+                }
             }
             if (next != null) BigPill(stringResource(R.string.onboard_allow), { ask(next) }, Modifier.weight(1f))
             else BigPill(stringResource(R.string.onboard_continue), { model.next() }, Modifier.weight(1f), enabled = nearbyGiven)
@@ -905,35 +919,77 @@ private object Demo {
     private const val BLINK_SECONDS = 0.9f
 }
 
-/** The one kind of button that moves the setup on: a white pill, wide. */
+/**
+ * The one kind of button that moves the setup on: a white pill, wide, with a soft glow under it. It gives a little
+ * under the finger, a new label slides in over the old one, and it fades when it cannot be pressed.
+ */
 @Composable
-private fun BigPill(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true) {
+internal fun BigPill(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true) {
+    val touch = remember { MutableInteractionSource() }
+    val pressed by touch.collectIsPressedAsState()
+    val give by animateFloatAsState(if (pressed) 0.96f else 1f, spring(dampingRatio = 0.6f, stiffness = 700f), label = "press")
+    val shown by animateFloatAsState(if (enabled) 1f else 0.35f, tween(260), label = "enabled")
     Box(
         modifier
             .fillMaxWidth()
             .height(54.dp)
-            .alpha(if (enabled) 1f else 0.35f)
+            .graphicsLayer {
+                scaleX = give
+                scaleY = give
+                alpha = shown
+            }
+            .drawBehind {
+                // A glow under the pill, as if it gave off light of its own.
+                drawRoundRect(
+                    Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.16f * shown), Color.Transparent), startY = size.height * 0.4f, endY = size.height + 18.dp.toPx()),
+                    topLeft = Offset(10.dp.toPx(), size.height * 0.4f),
+                    size = Size(size.width - 20.dp.toPx(), size.height * 0.6f + 18.dp.toPx()),
+                    cornerRadius = CornerRadius(27.dp.toPx()),
+                )
+            }
             .clip(RoundedCornerShape(50))
-            .background(Color.White)
-            .clickable(enabled = enabled, onClick = onClick),
+            .background(Brush.verticalGradient(listOf(Color.White, Color(0xFFE9E9EC))))
+            .clickable(interactionSource = touch, indication = null, enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Text(text, style = Visor.type.body, color = Color.Black, textAlign = TextAlign.Center)
+        AnimatedContent(
+            targetState = text,
+            transitionSpec = {
+                (fadeIn(tween(220, delayMillis = 60)) + slideInVertically(tween(320, easing = SETTLE)) { it / 2 })
+                    .togetherWith(fadeOut(tween(140)) + slideOutVertically(tween(220)) { -it / 2 })
+            },
+            label = "label",
+        ) { words ->
+            Text(words, style = Visor.type.body, color = Color.Black, textAlign = TextAlign.Center)
+        }
     }
 }
 
+/** The other way on, for what can wait: an outlined pill that gives a little under the finger. */
 @Composable
-private fun QuietButton(text: String, onClick: () -> Unit) {
+internal fun QuietButton(text: String, onClick: () -> Unit) {
+    val touch = remember { MutableInteractionSource() }
+    val pressed by touch.collectIsPressedAsState()
+    val give by animateFloatAsState(if (pressed) 0.95f else 1f, spring(dampingRatio = 0.6f, stiffness = 700f), label = "press")
     Box(
-        Modifier.height(54.dp).clip(RoundedCornerShape(50)).clickable(onClick = onClick).padding(horizontal = 16.dp),
+        Modifier
+            .height(54.dp)
+            .graphicsLayer {
+                scaleX = give
+                scaleY = give
+            }
+            .clip(RoundedCornerShape(50))
+            .border(1.dp, Visor.colors.control, RoundedCornerShape(50))
+            .clickable(interactionSource = touch, indication = null, onClick = onClick)
+            .padding(horizontal = 20.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(text, style = Visor.type.body, color = Visor.colors.textSecondary)
     }
 }
 
-private val SETTLE = CubicBezierEasing(0.2f, 0f, 0f, 1f)
-private val LED_BLUE = Color(0xFF2F6BFF)
+internal val SETTLE = CubicBezierEasing(0.2f, 0f, 0f, 1f)
+internal val LED_BLUE = Color(0xFF2F6BFF)
 /** How closely the pair follows the story's turns: a camera with a little weight. */
 private const val FOLLOW_SECONDS = 0.18f
 private const val CAMERA_SECONDS = 0.5f

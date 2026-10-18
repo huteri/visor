@@ -19,14 +19,18 @@ import kotlinx.coroutines.withTimeoutOrNull
 /** Meta's switch for its session ("SCI") assistant path, on for English. There the glasses never speak Visor's text. */
 const val SESSION_PATH_FLAG = "wearables_ai_phone_call.session_centric_air_infra"
 
+/** How long the glasses wait for an answer before they speak their own error; 20 s from the factory. */
+const val PROCESSING_TIMEOUT = "assistant_on_sn.default_processing_timeout_s"
+
 private const val CAPTION_VOICE = "live_caption_voice_id"
 
 /**
- * Answers in the glasses' own voice need the classic assistant path in every language. Each time the glasses connect
- * with that chosen, keep Meta's session flag off: read their configuration once if it was never read, and when the flag
- * is on, write it off and restart their assistant so it takes effect.
+ * What Visor's assistant needs in the glasses' configuration, kept each time they connect or it changes: with the
+ * assistant on, the processing timeout chosen in the app; with answers in their own voice, Meta's session flag off,
+ * since only the classic path speaks Visor's text in every language. The configuration is read once if it never was.
+ * The flag takes a restart of their assistant; the timeout applies at once.
  */
-fun keepOwnVoicePath(
+fun keepAssistantConfig(
     scope: CoroutineScope,
     connection: GlassesConnection,
     config: GlassesConfig,
@@ -38,27 +42,34 @@ fun keepOwnVoicePath(
     scope.launch {
         combine(
             connection.state.map { it.link == LinkState.READY }.distinctUntilChanged(),
-            store.config.map { it.glassesVoice }.distinctUntilChanged(),
-        ) { ready, own -> ready && own }.collectLatest { needed ->
-            if (!needed) return@collectLatest
+            store.config.map { Triple(it.enabled, it.glassesVoice, it.answerWaitSeconds.toLong()) }.distinctUntilChanged(),
+        ) { ready, wanted -> wanted.takeIf { ready } }.collectLatest { wanted ->
+            val (enabled, own, wait) = wanted ?: return@collectLatest
+            if (!(enabled || own)) return@collectLatest
             // Let the link settle; the configuration comes in a bug report, a minute over Bluetooth.
             delay(SETTLE_MS)
             if (config.state.value.params.isEmpty()) {
                 // The configuration comes in a bug report of several megabytes: never on top of photos to bring over.
                 combine(media.importing, media.captures) { importing, captures -> !importing && captures.none { it.isNew && it.isMedia } }
                     .first { it }
-                log.add("Own voice: reading the glasses' configuration once")
+                log.add("Assistant: reading the glasses' configuration once")
                 config.read()
                 withTimeoutOrNull(READ_MS) { config.state.first { it.params.isNotEmpty() } } ?: return@collectLatest
             }
             val state = config.state.first { it.busy.isEmpty() }
-            if (SESSION_PATH_FLAG !in state.params || state.values[SESSION_PATH_FLAG] != true) return@collectLatest
-            log.add("Own voice: turning Meta's session path off, so the glasses speak answers in every language")
-            config.apply(mapOf(SESSION_PATH_FLAG to false))
-            val written = withTimeoutOrNull(WRITE_MS) {
-                config.state.first { it.busy.isEmpty() && it.values[SESSION_PATH_FLAG] == false }
+            val changes = buildMap<String, Any> {
+                if (enabled && PROCESSING_TIMEOUT in state.params && (state.values[PROCESSING_TIMEOUT] as? Number)?.toLong() != wait) put(PROCESSING_TIMEOUT, wait)
+                if (own && SESSION_PATH_FLAG in state.params && state.values[SESSION_PATH_FLAG] == true) put(SESSION_PATH_FLAG, false)
             }
-            if (written == null) return@collectLatest log.add("Own voice: the glasses did not take the change: ${config.state.value.note}")
+            if (changes.isEmpty()) return@collectLatest
+            if (PROCESSING_TIMEOUT in changes) log.add("Assistant: letting the glasses wait $wait s for an answer, not ${state.values[PROCESSING_TIMEOUT]}")
+            if (SESSION_PATH_FLAG in changes) log.add("Own voice: turning Meta's session path off, so the glasses speak answers in every language")
+            config.apply(changes)
+            val written = withTimeoutOrNull(WRITE_MS) {
+                config.state.first { s -> s.busy.isEmpty() && changes.all { (key, value) -> s.values[key] == value } }
+            }
+            if (written == null) return@collectLatest log.add("Assistant: the glasses did not take the change: ${config.state.value.note}")
+            if (SESSION_PATH_FLAG !in changes) return@collectLatest
             log.add(if (restartGlassesAssistant(settings)) "Own voice: restarting the glasses' assistant to apply it" else "Own voice: restart the glasses to apply it")
         }
     }

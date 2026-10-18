@@ -1414,7 +1414,7 @@
 }
 },
 {
-"key":"captouch2d_1finger_2tap_release",
+"key":"CAPTOUCH2D_1FINGER_2TAP_RELEASE",
 "label":"Touchpad: one-finger double tap",
 "note":"Key sent for a one-finger double tap on the touchpad.",
 "group":"Touch and gestures",
@@ -1624,7 +1624,7 @@
 }
 },
 {
-"key":"captouch2d_1finger_long_press",
+"key":"CAPTOUCH2D_1FINGER_LONG_PRESS",
 "label":"Touchpad: one-finger long press",
 "note":"Key sent when the touchpad sees a one-finger long press.",
 "group":"Touch and gestures",
@@ -1834,7 +1834,7 @@
 }
 },
 {
-"key":"captouch2d_1finger_long_press_release",
+"key":"CAPTOUCH2D_1FINGER_LONG_PRESS_RELEASE",
 "label":"Touchpad: one-finger long press release",
 "note":"Key sent when a one-finger long press on the touchpad ends. Nothing on the glasses reads it.",
 "group":"Touch and gestures",
@@ -2044,7 +2044,7 @@
 }
 },
 {
-"key":"captouch2d_1finger_swipe_down",
+"key":"CAPTOUCH2D_1FINGER_SWIPE_DOWN",
 "label":"Touchpad: one-finger swipe down",
 "note":"Key sent for a one-finger swipe down. Nothing on the glasses reads this setting.",
 "group":"Touch and gestures",
@@ -2254,7 +2254,7 @@
 }
 },
 {
-"key":"captouch2d_1finger_swipe_front",
+"key":"CAPTOUCH2D_1FINGER_SWIPE_FRONT",
 "label":"Touchpad: one-finger swipe forward",
 "note":"Sets the key sent for a one-finger forward swipe. No code on the glasses reads it.",
 "group":"Touch and gestures",
@@ -2464,7 +2464,7 @@
 }
 },
 {
-"key":"captouch2d_1finger_swipe_rear",
+"key":"CAPTOUCH2D_1FINGER_SWIPE_REAR",
 "label":"Touchpad: one-finger swipe back",
 "note":"Keycode for a one-finger swipe back on the touchpad. Nothing on the glasses reads this setting.",
 "group":"Touch and gestures",
@@ -2674,7 +2674,7 @@
 }
 },
 {
-"key":"captouch2d_1finger_swipe_up",
+"key":"CAPTOUCH2D_1FINGER_SWIPE_UP",
 "label":"Touchpad: one-finger swipe up",
 "note":"Stored on the glasses only. Nothing on the glasses uses it.",
 "group":"Touch and gestures",
@@ -2884,7 +2884,7 @@
 }
 },
 {
-"key":"captouch2d_1finger_tap_release",
+"key":"CAPTOUCH2D_1FINGER_TAP_RELEASE",
 "label":"Touchpad: one-finger tap",
 "note":"Key sent for a one-finger tap on the touchpad.",
 "group":"Touch and gestures",
@@ -3094,7 +3094,7 @@
 }
 },
 {
-"key":"captouch2d_2finger_2tap_release",
+"key":"CAPTOUCH2D_2FINGER_2TAP_RELEASE",
 "label":"Touchpad: two-finger double tap",
 "note":"Key sent for a two-finger double tap. Nothing on the glasses reads this key.",
 "group":"Touch and gestures",
@@ -3304,7 +3304,7 @@
 }
 },
 {
-"key":"captouch2d_2finger_long_press",
+"key":"CAPTOUCH2D_2FINGER_LONG_PRESS",
 "label":"Touchpad: two-finger long press",
 "note":"Key sent when a two-finger long press on the touchpad starts. Nothing on the glasses reads it.",
 "group":"Touch and gestures",
@@ -3514,7 +3514,7 @@
 }
 },
 {
-"key":"captouch2d_2finger_long_press_release",
+"key":"CAPTOUCH2D_2FINGER_LONG_PRESS_RELEASE",
 "label":"Touchpad: two-finger long press release",
 "note":"Key sent when a two-finger long press ends. Nothing on the glasses reads this setting.",
 "group":"Touch and gestures",
@@ -3724,7 +3724,7 @@
 }
 },
 {
-"key":"captouch2d_2finger_swipe_down",
+"key":"CAPTOUCH2D_2FINGER_SWIPE_DOWN",
 "label":"Touchpad: two-finger swipe down",
 "note":"Sets the key sent for a two-finger downward swipe. No code on the glasses reads it.",
 "group":"Touch and gestures",
@@ -3934,7 +3934,7 @@
 }
 },
 {
-"key":"captouch2d_2finger_swipe_front",
+"key":"CAPTOUCH2D_2FINGER_SWIPE_FRONT",
 "label":"Touchpad: two-finger swipe forward",
 "note":"Keycode for a two-finger swipe forward on the touchpad. Nothing on the glasses reads this setting.",
 "group":"Touch and gestures",
@@ -4144,7 +4144,7 @@
 }
 },
 {
-"key":"captouch2d_2finger_swipe_rear",
+"key":"CAPTOUCH2D_2FINGER_SWIPE_REAR",
 "label":"Touchpad: two-finger swipe back",
 "note":"Stored on the glasses only. Nothing on the glasses uses it.",
 "group":"Touch and gestures",
@@ -4354,7 +4354,7 @@
 }
 },
 {
-"key":"captouch2d_2finger_swipe_up",
+"key":"CAPTOUCH2D_2FINGER_SWIPE_UP",
 "label":"Touchpad: two-finger swipe up",
 "note":"Key sent for a two-finger swipe up. No firmware code reads it, so it does nothing on its own.",
 "group":"Touch and gestures",
@@ -4564,7 +4564,7 @@
 }
 },
 {
-"key":"captouch2d_2finger_tap_release",
+"key":"CAPTOUCH2D_2FINGER_TAP_RELEASE",
 "label":"Touchpad: two-finger tap",
 "note":"Key sent for a two-finger tap. Default is back.",
 "group":"Touch and gestures",
@@ -6134,7 +6134,7 @@
 }
 },
 {
-"key":"gesture_emg_index_finger_double_tap",
+"key":"GESTURE_EMG_INDEX_FINGER_DOUBLE_TAP",
 "label":"Band: index finger double tap",
 "note":"Key sent when the neural band reports an index finger double tap. Nothing on the glasses reads this setting.",
 "group":"Neural band gestures",
@@ -6344,7 +6344,7 @@
 }
 },
 {
-"key":"gesture_emg_index_finger_ia",
+"key":"GESTURE_EMG_INDEX_FINGER_IA",
 "label":"Band: index finger instant action",
 "note":"Sets the key sent for the index finger instant action on the neural band. No code on the glasses reads it.",
 "group":"Neural band gestures",
@@ -6554,7 +6554,7 @@
 }
 },
 {
-"key":"gesture_emg_index_finger_press",
+"key":"GESTURE_EMG_INDEX_FINGER_PRESS",
 "label":"Band: index finger press",
 "note":"Keycode for an index finger press on the neural band. Nothing on the glasses reads this setting.",
 "group":"Neural band gestures",
@@ -6764,7 +6764,7 @@
 }
 },
 {
-"key":"gesture_emg_index_finger_release",
+"key":"GESTURE_EMG_INDEX_FINGER_RELEASE",
 "label":"Band: index finger release",
 "note":"Stored on the glasses only. Nothing on the glasses uses it.",
 "group":"Neural band gestures",
@@ -6974,7 +6974,7 @@
 }
 },
 {
-"key":"gesture_emg_index_finger_single_tap",
+"key":"GESTURE_EMG_INDEX_FINGER_SINGLE_TAP",
 "label":"Band: index finger single tap",
 "note":"Key sent when the neural band index finger taps once.",
 "group":"Neural band gestures",
@@ -7184,7 +7184,7 @@
 }
 },
 {
-"key":"gesture_emg_index_finger_tap_hold",
+"key":"GESTURE_EMG_INDEX_FINGER_TAP_HOLD",
 "label":"Band: index finger tap and hold",
 "note":"Key the band sends for an index-finger tap and hold. Nothing on the glasses reads the setting.",
 "group":"Neural band gestures",
@@ -7394,7 +7394,7 @@
 }
 },
 {
-"key":"gesture_emg_index_finger_tap_hold_release",
+"key":"GESTURE_EMG_INDEX_FINGER_TAP_HOLD_RELEASE",
 "label":"Band: index finger tap and hold release",
 "note":"Key sent when an index finger tap and hold ends on the neural band. Nothing on the glasses reads it.",
 "group":"Neural band gestures",
@@ -7604,7 +7604,7 @@
 }
 },
 {
-"key":"gesture_emg_middle_finger_double_tap",
+"key":"GESTURE_EMG_MIDDLE_FINGER_DOUBLE_TAP",
 "label":"Band: middle finger double tap",
 "note":"Key sent when the neural band reports a middle finger double tap. Nothing on the glasses reads this setting.",
 "group":"Neural band gestures",
@@ -7814,7 +7814,7 @@
 }
 },
 {
-"key":"gesture_emg_middle_finger_ia",
+"key":"GESTURE_EMG_MIDDLE_FINGER_IA",
 "label":"Band: middle finger instant action",
 "note":"Sets the key sent for the middle finger instant action on the neural band. No code on the glasses reads it.",
 "group":"Neural band gestures",
@@ -8024,7 +8024,7 @@
 }
 },
 {
-"key":"gesture_emg_middle_finger_press",
+"key":"GESTURE_EMG_MIDDLE_FINGER_PRESS",
 "label":"Band: middle finger press",
 "note":"Keycode for a middle finger press on the neural band. Nothing on the glasses reads this setting.",
 "group":"Neural band gestures",
@@ -8234,7 +8234,7 @@
 }
 },
 {
-"key":"gesture_emg_middle_finger_release",
+"key":"GESTURE_EMG_MIDDLE_FINGER_RELEASE",
 "label":"Band: middle finger release",
 "note":"Stored on the glasses only. Nothing on the glasses uses it.",
 "group":"Neural band gestures",
@@ -8444,7 +8444,7 @@
 }
 },
 {
-"key":"gesture_emg_middle_finger_single_tap",
+"key":"GESTURE_EMG_MIDDLE_FINGER_SINGLE_TAP",
 "label":"Band: middle finger single tap",
 "note":"Key sent when the neural band middle finger taps once.",
 "group":"Neural band gestures",
@@ -8654,7 +8654,7 @@
 }
 },
 {
-"key":"gesture_emg_middle_finger_tap_hold",
+"key":"GESTURE_EMG_MIDDLE_FINGER_TAP_HOLD",
 "label":"Band: middle finger tap and hold",
 "note":"Key the band sends for a middle-finger tap and hold. Nothing on the glasses reads the setting.",
 "group":"Neural band gestures",
@@ -8864,7 +8864,7 @@
 }
 },
 {
-"key":"gesture_emg_middle_finger_tap_hold_release",
+"key":"GESTURE_EMG_MIDDLE_FINGER_TAP_HOLD_RELEASE",
 "label":"Band: middle finger tap and hold release",
 "note":"Key sent when a middle finger tap and hold ends on the neural band. Nothing on the glasses reads it.",
 "group":"Neural band gestures",
@@ -9074,7 +9074,7 @@
 }
 },
 {
-"key":"gesture_emg_thumb_finger_double_tap",
+"key":"GESTURE_EMG_THUMB_FINGER_DOUBLE_TAP",
 "label":"Band: thumb double tap",
 "note":"Key sent when the neural band reports a thumb double tap. Nothing on the glasses reads this setting.",
 "group":"Neural band gestures",
@@ -9284,7 +9284,7 @@
 }
 },
 {
-"key":"gesture_emg_thumb_finger_ia",
+"key":"GESTURE_EMG_THUMB_FINGER_IA",
 "label":"Band: thumb instant action",
 "note":"Sets the key sent for the thumb instant action on the neural band. No code on the glasses reads it.",
 "group":"Neural band gestures",
@@ -9494,7 +9494,7 @@
 }
 },
 {
-"key":"gesture_emg_thumb_finger_single_tap",
+"key":"GESTURE_EMG_THUMB_FINGER_SINGLE_TAP",
 "label":"Band: thumb single tap",
 "note":"Keycode for a thumb single tap on the neural band. Nothing on the glasses reads this setting.",
 "group":"Neural band gestures",
@@ -9704,7 +9704,7 @@
 }
 },
 {
-"key":"gesture_emg_thumb_finger_swipe_down",
+"key":"GESTURE_EMG_THUMB_FINGER_SWIPE_DOWN",
 "label":"Band: thumb swipe down",
 "note":"Stored on the glasses only. Nothing on the glasses uses it.",
 "group":"Neural band gestures",
@@ -9914,7 +9914,7 @@
 }
 },
 {
-"key":"gesture_emg_thumb_finger_swipe_left",
+"key":"GESTURE_EMG_THUMB_FINGER_SWIPE_LEFT",
 "label":"Band: thumb swipe left",
 "note":"Key sent when the thumb swipes left on the neural band.",
 "group":"Neural band gestures",
@@ -10124,7 +10124,7 @@
 }
 },
 {
-"key":"gesture_emg_thumb_finger_swipe_right",
+"key":"GESTURE_EMG_THUMB_FINGER_SWIPE_RIGHT",
 "label":"Band: thumb swipe right",
 "note":"Key the band sends for a thumb swipe right. Default is right. Nothing on the glasses reads it.",
 "group":"Neural band gestures",
@@ -10334,7 +10334,7 @@
 }
 },
 {
-"key":"gesture_emg_thumb_finger_swipe_up",
+"key":"GESTURE_EMG_THUMB_FINGER_SWIPE_UP",
 "label":"Band: thumb swipe up",
 "note":"Key sent when the band reports a thumb swipe up. Nothing on the glasses reads it.",
 "group":"Neural band gestures",
@@ -10699,8 +10699,8 @@
 },
 {
 "key":"hearing_boost_nux_completed",
-"label":"Hearing boost setup done",
-"note":"Records that the hearing boost introduction was finished.",
+"label":"Conversation focus setup done",
+"note":"The glasses refuse to start conversation focus until this is on. The Meta app turns it on at the end of its conversation focus intro.",
 "group":"Accessibility",
 "invert":false,
 "user_facing":false,
@@ -11181,7 +11181,7 @@
 }
 },
 {
-"key":"media_gesture_emg_index_finger_single_tap",
+"key":"MEDIA_GESTURE_EMG_INDEX_FINGER_SINGLE_TAP",
 "label":"Band media: index finger single tap",
 "note":"Key the band sends for an index-finger single tap, meant for media. Nothing on the glasses reads it.",
 "group":"Neural band gestures",
@@ -11391,7 +11391,7 @@
 }
 },
 {
-"key":"media_gesture_emg_middle_finger_single_tap",
+"key":"MEDIA_GESTURE_EMG_MIDDLE_FINGER_SINGLE_TAP",
 "label":"Band media: middle finger single tap",
 "note":"Key sent for a middle finger single tap on the band, for media. Nothing on the glasses reads it.",
 "group":"Neural band gestures",
@@ -11601,7 +11601,7 @@
 }
 },
 {
-"key":"media_gesture_emg_thumb_finger_swipe_down",
+"key":"MEDIA_GESTURE_EMG_THUMB_FINGER_SWIPE_DOWN",
 "label":"Band media: thumb swipe down",
 "note":"Key sent for a thumb swipe down on the neural band. Nothing on the glasses reads this setting.",
 "group":"Neural band gestures",
@@ -11811,7 +11811,7 @@
 }
 },
 {
-"key":"media_gesture_emg_thumb_finger_swipe_left",
+"key":"MEDIA_GESTURE_EMG_THUMB_FINGER_SWIPE_LEFT",
 "label":"Band media: thumb swipe left",
 "note":"Sets the key sent for a thumb swipe left on the neural band. No code on the glasses reads it.",
 "group":"Neural band gestures",
@@ -12021,7 +12021,7 @@
 }
 },
 {
-"key":"media_gesture_emg_thumb_finger_swipe_right",
+"key":"MEDIA_GESTURE_EMG_THUMB_FINGER_SWIPE_RIGHT",
 "label":"Band media: thumb swipe right",
 "note":"Keycode for a thumb swipe right on the neural band. Nothing on the glasses reads this setting.",
 "group":"Neural band gestures",
@@ -12231,7 +12231,7 @@
 }
 },
 {
-"key":"media_gesture_emg_thumb_finger_swipe_up",
+"key":"MEDIA_GESTURE_EMG_THUMB_FINGER_SWIPE_UP",
 "label":"Band media: thumb swipe up",
 "note":"Stored on the glasses only. Nothing on the glasses uses it.",
 "group":"Neural band gestures",
@@ -14054,7 +14054,7 @@
 }
 },
 {
-"key":"standby_gesture_emg_index_finger_ia",
+"key":"STANDBY_GESTURE_EMG_INDEX_FINGER_IA",
 "label":"Band on standby: index finger instant action",
 "note":"Action for an index finger gesture on standby. Nothing on the glasses reads it.",
 "group":"Neural band gestures",
@@ -14264,7 +14264,7 @@
 }
 },
 {
-"key":"standby_gesture_emg_middle_finger_ia",
+"key":"STANDBY_GESTURE_EMG_MIDDLE_FINGER_IA",
 "label":"Band on standby: middle finger instant action",
 "note":"Key the band sends for a middle-finger instant action on standby. Nothing on the glasses reads it.",
 "group":"Neural band gestures",
@@ -14529,7 +14529,7 @@
 },
 {
 "value":"7",
-"label":"Hearing"
+"label":"Conversation focus"
 },
 {
 "value":"8",

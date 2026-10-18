@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import com.macedonga.visor.BuildConfig
+import com.macedonga.visor.MainActivity
 import com.macedonga.visor.R
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.net.HttpURLConnection
@@ -96,7 +97,9 @@ class Updates @Inject constructor(@ApplicationContext private val context: Conte
     private fun notifyRelease(release: Release) {
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(NotificationChannel(CHANNEL, context.getString(R.string.update_channel), NotificationManager.IMPORTANCE_LOW))
-        val download = PendingIntent.getActivity(context, 2, downloadIntent(release), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val open = Intent(context, MainActivity::class.java).putExtra(MainActivity.EXTRA_OPEN, MainActivity.OPEN_UPDATE)
+            .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        val download = PendingIntent.getActivity(context, 2, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val notification = Notification.Builder(context, CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_visor)
             .setContentTitle(context.getString(R.string.update_ready, release.version))

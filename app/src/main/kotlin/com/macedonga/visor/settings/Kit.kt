@@ -202,7 +202,8 @@ fun SettingsHost(model: PageModel = hiltViewModel(), seeThrough: Boolean = false
 
 /**
  * A settings page under the glasses' light: back and the page's name side by side in the bar, as on Settings itself,
- * the lede under them, and the bar darkening once the rows go under it.
+ * the lede under them, and the bar darkening once the rows go under it. [sheet] is the page's own sheet, which reads
+ * the rows' host like a row.
  */
 @Composable
 fun SettingsPage(
@@ -211,6 +212,7 @@ fun SettingsPage(
     light: Float = 0.55f,
     list: LazyListState = rememberLazyListState(),
     actions: @Composable RowScope.() -> Unit = {},
+    sheet: @Composable () -> Unit = {},
     content: LazyListScope.() -> Unit,
 ) = SettingsHost {
     val colors = Visor.colors
@@ -250,6 +252,7 @@ fun SettingsPage(
         )
         TopBar(title, actions)
     }
+    sheet()
 }
 
 /** Back and the page's name beside it, on one line: a long name comes down a few sizes rather than breaking. */

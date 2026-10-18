@@ -56,23 +56,7 @@ class FlagsViewModel @Inject constructor(
 
 class FlagNote(val product: String, val does: String, val change: String?)
 
-/** A glasses feature Meta keeps behind its own switches, and the switches that turn it on. */
-private class Feature(val title: String, val about: String, val flags: List<String>)
-
-private val FEATURES = listOf(
-    Feature(
-        "Live AI",
-        "\"Hey Meta, start live AI\": the assistant sees and listens continuously. Also turns on the language tutor, which shares its switch.",
-        listOf("wearables_language_tutor.enabled", "assistant_on_sn.metaai_mmai_live_enabled", "assistant_on_sn.enable_mmai_live_session"),
-    ),
-    Feature(
-        "Chatty follow-ups",
-        "The assistant keeps listening after more kinds of answers, with a sound when it stops.",
-        listOf("assistant_on_sn.follow_up_chatty_domains_enabled", "assistant_on_sn.follow_up_inactive_earcon_enabled"),
-    ),
-)
-
-/** Meta's server-side switches (MobileConfig) on the glasses: features, then every on/off flag. */
+/** Meta's server-side switches (MobileConfig) on the glasses, one by one. Whole features live in Hidden features. */
 @Composable
 fun FlagsScreen(model: FlagsViewModel = hiltViewModel()) {
     val state by model.config.state.collectAsStateWithLifecycle()
@@ -97,14 +81,6 @@ fun FlagsScreen(model: FlagsViewModel = hiltViewModel()) {
         if (!ready) Line("Connect to the glasses to read or change these.", secondary = true)
         OutlinedButton(enabled = idle, onClick = { model.config.read() }) { Text(if (state.params.isEmpty()) "Read from the glasses" else "Read again") }
         if (state.params.isEmpty()) return@PlainScreen
-
-        Section("Features")
-        for (f in FEATURES) {
-            val known = f.flags.filter { it in state.params }
-            FlagRow(f.title, f.about, checked = known.isNotEmpty() && known.all { value(it) == true }, enabled = known.isNotEmpty()) { on ->
-                pending = pending + known.associateWith { on }
-            }
-        }
 
         Section("Checked in the firmware")
         Line(

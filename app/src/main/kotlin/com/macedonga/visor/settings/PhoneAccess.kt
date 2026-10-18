@@ -37,6 +37,9 @@ enum class Need(val title: Int, val why: Int) {
     MIC(R.string.access_mic, R.string.access_mic_why),
     CONTACTS(R.string.access_contacts, R.string.access_contacts_why),
     LOCATION(R.string.access_location, R.string.access_location_why),
+
+    /** Location while Visor is in the background: Android asks it on its own, once [LOCATION] is given. */
+    LOCATION_ALWAYS(R.string.access_location_always, R.string.access_location_always_why),
     WIFI(R.string.access_wifi, R.string.access_wifi_why),
     ;
 
@@ -46,7 +49,8 @@ enum class Need(val title: Int, val why: Int) {
         NOTIFY -> context.allows(Manifest.permission.POST_NOTIFICATIONS)
         MIC -> context.allows(Manifest.permission.RECORD_AUDIO)
         CONTACTS -> context.allows(Manifest.permission.READ_CONTACTS)
-        LOCATION -> context.allows(Manifest.permission.ACCESS_FINE_LOCATION) && context.allows(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+        LOCATION -> context.allows(Manifest.permission.ACCESS_FINE_LOCATION)
+        LOCATION_ALWAYS -> context.allows(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
         WIFI -> wifiDirectAllowed(context)
     }
 
@@ -57,9 +61,10 @@ enum class Need(val title: Int, val why: Int) {
         NOTIFY -> arrayOf(Manifest.permission.POST_NOTIFICATIONS)
         MIC -> arrayOf(Manifest.permission.RECORD_AUDIO)
         CONTACTS -> arrayOf(Manifest.permission.READ_CONTACTS)
-        // Background location is asked for on its own, once the foreground one is given.
-        LOCATION -> if (context.allows(Manifest.permission.ACCESS_FINE_LOCATION)) arrayOf(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
-        else arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+        LOCATION -> arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+        // Android grants it only after the foreground one, so that one comes first when it is missing.
+        LOCATION_ALWAYS -> if (context.allows(Manifest.permission.ACCESS_FINE_LOCATION)) arrayOf(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+        else LOCATION.ask(context)
         // On Android 17 Wi-Fi Direct also wants the local network.
         WIFI -> wifiDirectPermissions
     }

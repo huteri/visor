@@ -327,22 +327,6 @@ class GlassesEars(
         speechFrom = 0
     }
 
-    /** SILK wideband in an Opus decoder: an OpusHead for one channel at 16 kHz, no pre-skip, the usual pre-roll. */
-    private fun opusDecoder(): MediaCodec {
-        val head = ByteBuffer.allocate(19).order(ByteOrder.LITTLE_ENDIAN)
-            .put("OpusHead".toByteArray()).put(1).put(1).putShort(0).putInt(16_000).putShort(0).put(0)
-        head.flip()
-        val format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, 48_000, 1).apply {
-            setByteBuffer("csd-0", head)
-            setByteBuffer("csd-1", ByteBuffer.allocate(8).order(ByteOrder.nativeOrder()).putLong(0).apply { flip() })
-            setByteBuffer("csd-2", ByteBuffer.allocate(8).order(ByteOrder.nativeOrder()).putLong(80_000_000).apply { flip() })
-        }
-        return MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS).apply {
-            configure(format, null, null, 0)
-            start()
-        }
-    }
-
     private companion object {
         const val RATE = 16_000
         const val RESTARTS = 5
@@ -361,5 +345,21 @@ fun speechTag(locale: Locale): String = when {
         "pt" -> "pt-BR"
         "" -> "en-US"
         else -> "${locale.language}-${locale.language.uppercase()}"
+    }
+}
+
+/** SILK wideband in an Opus decoder: an OpusHead for one channel at 16 kHz, no pre-skip, the usual pre-roll. */
+internal fun opusDecoder(): MediaCodec {
+    val head = ByteBuffer.allocate(19).order(ByteOrder.LITTLE_ENDIAN)
+        .put("OpusHead".toByteArray()).put(1).put(1).putShort(0).putInt(16_000).putShort(0).put(0)
+    head.flip()
+    val format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, 48_000, 1).apply {
+        setByteBuffer("csd-0", head)
+        setByteBuffer("csd-1", ByteBuffer.allocate(8).order(ByteOrder.nativeOrder()).putLong(0).apply { flip() })
+        setByteBuffer("csd-2", ByteBuffer.allocate(8).order(ByteOrder.nativeOrder()).putLong(80_000_000).apply { flip() })
+    }
+    return MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS).apply {
+        configure(format, null, null, 0)
+        start()
     }
 }

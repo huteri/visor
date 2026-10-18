@@ -265,7 +265,8 @@ fun GalleryScreen(model: GalleryModel = hiltViewModel()) {
             item(key = STAGE, span = { GridItemSpan(maxLineSpan) }) { Spacer(Modifier.fillMaxWidth().height(stageHeight)) }
             val island: @Composable () -> Unit = {
                 Island(
-                    waiting = items.filter { it.onGlassesOnly && it.capture?.isNew == true },
+                    // What the problem names stays offered, though the glasses count it delivered.
+                    waiting = items.filter { it.onGlassesOnly && (it.capture?.isNew == true || it.key in problem?.handles.orEmpty()) },
                     arriving = inFlight.size,
                     problem = problem,
                     overBluetooth = overBluetooth,

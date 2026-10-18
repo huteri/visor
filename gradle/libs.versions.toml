@@ -4,7 +4,7 @@
 
 [versions]
 androidGradlePlugin = "9.4.1"
-kotlin = "2.3.20"
+kotlin = "2.4.20"
 ksp = "2.3.12"
 hilt = "2.60.1"
 hiltNavigationCompose = "1.4.0"
@@ -38,6 +38,13 @@ androidxBrowser = "1.10.0"
 
 # :app only: the glasses on the home screen. 1.77.1 because 1.77.2 and .3 are under two weeks old.
 filament = "1.77.1"
+
+# The build only: patched versions of libraries the Android Gradle plugin and lint bring onto the build's own
+# classpaths. Both settings.gradle.kts files hold every configuration to the pin-* libraries below.
+jose4j = "0.9.6"
+jdom2 = "2.0.6.1"
+commonsLang3 = "3.21.0"
+httpcomponents = "4.5.14"
 
 
 # compileSdk and targetSdk track the current platform. minSdk is 29 and comes from the
@@ -90,6 +97,17 @@ androidx-browser = { module = "androidx.browser:browser", version.ref = "android
 android-gradle-plugin = { module = "com.android.tools.build:gradle", version.ref = "androidGradlePlugin" }
 kotlin-gradle-plugin = { module = "org.jetbrains.kotlin:kotlin-gradle-plugin", version.ref = "kotlin" }
 compose-compiler-gradle-plugin = { module = "org.jetbrains.kotlin:compose-compiler-gradle-plugin", version.ref = "kotlin" }
+
+# Pins, see [versions]. The Kotlin plugin is pinned because kotlin-dsl brings Gradle's own, older one into build-logic.
+pin-bcprov = { module = "org.bouncycastle:bcprov-jdk18on", version.ref = "bouncycastle" }
+pin-bcpkix = { module = "org.bouncycastle:bcpkix-jdk18on", version.ref = "bouncycastle" }
+pin-bcutil = { module = "org.bouncycastle:bcutil-jdk18on", version.ref = "bouncycastle" }
+pin-jose4j = { module = "org.bitbucket.b_c:jose4j", version.ref = "jose4j" }
+pin-jdom2 = { module = "org.jdom:jdom2", version.ref = "jdom2" }
+pin-commons-lang3 = { module = "org.apache.commons:commons-lang3", version.ref = "commonsLang3" }
+pin-httpclient = { module = "org.apache.httpcomponents:httpclient", version.ref = "httpcomponents" }
+pin-httpmime = { module = "org.apache.httpcomponents:httpmime", version.ref = "httpcomponents" }
+pin-kotlin-gradle-plugin = { module = "org.jetbrains.kotlin:kotlin-gradle-plugin", version.ref = "kotlin" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "androidGradlePlugin" }

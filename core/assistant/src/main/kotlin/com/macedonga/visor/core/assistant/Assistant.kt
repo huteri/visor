@@ -96,6 +96,12 @@ class Assistant(
     private val glassesPhotos: GlassesPhotos? = null,
     /** The voice the glasses speak in (assistant_voice_id), for answers in their own voice. */
     private val glassesVoice: () -> String? = { null },
+    /** The wearer asked the glasses for detailed Live AI answers (detailed_responses_live_ai_enabled). */
+    private val liveAiDetailed: () -> Boolean = { false },
+    /** Conversation focus, which the phone starts when the wearer asks for it by voice. */
+    private val hearing: Hearing? = null,
+    /** How long the glasses wait for an answer (assistant_on_sn.default_processing_timeout_s), when known. */
+    private val processingTimeoutS: () -> Long? = { null },
 ) : Responder {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -132,6 +138,33 @@ class Assistant(
     fun clearVisualCapture() {
         visualCaptureExpiry?.cancel()
         visualDiagnostics.clear()
+    }
+
+    /** The glasses' custom wake word enrolment, over this session. */
+    val wakeWord = CustomWakeWord { id, body ->
+        val l = link
+        val m0 = l?.m0
+        if (l == null || m0 == null) false
+        else runCatching { sendNetEvent(l, m0, netEvent(id, body)) }
+            .onFailure { say("Custom wake word: event $id did not go: ${it.message}") }
+            .isSuccess
+    }
+
+    /**
+     * A NetEvent onto the session; one bigger than a frame carries goes as a segmented message, a header (1002)
+     * {1 type, 2 size, 3 id} then pieces (1003) {1 bytes, 2 id, 3 last}, the way the glasses send theirs.
+     */
+    private suspend fun sendNetEvent(l: Link, m0: Int, event: ByteArray) {
+        if (event.size <= SEGMENT_BYTES) return l.mux.send(m0, event, messageType = MT_NET_EVENT)
+        val id = UUID.randomUUID().toString().encodeToByteArray()
+        l.mux.send(m0, Wire.fieldVarint(1, MT_NET_EVENT.toLong()) + Wire.fieldVarint(2, event.size.toLong()) + Wire.fieldBytes(3, id), messageType = MT_SEGMENTED_HEADER)
+        var at = 0
+        while (at < event.size) {
+            val end = minOf(event.size, at + SEGMENT_BYTES)
+            val piece = Wire.fieldBytes(1, event.copyOfRange(at, end)) + Wire.fieldBytes(2, id) + Wire.fieldVarint(3, if (end == event.size) 1 else 0)
+            l.mux.send(m0, piece, messageType = MT_SEGMENTED_BUFFER)
+            at = end
+        }
     }
 
     private val liveAi = LiveAi(context, scope, object : LiveAiHost {
@@ -252,6 +285,9 @@ class Assistant(
         @Volatile var simplified = true
         // Segmented messages being put back together, by id: their type, size and bytes so far.
         val segments = ConcurrentHashMap<String, Triple<Int, Int, java.io.ByteArrayOutputStream>>()
+        // The text the glasses read in each question's photo, from their ev65.
+        private val ocr = ConcurrentHashMap<String, CompletableDeferred<String>>()
+        fun ocrOf(interaction: String): CompletableDeferred<String> = ocr.getOrPut(interaction) { CompletableDeferred() }
     }
 
     /** A photo this side is waiting for, for one interaction. */
@@ -449,6 +485,8 @@ class Assistant(
                 ears?.finish()
             }
             MT_STREAM_STATUS -> streamStatus(payload.decodeToString())
+            // A custom wake word sample, recorded on the glasses for an enrolment.
+            CustomWakeWord.MT_ENROLLMENT_HEADER, CustomWakeWord.MT_STREAMER_DATA, CustomWakeWord.MT_STREAMER_END -> wakeWord.onStream(type, payload)
             MT_ENVELOPE -> envelope(l, payload, message.info.channelId)
             // Some glasses send the same messages bare, without the envelope.
             MT_NET_EVENT, MT_START_INTERACTION, MT_SEGMENTED_HEADER, MT_SEGMENTED_BUFFER ->
@@ -523,12 +561,16 @@ class Assistant(
             }
             EV_FRAME_KEEP_ALIVE_RESPONSE, EV_KEEP_MWA_ALIVE -> Unit
             EV_FULFILLMENT_REQUEST -> fulfillmentRequest(l, event.body)
-            65 -> unsupportedVisualRequest(l, event.body, channel)
+            EV_MMAI_INTERACTION_REQUEST -> {
+                visualDiagnostics.record(65, event.body, channel)
+                if (!mmaiRequest(l, event.body)) unsupportedVisualRequest(l, event.body, channel)
+            }
             EV_DEVICE_VOICE_STATE -> voiceState(event.body)
             EV_REMOTE_IMAGE_CAPTURE_RESPONSE -> {
                 pending?.answered = true
                 say("The glasses took the photo: ${describe(event.body)}")
             }
+            CustomWakeWord.EV_RESULT -> wakeWord.onResult(runCatching { Thrift.loads(event.body) }.getOrDefault(emptyMap()))
             else -> say("Assistant: ${eventName(event.id)} (${event.id}), ${event.body.size} bytes ${describe(event.body)}")
         }
     }
@@ -547,6 +589,27 @@ class Assistant(
         l.segments.remove(id)
         if (bytes.size() != size) return say("Assistant: segmented message $id came to ${bytes.size()} bytes of $size")
         inner(l, kind, bytes.toByteArray(), channel)
+    }
+
+    /**
+     * ev65 MmaiInteractionRequest {1 interactionId, 2 ocrResult, 3 ocrPatchUuids}: the text the glasses' own OCR read in
+     * the photo for a visual question. ocrResult is base64 of a gzipped struct: {1 lines, each {1 box, 2 word indices},
+     * 2 words, each {2 text}}, lines top to bottom.
+     */
+    private fun mmaiRequest(l: Link, body: ByteArray): Boolean {
+        val f = runCatching { Thrift.loads(body) }.getOrNull() ?: return false
+        if (f[2].asText().isBlank()) return false
+        val interaction = f[1].asText()
+        val text = runCatching {
+            val ocr = Thrift.loads(java.util.zip.GZIPInputStream(java.util.Base64.getDecoder().decode(f[2].asText()).inputStream()).readBytes())
+            val words = (ocr[2] as? List<*>).orEmpty().map { it.asStruct()[2].asText() }
+            (ocr[1] as? List<*>).orEmpty().map { line ->
+                (line.asStruct()[2] as? List<*>).orEmpty().mapNotNull { words.getOrNull((it as? Long)?.toInt() ?: -1) }.joinToString(" ")
+            }.filter { it.isNotBlank() }.joinToString("\n")
+        }.getOrElse { say("Assistant: unreadable OCR from the glasses (${it.message})"); return false }
+        say("The glasses read ${text.lines().size} lines of text in the photo")
+        l.ocrOf(interaction).complete(text)
+        return true
     }
 
     /** ev339 echoed straight back as ev333, field for field. */
@@ -568,7 +631,6 @@ class Assistant(
     }
 
     private fun unsupportedVisualRequest(l: Link, body: ByteArray, channel: Int) {
-        visualDiagnostics.record(65, body, channel)
         val problem = context.getString(R.string.visual_request_unsupported)
         val interaction = MmaiVisualRequest.interactionId(body)
         // Capture-only: no synthetic diary question that Again could send to the model.
@@ -610,6 +672,23 @@ class Assistant(
         }
         // "Hey Meta" and nothing after it: the glasses close the turn at once.
         if (intent == "IN:WAKE_WORD") return
+        // Meta's server answers these with an action Visor cannot write; the phone starts and stops it itself.
+        if (hearing != null && intent in FOCUS_INTENTS) {
+            when (intent) {
+                "IN:START_CONVERSATION_FOCUS" -> hearing.start(null)
+                "IN:STOP_CONVERSATION_FOCUS", "IN:PAUSE_CONVERSATION_FOCUS" -> hearing.stop()
+                "IN:RESUME_CONVERSATION_FOCUS" -> hearing.resume()
+            }
+            say("Conversation focus: $intent")
+            return
+        }
+        // The same for a group conversation: the glasses' group app (svc28 app 47) finds or opens the group itself.
+        if (intent in GROUP_INTENTS) {
+            val type = if (intent == "IN:LEAVE_GROUP_CONVERSATION") MT_STOP_APP else MT_START_APP
+            connection.submit { it.sendOnService(SVC_COMPANION, type, Wire.fieldVarint(1, APP_GROUP_CONVERSATIONS)) }
+            say("Group conversation: $intent")
+            return
+        }
         when {
             // The glasses' own words for giving up.
             waiting != null && intent in CANCEL_INTENTS -> {
@@ -688,14 +767,18 @@ class Assistant(
             }
             update(interaction) { it.copy(image = file.path) }
         }
-        val note = if (visualQuestion && image == null) {
+        // The glasses' OCR of the photo they took comes just after the question; a model without vision has only this.
+        val read = if (visual.glassesCaptured) withTimeoutOrNull(OCR_WAIT_MS) { l.ocrOf(interaction).await() } else null
+        val note = listOfNotNull(
             "The wearer seems to ask about what they see, but the photo from the glasses did not arrive; say so briefly."
-        } else {
-            ""
-        }
+                .takeIf { visualQuestion && image == null && read.isNullOrBlank() },
+            read?.takeIf { it.isNotBlank() }?.let { "The glasses' OCR read this text in what the wearer sees, line by line, with errors: ${it.take(MAX_OCR)}" },
+        ).joinToString(" ")
         val waiting = scope.launch { holdOn(l) }
         val reply = try {
-            val left = (TURN_BUDGET_MS - (System.currentTimeMillis() - started)).coerceAtLeast(MIN_MODEL_MS)
+            // The glasses give up after their processing timeout; speech and streaming need the last seconds of it.
+            val budget = (processingTimeoutS() ?: FACTORY_PROCESSING_S) * 1000 - DELIVERY_MS
+            val left = (budget - (System.currentTimeMillis() - started)).coerceAtLeast(MIN_MODEL_MS)
             withTimeout(left) { brain.answer(transcript, l.locale, pastOf(interaction), image, note) }
         } catch (error: Exception) {
             problem = error.message ?: error::class.simpleName.orEmpty()
@@ -757,7 +840,7 @@ class Assistant(
         }
         var problem = ""
         val reply = try {
-            brain.answer(question, l.locale, pastOf(sub), image, LIVE_AI_NOTE)
+            brain.answer(question, l.locale, pastOf(sub), image, liveAiNote())
         } catch (error: Exception) {
             problem = error.message ?: error::class.simpleName.orEmpty()
             Reply(fallback(l.locale, store.config.value.apiKey.isBlank() && store.config.value.provider == Provider.CLAUDE))
@@ -952,6 +1035,8 @@ class Assistant(
         return id
     }
 
+    private fun liveAiNote(): String = if (liveAiDetailed()) LIVE_AI_NOTE_DETAILED else LIVE_AI_NOTE
+
     /** [id]'s question again, with the model and settings as they are now; the new answer replaces the old one. */
     fun askAgain(id: String) {
         if (diary.turn(id) == null) return
@@ -974,7 +1059,7 @@ class Assistant(
             val reply = withTimeout(PHONE_BUDGET_MS) {
                 brain.answer(
                     turn.question, if (phone) phoneLocale() else locale, pastOf(id), image,
-                    if (turn.source == TurnSource.LIVE_AI) LIVE_AI_NOTE else "", if (phone) Audience.PHONE else Audience.GLASSES,
+                    if (turn.source == TurnSource.LIVE_AI) liveAiNote() else "", if (phone) Audience.PHONE else Audience.GLASSES,
                 )
             }
             diary.update(id) { it.copy(answer = reply.text, problem = "", remembered = reply.remembered, actions = reply.actions, modelMs = System.currentTimeMillis() - started) }
@@ -1051,8 +1136,8 @@ class Assistant(
             "ko" to ("Visor가 연결되었지만 아직 모델이 설정되지 않았습니다. 앱에서 API 키를 추가하세요." to "죄송합니다. 답변을 받지 못했습니다."),
             "zh" to ("Visor 已连接，但还没有设置模型。请在应用中添加 API 密钥。" to "抱歉，我没能获得回答。"),
         )
-        // The glasses give the whole turn 20 s; speech and streaming need some of it.
-        const val TURN_BUDGET_MS = 16_000L
+        const val FACTORY_PROCESSING_S = 20L
+        const val DELIVERY_MS = 4_000L
         const val HOLD_ON_MS = 3_000L
         /** How long the glasses' own recognition gets to send its ev57 before the server's answer goes instead. */
         const val OWN_RECOGNITION_GRACE_MS = 1_200L
@@ -1064,6 +1149,9 @@ class Assistant(
         val WAKE_WORD_ONLY = Regex("^(hey|hi|ehi|ei|ok|okay)?[ ,]*(meta|mata|metta|matta|meda)[.!?]*$", RegexOption.IGNORE_CASE)
         const val MIN_MODEL_MS = 6_000L
         const val PHOTO_WAIT_MS = 8_000L
+        // ev65 came 0.14, 0.45 and 1.2 s after the question.
+        const val OCR_WAIT_MS = 2_500L
+        const val MAX_OCR = 4_000
 
         // How long a reply asked for waits for its words.
         const val REPLY_WAIT_MS = 30_000L
@@ -1125,12 +1213,32 @@ private fun describeRead(value: Any?): String {
 /** The problem of an answer that came after the glasses had closed its turn: kept, never spoken. */
 const val ANSWER_TOO_LATE = "too late for the glasses"
 
+/** What the glasses understand as a request for conversation focus. */
+private val FOCUS_INTENTS = setOf(
+    "IN:START_CONVERSATION_FOCUS", "IN:STOP_CONVERSATION_FOCUS", "IN:PAUSE_CONVERSATION_FOCUS", "IN:RESUME_CONVERSATION_FOCUS",
+)
+
+/** What the glasses understand as starting, joining or leaving a group conversation. */
+private val GROUP_INTENTS = setOf("IN:START_GROUP_CONVERSATION", "IN:JOIN_GROUP_CONVERSATION", "IN:LEAVE_GROUP_CONVERSATION")
+
+private const val SVC_COMPANION = 28
+private const val MT_START_APP = 2000
+private const val MT_STOP_APP = 2002
+private const val APP_GROUP_CONVERSATIONS = 47L
+
 /** ev289's mode for a Live AI session. */
 private const val MODE_LIVE_AI = 2L
+
+/** The most a NetEvent goes as in one piece: an AirShield frame holds 255 blocks, and the glasses send 1 KB pieces. */
+private const val SEGMENT_BYTES = 1_024
 
 private const val LIVE_AI_NOTE =
     "This is Live AI: a continuous conversation while the wearer shows you what they see. The image is the camera's " +
         "view right now. Answer briefly and naturally; speak only about what matters to the question."
+
+private const val LIVE_AI_NOTE_DETAILED =
+    "This is Live AI: a continuous conversation while the wearer shows you what they see. The image is the camera's " +
+        "view right now. The wearer asked for detailed answers: explain fully, with the details you can see, still in speech."
 
 /** The camera stream Live AI sees through. */
 interface LiveAiCamera {

@@ -30,6 +30,7 @@ import com.macedonga.visor.NotifyAppsKey
 import com.macedonga.visor.R
 import com.macedonga.visor.core.design.Visor
 import com.macedonga.visor.core.settings.offeredOn
+import com.macedonga.visor.features.featureSection
 import com.macedonga.visor.gallery.AutoImport
 import com.macedonga.visor.gallery.allows
 import com.macedonga.visor.gallery.detail
@@ -112,6 +113,8 @@ fun TopicScreen(name: String, open: (NavKey) -> Unit, model: SettingsViewModel =
             Topic.PHOTOS -> item(key = "visor") { PhotosPart(model) }
             else -> Unit
         }
+        // Hearing is nothing but features, so they need no heading of their own there.
+        featureSection(topic, open, heading = topic != Topic.HEARING)
         for ((i, section) in sectionsOf(topic).withIndex()) {
             // Rows the Meta app keeps for other glasses are left to Advanced.
             val keys = section.second.filter { it in known && specOf(model.settings, it).offeredOn(product) }

@@ -247,7 +247,11 @@ class McpHub(private val context: Context, val store: McpStore) {
         val notes = StringBuilder()
         val names = ArrayList<String>()
         for (s in servers) {
-            val st = _status.value[s.id]?.takeIf { it.phase == McpStatus.Phase.READY } ?: continue
+            val st = _status.value[s.id]
+            if (st == null || st.phase != McpStatus.Phase.READY) {
+                note("${s.name}: left out of this answer, ${st?.error?.takeIf { it.isNotEmpty() } ?: "still connecting"}")
+                continue
+            }
             val tools = st.tools.filter { it.name !in s.off }
             if (tools.isEmpty()) continue
             names += s.name

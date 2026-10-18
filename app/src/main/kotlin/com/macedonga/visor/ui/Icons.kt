@@ -74,6 +74,11 @@ object VisorIcons {
         "M7 10.5h-.5A1.5 1.5 0 0 0 5 12v6.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V12a1.5 1.5 0 0 0-1.5-1.5H17",
     )
 
+    val Download = icon(
+        "M12 3.8v11", "M8.2 11.2L12 14.8l3.8-3.6",
+        "M5 15.5v3A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5v-3",
+    )
+
     val Trash = icon(
         "M4.5 6.5h15", "M9.5 6.5V5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1.5",
         "M6.5 6.5l.8 12a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-12", "M10 10.5v5.5", "M14 10.5v5.5",
@@ -166,6 +171,34 @@ object VisorIcons {
 
     /** A plug: what the assistant is connected to. */
     val Plug = icon("M9 3.5v4", "M15 3.5v4", "M6.5 7.5h11v3a5.5 5.5 0 0 1-11 0z", "M12 16v4.5")
+
+    /** A four-point star: something the glasses can do that Meta keeps off. */
+    val Spark = icon("M12 3.5C12.7 9.2 14.8 11.3 20.5 12C14.8 12.7 12.7 14.8 12 20.5C11.3 14.8 9.2 12.7 3.5 12C9.2 11.3 11.3 9.2 12 3.5z")
+
+    /** An ear: hearing the person in front of you. */
+    val Ear = icon("M7.5 9.5a4.5 4.5 0 1 1 9 0c0 2.6-1.8 3.6-2.8 4.6-.8.8-1 1.6-1.2 2.6a2.6 2.6 0 0 1-5 .3", "M10 9.8a2 2 0 1 1 3.6 1.2")
+
+    /** The ear with sound coming to it: hearing correction. */
+    val HearingAid = icon(
+        "M5.5 9.5a4.5 4.5 0 1 1 9 0c0 2.6-1.8 3.6-2.8 4.6-.8.8-1 1.6-1.2 2.6a2.6 2.6 0 0 1-5 .3", "M8 9.8a2 2 0 1 1 3.6 1.2",
+        "M17.5 8a5 5 0 0 1 0 5", "M19.8 6a8 8 0 0 1 0 9",
+    )
+
+    val Minus = icon("M5.5 12h13")
+
+    val Timer = icon("M12 13.5m-6.5 0a6.5 6.5 0 1 0 13 0a6.5 6.5 0 1 0-13 0", "M12 13.5V10", "M10 3.5h4", "M12 3.5V7")
+
+    val Captions = icon(
+        "M6 6.5h12a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 16V8A1.5 1.5 0 0 1 6 6.5z",
+        "M7.5 11h4", "M13.5 11h3", "M7.5 14h7",
+    )
+
+    val People = icon(
+        "M9 9m-2.5 0a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0", "M4 18.5a5 5 0 0 1 10 0",
+        "M16 9.5m-2 0a2 2 0 1 0 4 0a2 2 0 1 0-4 0", "M15.5 14a4.2 4.2 0 0 1 4.5 4.5",
+    )
+
+    val Chat = icon("M5.5 6h13a1.5 1.5 0 0 1 1.5 1.5v7a1.5 1.5 0 0 1-1.5 1.5H10l-4 3v-3h-.5A1.5 1.5 0 0 1 4 14.5v-7A1.5 1.5 0 0 1 5.5 6z")
 
     /** Short arcs around the centre of the grid, [count] of them, each half a step long. */
     private fun dashedRing(radius: Float, count: Int): Array<String> = Array(count) { k ->

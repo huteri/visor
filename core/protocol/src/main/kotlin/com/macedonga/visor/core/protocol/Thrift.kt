@@ -21,11 +21,13 @@ object Thrift {
     const val SET = 10
     const val MAP = 11
     const val STRUCT = 12
+    // fbthrift's compact protocol only: 4 bytes, big-endian.
+    const val FLOAT = 13
 
     private val TYPE_NAME = mapOf(
         0 to "STOP", 1 to "TRUE", 2 to "FALSE", 3 to "I8", 4 to "I16", 5 to "I32",
         6 to "I64", 7 to "DOUBLE", 8 to "BIN", 9 to "LIST", 10 to "SET", 11 to "MAP",
-        12 to "STRUCT",
+        12 to "STRUCT", 13 to "FLOAT",
     )
 
     fun typeName(code: Int): String = TYPE_NAME[code] ?: "type $code"
@@ -106,6 +108,8 @@ object Thrift {
                 val value = ByteBuffer.wrap(b, i, 8).order(ByteOrder.LITTLE_ENDIAN).double
                 return Read(value, i + 8)
             }
+
+            FLOAT -> return Read(ByteBuffer.wrap(b, i, 4).order(ByteOrder.BIG_ENDIAN).float.toDouble(), i + 4)
 
             BIN -> {
                 val len = uvarint(b, i)
@@ -296,6 +300,7 @@ object Thrift {
             I8 -> return i + 1
             I16, I32, I64 -> return uvarint(b, i).offset
             DOUBLE -> return i + 8
+            FLOAT -> return i + 4
             BIN -> {
                 val lengthStart = i
                 val len = uvarint(b, i)
@@ -503,6 +508,19 @@ class ThriftWriter {
             buf += Thrift.wvarint(n.toLong())
         }
         bodies.forEach { buf += it }
+        return this
+    }
+
+    fun listOfBinaries(fid: Int, items: List<ByteArray>): ThriftWriter {
+        header(fid, Thrift.LIST)
+        val n = items.size
+        if (n < 15) {
+            buf += ((n shl 4) or Thrift.BIN).toByte()
+        } else {
+            buf += (0xF0 or Thrift.BIN).toByte()
+            buf += Thrift.wvarint(n.toLong())
+        }
+        items.forEach { buf += Thrift.wvarint(it.size.toLong()) + it }
         return this
     }
 

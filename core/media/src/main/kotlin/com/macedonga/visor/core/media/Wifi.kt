@@ -49,6 +49,12 @@ data class ImportProblem(val kind: Kind, val detail: String = "", val handles: S
 
         /** The glasses went quiet or away halfway: asleep in the closed case, or out of reach. */
         CUT_OFF,
+
+        /** A file failed its checksum. The glasses count it delivered all the same. */
+        DAMAGED,
+
+        /** Everything came, but the phone's gallery would not take it. */
+        NOT_SAVED,
     }
 }
 
