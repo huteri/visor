@@ -72,9 +72,10 @@ jobs:
           repo, number = os.environ['GH_REPO'], os.environ['PR_NUMBER']
           body = (f"{marker}\n## Debug APK\n\n[Download app-debug.apk]({os.environ['APK_URL']}) — raw APK, no ZIP.\n\n"
                   f"PR head: `{os.environ['HEAD_SHA']}`. [Build]({os.environ['RUN_URL']}).\n\n"
-                  "Package: `com.macedonga.visor.debug`; app: **Visor (d)**. Separate settings/login/permissions from release; "
-                  "only one Visor should connect to the glasses. Fresh Meta setup requires application constants not included "
-                  "in this CI build. Debug-signed; hardware unverified. Download requires GitHub sign-in and expires after 14 days.")
+                  "Package: `com.macedonga.visor`; app: **Visor (d)**. Debug signing differs from release: "
+                  "this APK cannot update an installed fork release or coexist with it. Do not uninstall the working release. "
+                  "Use the fork-signed release APK for device testing. Meta application constants are absent from this debug CI build. "
+                  "Hardware unverified. Download requires GitHub sign-in and expires after 14 days.")
           pages = json.loads(subprocess.check_output(['gh', 'api', '--paginate', '--slurp', f'repos/{repo}/issues/{number}/comments'], text=True))
           previous = next((c for page in pages for c in page if c['user']['login'] == 'github-actions[bot]' and marker in c['body']), None)
           endpoint = f"repos/{repo}/issues/comments/{previous['id']}" if previous else f'repos/{repo}/issues/{number}/comments'
