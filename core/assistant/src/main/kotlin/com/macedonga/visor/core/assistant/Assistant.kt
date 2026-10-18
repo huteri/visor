@@ -120,26 +120,6 @@ class Assistant(
     private val _notes = MutableSharedFlow<String>(extraBufferCapacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     val notes: SharedFlow<String> = _notes.asSharedFlow()
 
-    private val visualDiagnostics = VisualCaptureProvider.capture
-    private var visualCaptureExpiry: Job? = null
-
-    /** Consent is requested by the Event log screen, never enabled by a build flag. */
-    fun startVisualCapture() {
-        clearVisualCapture()
-        visualDiagnostics.start()
-        visualCaptureExpiry = scope.launch {
-            delay(600_000)
-            visualDiagnostics.expire()
-        }
-    }
-
-    fun exportVisualCapture(): android.net.Uri? = VisualCaptureProvider.publish(context)
-
-    fun clearVisualCapture() {
-        visualCaptureExpiry?.cancel()
-        visualDiagnostics.clear()
-    }
-
     /** The glasses' custom wake word enrolment, over this session. */
     val wakeWord = CustomWakeWord { id, body ->
         val l = link
@@ -521,7 +501,6 @@ class Assistant(
             return
         }
         if (type == MT_SEGMENTED_HEADER || type == MT_SEGMENTED_BUFFER) {
-            visualDiagnostics.record(type, blob, channel)
             return segment(l, type, blob, channel)
         }
         if (type != MT_NET_EVENT) {
@@ -562,8 +541,7 @@ class Assistant(
             EV_FRAME_KEEP_ALIVE_RESPONSE, EV_KEEP_MWA_ALIVE -> Unit
             EV_FULFILLMENT_REQUEST -> fulfillmentRequest(l, event.body)
             EV_MMAI_INTERACTION_REQUEST -> {
-                visualDiagnostics.record(65, event.body, channel)
-                if (!mmaiRequest(l, event.body)) unsupportedVisualRequest(l, event.body, channel)
+                if (!mmaiRequest(l, event.body)) unsupportedVisualRequest(l, event.body)
             }
             EV_DEVICE_VOICE_STATE -> voiceState(event.body)
             EV_REMOTE_IMAGE_CAPTURE_RESPONSE -> {
@@ -630,10 +608,10 @@ class Assistant(
         say("Glasses: \"$words\"")
     }
 
-    private fun unsupportedVisualRequest(l: Link, body: ByteArray, channel: Int) {
+    private fun unsupportedVisualRequest(l: Link, body: ByteArray) {
         val problem = context.getString(R.string.visual_request_unsupported)
         val interaction = MmaiVisualRequest.interactionId(body)
-        // Capture-only: no synthetic diary question that Again could send to the model.
+        // Unsupported metadata must not become a synthetic question through Again.
         // An unknown ev65 UUID cannot safely be assigned to the current microphone.
         if (interaction != null) {
             l.taken.add(interaction)
