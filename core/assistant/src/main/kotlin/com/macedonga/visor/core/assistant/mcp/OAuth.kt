@@ -35,6 +35,7 @@ internal data class AuthServer(
 object OAuthRedirects {
     /** The app's own redirect, a private-use scheme (RFC 8252). */
     const val APP = "com.macedonga.visor:/oauth"
+    fun app(packageName: String): String = "$packageName:/oauth"
 
     /** For servers that only take loopback redirects; the port is fixed so a client registered by hand keeps working. */
     const val LOOPBACK_PORT = 47219
@@ -231,7 +232,7 @@ internal class OAuth(private val http: OkHttpClient) {
  * The loopback redirect: one request to 127.0.0.1, answered with a page that sends the person back to the app.
  * Returns the full redirect URL; cancelling closes the socket.
  */
-internal suspend fun awaitLoopback(port: Int): String = coroutineScope {
+internal suspend fun awaitLoopback(port: Int, appRedirect: String = OAuth.APP_REDIRECT): String = coroutineScope {
     val server = withContext(Dispatchers.IO) { ServerSocket(port, 1, InetAddress.getByName("127.0.0.1")) }
     val watcher = launch { try { awaitCancellation() } finally { runCatching { server.close() } } }
     try {
@@ -242,8 +243,8 @@ internal suspend fun awaitLoopback(port: Int): String = coroutineScope {
                     val target = line.split(' ').getOrNull(1).orEmpty()
                     val page = "<!doctype html><meta name=viewport content='width=device-width'><body style='font:16px sans-serif;" +
                         "background:#000;color:#fff;display:grid;place-items:center;height:90vh'><div style='text-align:center'>" +
-                        "<p>Signed in.</p><p><a style='color:#fff' href='${OAuth.APP_REDIRECT}'>Back to Visor</a></p></div>" +
-                        "<script>location.href='${OAuth.APP_REDIRECT}'</script>"
+                        "<p>Signed in.</p><p><a style='color:#fff' href='${appRedirect}'>Back to Visor</a></p></div>" +
+                        "<script>location.href='${appRedirect}'</script>"
                     val bytes = page.toByteArray()
                     socket.getOutputStream().apply {
                         write("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n".toByteArray())

@@ -94,6 +94,7 @@ class McpHub(private val context: Context, val store: McpStore) {
 
     // The older transport's event stream may stay quiet for minutes.
     private val stream = http.newBuilder().readTimeout(0, TimeUnit.SECONDS).build()
+    private val appRedirect = OAuthRedirects.app(context.packageName)
     private val oauth = OAuth(http)
     private val icons = ServerIcons(http)
     private val iconsTried = ConcurrentHashMap<String, String>()
@@ -332,7 +333,7 @@ class McpHub(private val context: Context, val store: McpStore) {
                     issuer = at.issuer, authorizationEndpoint = at.authorizationEndpoint, tokenEndpoint = at.tokenEndpoint,
                     clientId = s.clientId.trim(), clientSecret = s.clientSecret.trim(),
                     tokenAuth = if (s.clientSecret.isBlank()) "none" else "client_secret_post",
-                    redirectUri = s.redirect.ifEmpty { OAuth.APP_REDIRECT },
+                    redirectUri = s.redirect.ifEmpty { appRedirect },
                     scope = at.scope, resource = at.resource, manualClient = true,
                 )
                 kept != null -> kept.copy(authorizationEndpoint = at.authorizationEndpoint, tokenEndpoint = at.tokenEndpoint, scope = at.scope, resource = at.resource)
@@ -341,7 +342,7 @@ class McpHub(private val context: Context, val store: McpStore) {
                     return null
                 }
                 else -> try {
-                    oauth.register(at, OAuth.APP_REDIRECT)
+                    oauth.register(at, appRedirect)
                 } catch (refused: RedirectRefused) {
                     oauth.register(at, OAuth.LOOPBACK_REDIRECT)
                 }
@@ -351,7 +352,7 @@ class McpHub(private val context: Context, val store: McpStore) {
             val state = OAuth.secret(32)
             val verifier = OAuth.secret(64)
             val loopback = if (grant.redirectUri.startsWith("http://127.0.0.1")) {
-                scope.launch { withTimeoutOrNull(SIGN_IN_MS) { runCatching { awaitLoopback(OAuth.LOOPBACK_PORT) }.getOrNull() }?.let(::complete) }
+                scope.launch { withTimeoutOrNull(SIGN_IN_MS) { runCatching { awaitLoopback(OAuth.LOOPBACK_PORT, appRedirect) }.getOrNull() }?.let(::complete) }
             } else null
             pending = Pending(id, state, verifier, grant, loopback)
             val page = oauth.authorizeUrl(grant, state, verifier)

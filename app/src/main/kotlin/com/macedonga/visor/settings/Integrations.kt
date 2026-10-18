@@ -479,10 +479,10 @@ fun IntegrationScreen(id: String, onGone: () -> Unit, model: IntegrationsViewMod
         "redirect" -> ChoiceSheet(
             stringResource(R.string.mcp_redirect),
             listOf(
-                Triple(OAuthRedirects.APP, stringResource(R.string.mcp_redirect_app), OAuthRedirects.APP),
+                Triple(OAuthRedirects.app(context.packageName), stringResource(R.string.mcp_redirect_app), OAuthRedirects.app(context.packageName)),
                 Triple(OAuthRedirects.LOOPBACK, stringResource(R.string.mcp_redirect_loopback), OAuthRedirects.LOOPBACK),
             ),
-            server.redirect.ifEmpty { OAuthRedirects.APP },
+            server.redirect.ifEmpty { OAuthRedirects.app(context.packageName) },
             onPick = { r -> update { it.copy(redirect = r) } },
             onDismiss = { sheet = null },
         )
@@ -583,10 +583,10 @@ private fun accessRows(
                 rows += {
                     val host = LocalHost.current
                     val copied = stringResource(R.string.mcp_copied)
-                    val redirect = server.redirect.ifEmpty { OAuthRedirects.APP }
+                    val redirect = server.redirect.ifEmpty { OAuthRedirects.app(context.packageName) }
                     ValueRow(
                         stringResource(R.string.mcp_redirect),
-                        stringResource(if (redirect == OAuthRedirects.APP) R.string.mcp_redirect_app else R.string.mcp_redirect_loopback),
+                        stringResource(if (redirect == OAuthRedirects.app(context.packageName)) R.string.mcp_redirect_app else R.string.mcp_redirect_loopback),
                         onClick = { onSheet("redirect") },
                         onLongClick = {
                             context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText("redirect", redirect))
