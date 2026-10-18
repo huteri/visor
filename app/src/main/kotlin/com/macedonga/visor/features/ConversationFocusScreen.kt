@@ -55,14 +55,16 @@ fun ConversationFocusScreen(model: FeaturesModel = hiltViewModel()) {
     val standing = state.standings[feature] ?: Standing.UNKNOWN
     val allowed = standing == Standing.ON
     val (style, volume) = tuning
-    val ready = LocalHost.current.ready
-    // The minimum build focus needs is one of Meta's switches: read them once the glasses are there.
-    LaunchedEffect(ready) {
-        if (ready && !state.configRead && !state.busy) model.features.check()
-    }
-
     SettingsPage(stringResource(R.string.feature_cf), stringResource(R.string.cf_lede)) {
-        item(key = "now") { FocusNow(hearing, allowed, model) }
+        item(key = "now") {
+            // LocalHost is provided by SettingsPage, so read it in the composed item.
+            val ready = LocalHost.current.ready
+            // The minimum build focus needs is one of Meta's switches: read them once the glasses are there.
+            LaunchedEffect(ready) {
+                if (ready && !state.configRead && !state.busy) model.features.check()
+            }
+            FocusNow(hearing, allowed, model)
+        }
         item(key = "sound") {
             val host = LocalHost.current
             val locked = !host.ready || !allowed
