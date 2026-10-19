@@ -649,6 +649,7 @@
     <string name="onboard_new_key">Any other phone or app that held them has lost them.</string>
     <string name="onboard_open">Open Visor</string>
     <string name="onboard_failed">Not set up</string>
+    <string name="onboard_wrong_owner">These glasses belong to another Meta account. Log in with the one that set them up in the Meta AI app, or reset the glasses.</string>
     <string name="onboard_failed_untouched">Nothing on the glasses changes before the last step.</string>
     <string name="onboard_try_again">Try again</string>
     <string name="onboard_choose_again">Choose again</string>

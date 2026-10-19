@@ -218,9 +218,14 @@ class PhoneActions @Inject constructor(@ApplicationContext private val context: 
             sessions.orEmpty().map { it.packageName })
             .filter { it != context.packageName && pm.getLaunchIntentForPackage(it) != null }.toSet()
 
-    /** Starts [intent] when Visor may, and puts it in a notification when it may not or the phone is locked. */
-    private fun open(intent: Intent, id: Int, title: String, app: String): PhoneDone {
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    /** Starts [implicit] when Visor may, and puts it in a notification when it may not or the phone is locked. */
+    private fun open(implicit: Intent, id: Int, title: String, named: String): PhoneDone {
+        // Explicit, so it opens the app it names and nothing else; with no default, the first that takes it.
+        val pkg = implicit.`package` ?: handler(implicit)
+            ?: pm.queryIntentActivities(implicit, PackageManager.MATCH_DEFAULT_ONLY).firstOrNull()?.activityInfo?.packageName
+            ?: return PhoneDone(named, "no app on the phone opens it")
+        val intent = Intent(implicit).setPackage(pkg).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val app = named.ifEmpty { label(pkg) }
         val started = (onScreen() || companionAssociated(context)) && runCatching { context.startActivity(intent) }.isSuccess
         if (started && !context.getSystemService(KeyguardManager::class.java).isKeyguardLocked) return PhoneDone(app, opened = true)
         val manager = context.getSystemService(NotificationManager::class.java)

@@ -6,6 +6,7 @@ import com.macedonga.visor.core.connection.GlassesConnection
 import com.macedonga.visor.core.connection.GlassesLink
 import com.macedonga.visor.core.media.AirshipReceiver
 import com.macedonga.visor.core.media.ExtraFiles
+import com.macedonga.visor.core.media.NAMESPACE_SHARING
 import com.macedonga.visor.core.media.Received
 import com.macedonga.visor.core.protocol.Thrift
 import com.macedonga.visor.core.protocol.ThriftWriter
@@ -293,6 +294,12 @@ class Assistant(
     @Volatile
     private var pending: PendingImage? = null
 
+    /** A photo that came over airship with no question waiting: some pairs send it just before the question. */
+    private class EarlyImage(val bytes: ByteArray, val from: String, val at: Long)
+
+    @Volatile
+    private var early: EarlyImage? = null
+
     /** The phone's messaging, for replies by voice; set by the notification listener. */
     @Volatile
     var messaging: Messaging? = null
@@ -307,15 +314,17 @@ class Assistant(
         // The assistant's photo comes over airship, in a namespace the media import refuses.
         airship.extra = object : ExtraFiles {
             override fun wants(namespace: String, size: Long): Boolean {
-                val waiting = pending != null && size < 20_000_000
+                val waiting = pending != null && size < 20_000_000 ||
+                    namespace == NAMESPACE_SHARING && store.config.value.enabled && size < EARLY_MAX_BYTES
                 if (waiting) say("Taking ${size / 1000} KB in namespace \"$namespace\" for the photo")
                 return waiting
             }
 
             // Read here, because the receiver deletes the file; decoded off the reader.
             override fun take(received: Received) {
-                val bytes = received.file.readBytes()
-                scope.launch { offerImage(bytes, "airship \"${received.offer.namespace}\"") }
+                val got = EarlyImage(received.file.readBytes(), "airship \"${received.offer.namespace}\"", System.currentTimeMillis())
+                early = got
+                scope.launch { offerEarly(got) }
             }
 
             override fun peek(received: Received) {
@@ -1040,6 +1049,8 @@ class Assistant(
         val waiting = PendingImage(interaction)
         pending = waiting
         try {
+            early?.takeIf { System.currentTimeMillis() - it.at < EARLY_IMAGE_MS }?.let { offerEarly(it) }
+            if (waiting.image.isCompleted) return waiting.image.await()
             if (!visual.glassesCaptured) {
                 val m0 = l.m0 ?: return null
                 val request = ThriftWriter().bool(1, false).bool(2, true).bool(3, false).str(4, interaction).done()
@@ -1056,15 +1067,22 @@ class Assistant(
         }
     }
 
-    private fun offerImage(bytes: ByteArray, from: String) {
-        val waiting = pending ?: return
+    /** Hand [bytes] to the question waiting for a photo; true once it has one. */
+    private fun offerImage(bytes: ByteArray, from: String): Boolean {
+        val waiting = pending ?: return false
+        if (waiting.image.isCompleted) return true
         val jpeg = toModelJpeg(bytes)
         if (jpeg == null) {
             say("A file of ${bytes.size / 1000} KB from $from is not an image I can read: ${hex(bytes)}")
-            return
+            return false
         }
-        say("Got the photo from $from, ${bytes.size / 1000} KB")
-        waiting.image.complete(jpeg)
+        if (waiting.image.complete(jpeg)) say("Got the photo from $from, ${bytes.size / 1000} KB")
+        return true
+    }
+
+    // Used once: a later question must not get it.
+    private fun offerEarly(got: EarlyImage) {
+        if (offerImage(got.bytes, got.from) && early === got) early = null
     }
 
     /** Speak [text] as [interaction]'s answer in the voice chosen. The milliseconds of audio sent, 0 in the glasses' voice. */
@@ -1329,6 +1347,9 @@ class Assistant(
         val WAKE_WORD_ONLY = Regex("^(hey|hi|ehi|ei|ok|okay)?[ ,]*(meta|mata|metta|matta|meda)[.!?]*$", RegexOption.IGNORE_CASE)
         const val MIN_MODEL_MS = 6_000L
         const val PHOTO_WAIT_MS = 8_000L
+        // The "Sharing" photo came 0.2 s before its question (issue #18); a low-res one is 13 KB.
+        const val EARLY_IMAGE_MS = 10_000L
+        const val EARLY_MAX_BYTES = 2_000_000L
         // ev65 came 0.14, 0.45 and 1.2 s after the question.
         const val OCR_WAIT_MS = 2_500L
         const val MAX_OCR = 4_000
