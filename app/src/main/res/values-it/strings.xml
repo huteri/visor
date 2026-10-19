@@ -648,6 +648,7 @@
     <string name="onboard_new_key">Qualsiasi altro telefono o app che li aveva li ha persi.</string>
     <string name="onboard_open">Apri Visor</string>
     <string name="onboard_failed">Non configurati</string>
+    <string name="onboard_wrong_owner">Questi occhiali appartengono a un altro account Meta. Accedi con quello che li ha configurati nell\'app Meta AI, oppure ripristina gli occhiali.</string>
     <string name="onboard_failed_untouched">Sugli occhiali non cambia nulla prima dell\'ultimo passo.</string>
     <string name="onboard_try_again">Riprova</string>
     <string name="onboard_choose_again">Scegli di nuovo</string>
