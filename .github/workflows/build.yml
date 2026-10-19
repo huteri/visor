@@ -12,17 +12,30 @@ permissions:
   contents: read
 
 concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: true
+  group: build-${{ github.event_name == 'push' && github.sha || github.ref }}
+  # Main merges must all finish; GitHub concurrency keeps only one pending run.
+  cancel-in-progress: false
 
 jobs:
+  merged-pr-draft:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'huteri/visor'
+    permissions:
+      contents: write
+      pull-requests: read
+    uses: ./.github/workflows/release.yml
+    with:
+      automatic: true
+    secrets: inherit
+
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
       TRUSTED: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       VISOR_VERSION_NAME: 1.3.7-ci${{ github.run_number }}
-      # Above distributed 10306; previews share 10307 so reruns can replace each other.
+      # Preview-only fixed metadata, NOT merged release versions. Cannot update
+      # distributed 10308+; merged drafts allocate monotonic versions separately.
       VISOR_VERSION_CODE: 10307
     outputs:
       apk-url: ${{ steps.apk.outputs.artifact-url }}
@@ -143,9 +156,10 @@ jobs:
                   f"PR head: `{os.environ['HEAD_SHA']}`. [Build]({os.environ['RUN_URL']}).\n\n"
                   "Package: `com.macedonga.visor`; app: **Visor**. Signed with the existing fork release key; "
                   "includes required Meta application constants. Version `1.3.7-ci" + os.environ['RUN_NUMBER'] + "`, code `10307` "
-                  "can update fork-signed 10305, 10306 or 10307 builds, not other signing identities or higher version codes. "
+                  "is preview-only; cannot update distributed 10308+ or automatic merged-PR drafts. "
                   "Do not uninstall the working release. Hardware unverified. "
-                  "Download requires GitHub sign-in and expires after 14 days. No public release published.")
+                  "Download requires GitHub sign-in and expires after 14 days. No public release published. "
+                  "After merge and successful main Build, a separate signed draft release gets a higher version code.")
           pages = json.loads(subprocess.check_output(['gh', 'api', '--paginate', '--slurp', f'repos/{repo}/issues/{number}/comments'], text=True))
           previous = next((c for page in pages for c in page if c['user']['login'] == 'github-actions[bot]' and marker in c['body']), None)
           endpoint = f"repos/{repo}/issues/comments/{previous['id']}" if previous else f'repos/{repo}/issues/{number}/comments'
