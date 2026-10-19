@@ -908,4 +908,12 @@
     <string name="hct_retry">Try again</string>
     <string name="phone_directions">Directions to %1$s</string>
     <string name="phone_play">Play %1$s</string>
+    <string name="ai_spoken_progress">Spoken progress (experimental)</string>
+    <string name="ai_spoken_progress_off">Off</string>
+    <string name="ai_spoken_progress_on">On</string>
+    <string name="ai_spoken_progress_sub">For slow ordinary answers, repeats phone text-to-speech progress at intervals based on Meta AI Wait for answer (55s: every 40s; 30s: every 20s), shortened if the glasses report a lower wait; final answer uses your selected voice. Glasses voice native handoff is experimental; Phone voice keeps streamed phone audio. Fast answers and saved voice choice stay unchanged. Not used for Live AI or session mode. Limited to 300 seconds; glasses may still close earlier.</string>
+    <string name="event_log_share_logcat">Share last 1000 logcat lines</string>
+    <string name="event_log_logcat_capturing">Capturing app logcat…</string>
+    <string name="event_log_logcat_disclosure">Shares up to 1000 app-accessible logcat lines for Visor’s UID, not whole-device logs. Previous-process crashes, native crashes and OS kills may be unavailable. Messages may contain sensitive data. Only shared when you tap and choose a recipient. Latest export stays in app cache until replaced or cache is cleared; shared copies cannot be recalled.</string>
+    <string name="event_log_logcat_failed">No report shared: app logcat may be empty, unavailable, unsupported, over the size limit or timed out. Try again soon after reproducing the issue.</string>
 </resources>
