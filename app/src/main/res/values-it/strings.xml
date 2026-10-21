@@ -19,6 +19,12 @@
     <string name="home_reading_case">Custodia</string>
     <string name="home_allow_bluetooth">Consenti il Bluetooth</string>
     <string name="home_set_up">Configura gli occhiali</string>
+    <string name="home_key_refused">Chiave rifiutata. Configurali di nuovo</string>
+    <string name="home_key_refused_meta_ai">Chiave rifiutata. Forse li ha presi l\'app Meta AI</string>
+    <string name="key_refused_meta_ai_title">Forse l\'app Meta AI si è ripresa gli occhiali</string>
+    <string name="key_refused_meta_ai_text">Gli occhiali accettano un solo proprietario alla volta. L\'app Meta AI su questo telefono potrebbe essere tornata a esserlo, quindi non accettano più la chiave di Visor. Se è così, prima disinstallala, altrimenti li riprende, poi configura di nuovo gli occhiali.</string>
+    <string name="key_refused_uninstall_meta_ai">Disinstalla Meta AI</string>
+    <string name="key_refused_set_up_again">Configura di nuovo</string>
     <plurals name="home_new_captures">
         <item quantity="one">%d foto o video nuovo</item>
         <item quantity="other">%d foto e video nuovi</item>
@@ -223,8 +229,6 @@
     <string name="live_settings_resolution">Risoluzione</string>
     <string name="live_settings_bitrate">Bitrate</string>
     <string name="live_settings_frame_rate">Fotogrammi al secondo</string>
-    <string name="live_settings_band">Banda Wi-Fi</string>
-    <string name="live_settings_band_sub">A 5 GHz il Wi-Fi degli occhiali si blocca dopo pochi secondi di streaming; a 2,4 GHz regge.</string>
     <string name="live_settings_replay">Replay istantaneo</string>
     <string name="live_settings_replay_sub">Quanta parte della diretta Visor tiene in memoria, pronta da salvare.</string>
     <string name="live_settings_on_picture">Sull\'immagine</string>
@@ -911,4 +915,8 @@
     <string name="ai_spoken_progress_off">No</string>
     <string name="ai_spoken_progress_on">Sì</string>
     <string name="ai_spoken_progress_sub">Per risposte ordinarie lente, ripete l’avanzamento con la sintesi vocale del telefono ogni 40 secondi durante l’attesa; la risposta finale usa la voce scelta. Il passaggio alla voce degli occhiali è sperimentale; la voce del telefono mantiene lo streaming audio. Risposte rapide e scelta salvata restano invariate. Esclusi Live AI e modalità sessione. Limite di 300 secondi; gli occhiali potrebbero chiudere prima.</string>
+    <string name="live_settings_glasses_host">Wi-Fi creato dagli occhiali</string>
+    <string name="live_problem_vpn">Una VPN tiene Visor fuori dalla rete degli occhiali. Escludi Visor dalla VPN.</string>
+    <string name="live_drops">Lo streaming si interrompe spesso</string>
+    <string name="live_use_glasses_host">Usa il Wi-Fi degli occhiali</string>
 </resources>

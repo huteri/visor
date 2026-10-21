@@ -14,7 +14,6 @@ data class LiveSettings(
     val quality: StreamQuality = StreamQuality.FULL_HD,
     val bitrate: Int = 4_000_000,
     val frameRate: Int = 30,
-    val band: Int = BAND_2GHZ,
     val overlays: Set<LiveOverlay> = setOf(LiveOverlay.HEAT),
     val replaySeconds: Int = 120,
     /** The glasses' microphones in the phone's speaker while watching. Recordings get them either way. */
@@ -22,6 +21,8 @@ data class LiveSettings(
     val rtmpUrl: String = "",
     val rtmpKey: String = "",
     val rtmpCodec: BroadcastCodec = BroadcastCodec.H264,
+    /** The glasses host the network and the phone joins it, instead of the glasses joining the phone's group. */
+    val glassesHost: Boolean = false,
 ) {
     val canBroadcast: Boolean get() = rtmpUrl.startsWith("rtmp://") || rtmpUrl.startsWith("rtmps://")
 }
@@ -39,13 +40,13 @@ class LiveSettingsStore(context: Context) {
             .putString("quality", next.quality.name)
             .putInt("bitrate", next.bitrate)
             .putInt("frame_rate", next.frameRate)
-            .putInt("band", next.band)
             .putStringSet("overlays", next.overlays.map { it.name }.toSet())
             .putInt("replay_seconds", next.replaySeconds)
             .putBoolean("listen", next.listen)
             .putString("rtmp_url", next.rtmpUrl)
             .putString("rtmp_key", next.rtmpKey)
             .putString("rtmp_codec", next.rtmpCodec.name)
+            .putBoolean("glasses_host", next.glassesHost)
             .apply()
         _settings.value = next
     }
@@ -57,13 +58,13 @@ class LiveSettingsStore(context: Context) {
             quality = runCatching { StreamQuality.valueOf(prefs.getString("quality", null).orEmpty()) }.getOrDefault(d.quality),
             bitrate = prefs.getInt("bitrate", d.bitrate),
             frameRate = prefs.getInt("frame_rate", d.frameRate),
-            band = prefs.getInt("band", d.band),
             overlays = prefs.getStringSet("overlays", null)?.mapNotNull { runCatching { LiveOverlay.valueOf(it) }.getOrNull() }?.toSet() ?: d.overlays,
             replaySeconds = prefs.getInt("replay_seconds", d.replaySeconds),
             listen = prefs.getBoolean("listen", d.listen),
             rtmpUrl = prefs.getString("rtmp_url", d.rtmpUrl).orEmpty(),
             rtmpKey = prefs.getString("rtmp_key", d.rtmpKey).orEmpty(),
             rtmpCodec = runCatching { BroadcastCodec.valueOf(prefs.getString("rtmp_codec", null).orEmpty()) }.getOrDefault(d.rtmpCodec),
+            glassesHost = prefs.getBoolean("glasses_host", d.glassesHost),
         )
     }
 }

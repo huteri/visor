@@ -1,5 +1,6 @@
 package com.macedonga.visor.core.connection
 
+import com.macedonga.visor.core.identity.Diagnosis
 import com.macedonga.visor.core.identity.IdentityBundle
 import com.macedonga.visor.core.identity.IdentityStore
 import com.macedonga.visor.core.identity.SessionProbe
@@ -165,18 +166,26 @@ class GlassesConnection(
             is LinkStateChanged -> {
                 val fresh = event.state == LinkState.CONNECTING
                 if (fresh) newAttempt()
+                // Glasses can turn the key down and still end link setup, then refuse every service: that is no link.
+                val refused = event.state == LinkState.READY && !host.trustComplete && host.credentialReceived
                 _state.value = _state.value.copy(
-                    link = event.state,
+                    link = if (refused) LinkState.LOST else event.state,
                     // The session publishes CONNECTING at the top of every attempt, including a
                     // reconnect, so that is where the slate is cleared.
                     reason = if (fresh) "" else event.reason,
                     failure = if (fresh) null else _state.value.failure,
+                    // A refused key outlives the retries (newAttempt keeps it); a link that comes up is judged afresh.
+                    diagnosis = when {
+                        refused -> Diagnosis.EVICTED
+                        event.state == LinkState.READY -> null
+                        else -> _state.value.diagnosis
+                    },
                 )
-                when (event.state) {
-                    LinkState.READY -> onReady(host, bundle, scope)
+                when {
+                    refused -> judge(host, bundle)
+                    event.state == LinkState.READY -> onReady(host, bundle, scope)
                     // An attempt that ended without a verdict gets one now.
-                    LinkState.LOST, LinkState.DISCONNECTED -> judge(host, bundle)
-                    else -> Unit
+                    event.state == LinkState.LOST || event.state == LinkState.DISCONNECTED -> judge(host, bundle)
                 }
             }
 
@@ -223,7 +232,12 @@ class GlassesConnection(
         judged.set(false)
         deadline?.cancel()
         deadline = null
-        _state.value = _state.value.copy(diagnosis = null, device = null, info = null)
+        // A refused key stays said through the reconnect ladder: every try ends the same way until READY.
+        _state.value = _state.value.copy(
+            diagnosis = _state.value.diagnosis.takeIf { it == Diagnosis.EVICTED },
+            device = null,
+            info = null,
+        )
     }
 
     /** Ask svc100, then start the clock on the answer. */
@@ -241,6 +255,8 @@ class GlassesConnection(
         }
         deadline = scope.launch {
             delay(CANARY_TIMEOUT_MILLIS)
+            // judge cancels the deadline, and this is it: let go first, or its save is cancelled under it.
+            deadline = null
             judge(host, bundle)
         }
     }
@@ -255,22 +271,26 @@ class GlassesConnection(
 
         val trustOk = host.trustComplete
         val answered = canaryAnswered
+        val theirs = host.credentialReceived
         if (bundle == null) {
             // Bring-up against a peer with no stored identity. There is a verdict to publish
             // and no bundle whose state could move.
-            _state.value = _state.value.copy(diagnosis = diagnose(trustOk, answered))
+            _state.value = _state.value.copy(diagnosis = diagnose(trustOk, answered, theirs))
             return
         }
         val checked = verifyBundle(bundle) {
             object : SessionProbe {
                 override suspend fun runTrust(): Boolean = trustOk
                 override suspend fun readCanary(): Boolean = answered
+                override suspend fun credentialReceived(): Boolean = theirs
             }
         }
-        if (checked.bundle.state != bundle.state) {
-            // A file write, off the caller's dispatcher for the same reason the store reads
-            // in start() are: see the class doc.
-            withContext(ioDispatcher) { store.save(checked.bundle) }
+        // A file write, off the caller's dispatcher for the same reason the store reads
+        // in start() are: see the class doc. Against what is stored now, not start()'s copy: a
+        // refused key is judged on every retry, and a pair forgotten meanwhile must stay gone.
+        withContext(ioDispatcher) {
+            val stored = store.load(bundle.serial) ?: return@withContext
+            if (stored.state != checked.bundle.state) store.save(stored.withState(checked.bundle.state))
         }
         _state.value = _state.value.copy(diagnosis = checked.diagnosis)
     }

@@ -222,6 +222,7 @@ suspend fun ownerFirstName(context: Context): String? = withContext(Dispatchers.
 @Composable
 fun HomeScreen(
     onSetUp: () -> Unit,
+    onChangeOwner: (address: String?) -> Unit,
     onMedia: () -> Unit,
     onLive: () -> Unit,
     onMetaAi: () -> Unit,
@@ -496,7 +497,7 @@ fun HomeScreen(
             )
             StatusPill(
                 state, mood, lastBattery, paired, allowed, transferring, importProgress, waiting = if (importing) 0 else fresh.size, onImport = onImport,
-                onAllow = { ask.launch(wanted()) }, onSetUp = onSetUp,
+                onAllow = { ask.launch(wanted()) }, onSetUp = onSetUp, onChangeOwner = onChangeOwner,
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 26.dp).then(fade).appear(entrance, 0),
             )
         }

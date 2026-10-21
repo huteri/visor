@@ -67,7 +67,7 @@ data object DeviceKey : NavKey
 
 /** The setup: from the welcome on the first run, otherwise straight to what is left to do. */
 @Serializable
-data class OnboardingKey(val welcome: Boolean = false, val login: Boolean = false) : NavKey
+data class OnboardingKey(val welcome: Boolean = false, val login: Boolean = false, val address: String? = null) : NavKey
 
 @Serializable
 data object MetaLoginPageKey : NavKey
@@ -194,6 +194,7 @@ fun VisorNav(opens: kotlinx.coroutines.flow.Flow<String>, markAtLaunch: Boolean)
                 entry<HomeKey> {
                     HomeScreen(
                         onSetUp = { backStack.add(OnboardingKey()) },
+                        onChangeOwner = { backStack.add(OnboardingKey(login = true, address = it)) },
                         onMedia = { backStack.add(MediaKey) },
                         onLive = {
                             stage.homeToTop = true
@@ -217,6 +218,7 @@ fun VisorNav(opens: kotlinx.coroutines.flow.Flow<String>, markAtLaunch: Boolean)
                     OnboardingScreen(
                         welcome = key.welcome,
                         login = key.login,
+                        address = key.address,
                         onLogin = { backStack.add(MetaLoginPageKey) },
                         onEventLog = { backStack.add(EventLogKey) },
                         onDone = { target ->

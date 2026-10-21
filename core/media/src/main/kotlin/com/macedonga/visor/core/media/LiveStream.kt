@@ -1,5 +1,6 @@
 package com.macedonga.visor.core.media
 
+import java.security.SecureRandom
 import android.util.Log
 import android.content.Context
 import com.macedonga.visor.core.connection.GlassesConnection
@@ -113,7 +114,7 @@ data class StreamStats(
 enum class LivePhase { IDLE, WIFI, GLASSES, CAMERA, RUNNING, RESTARTING, FAILED }
 
 /** Why it did not start, or stopped by itself. */
-enum class LiveProblem { NOT_CONNECTED, IN_CASE, WIFI_OFF, WIFI_DIRECT_DENIED, NO_KEY, JOIN_FAILED, SESSION_FAILED, NO_VIDEO, GAVE_UP }
+enum class LiveProblem { NOT_CONNECTED, IN_CASE, WIFI_OFF, WIFI_DIRECT_DENIED, NO_KEY, JOIN_FAILED, SESSION_FAILED, NO_VIDEO, GAVE_UP, VPN }
 
 data class LiveStatus(val phase: LivePhase = LivePhase.IDLE, val problem: LiveProblem? = null)
 
@@ -212,6 +213,8 @@ class StreamReceiver : Responder {
                 audioChunks.reset()
                 if (whole.size > 8) {
                     val pts = ByteBuffer.wrap(whole, 0, 8).order(ByteOrder.LITTLE_ENDIAN).long
+                    // Some glasses never send an AudioSpecificConfig (#31): the format asked for stands in until one comes.
+                    if (_aac.value == null) _aac.value = aacFormatFor(LIVE_AUDIO)
                     _audio.tryEmit(AudioPacket(pts, whole.copyOfRange(8, whole.size)))
                 }
             }
@@ -364,6 +367,14 @@ class LiveStream(
     private val answers = ConcurrentHashMap<Long, CompletableDeferred<StreamAnswer>>()
     private var startAnswer: CompletableDeferred<Long>? = null
     private var joined: CompletableDeferred<JoinResult>? = null
+    // The answer to CreateSoftApNetwork, with the ssid and password it was asked for.
+    private var hosted: Pair<CompletableDeferred<SoftApInfo>, Pair<String, String>>? = null
+    private var onGlassesNetwork = false
+    private var glassesNetwork: GlassesNetwork? = null
+    // Restarts of this stream on the phone's group: two make the glasses' own network worth a try.
+    private var groupStalls = 0
+    private val _suggestGlassesHost = MutableStateFlow(false)
+    val suggestGlassesHost: StateFlow<Boolean> = _suggestGlassesHost.asStateFlow()
     private var nonce = 1
     private var job: Job? = null
     private var lastConfig: VideoConfig? = null
@@ -380,6 +391,7 @@ class LiveStream(
         val groupBand: Int,
         val auto: Boolean = false,
         val liveAi: Boolean = false,
+        val glassesHost: Boolean = false,
     )
 
     // What the user asked for, kept so the watchdog can start the same stream again.
@@ -439,6 +451,9 @@ class LiveStream(
                 when {
                     it.serviceId == 28 && it.messageType == MT_START_APP_RESPONSE -> startAnswer?.complete(Wire.parse(it.payload).varint(1))
                     it.serviceId == SVC_ATC && it.messageType == MT_JOIN_ACCESS_POINT_RESULT -> joined?.complete(parseJoinResult(it.payload))
+                    it.serviceId == SVC_ATC && it.messageType == MT_SOFT_AP_INFO -> hosted?.let { (answer, asked) ->
+                        answer.complete(parseSoftApInfo(it.payload, asked.first, asked.second))
+                    }
                 }
             }
         }
@@ -455,7 +470,8 @@ class LiveStream(
             if (settings.manual) settings.quality else top.quality,
             if (settings.manual) settings.bitrate else top.bitrate,
             if (settings.manual) settings.frameRate else top.frameRate,
-            bypassDonCheck = true, overWifi = true, groupBand = settings.band, auto = !settings.manual,
+            bypassDonCheck = true, overWifi = true, groupBand = BAND_2GHZ, auto = !settings.manual,
+            glassesHost = settings.glassesHost,
         )
     }
 
@@ -485,10 +501,13 @@ class LiveStream(
         groupBand: Int = BAND_2GHZ,
         auto: Boolean = false,
         liveAi: Boolean = false,
+        glassesHost: Boolean = false,
     ) {
         if (job?.isActive == true) return
-        val p = Params(app, session, quality, bitrate, frameRate, bypassDonCheck, overWifi, groupBand, auto, liveAi)
+        val p = Params(app, session, quality, bitrate, frameRate, bypassDonCheck, overWifi, groupBand, auto, liveAi, glassesHost)
         params = p
+        groupStalls = 0
+        _suggestGlassesHost.value = false
         _auto.value = auto
         pilot.reset(System.currentTimeMillis())
         _rung.value = Rung(quality, bitrate, frameRate)
@@ -505,15 +524,15 @@ class LiveStream(
     }
 
     private suspend fun run(p: Params) {
-        val reuse = p.overWifi && wifi != null && !linkDropped && groupBand == p.groupBand
+        val reuse = p.overWifi && wifi != null && !linkDropped && groupBand == p.groupBand && onGlassesNetwork == p.glassesHost
         if (!reuse && wifi != null) tearDownWifi()
         if (!reuse && connection.state.value.link != LinkState.READY) {
             say("Not connected.")
             fail(LiveProblem.NOT_CONNECTED)
             return
         }
-        // Charging means docked in the case, and there the glasses keep the camera off.
-        if (!reuse && charging()) {
+        // Charging folded means docked in the case, and there the glasses keep the camera off. Open, it is a cable.
+        if (!reuse && inCase()) {
             say("Charging in the case: the glasses keep the camera off there.")
             fail(LiveProblem.IN_CASE)
             return
@@ -533,7 +552,7 @@ class LiveStream(
 
         if (reuse) {
             say("Still on Wi-Fi from the last stream")
-        } else if (p.overWifi && !bringUpWifi(p.groupBand)) {
+        } else if (p.overWifi && !(if (p.glassesHost) bringUpGlassesNetwork() else bringUpWifi(p.groupBand))) {
             finish()
             return
         }
@@ -568,7 +587,7 @@ class LiveStream(
         }
 
         // The glasses' microphones, as the Meta app asks for them: 48 kHz stereo AAC-LC. Live AI hears on svc15 instead.
-        val audio = ask(StreamType.CONFIGURE_AUDIO_STREAM_REQUEST) { configureAudio(it, AudioConfig(), enabled = !p.liveAi) }
+        val audio = ask(StreamType.CONFIGURE_AUDIO_STREAM_REQUEST) { configureAudio(it, LIVE_AUDIO, enabled = !p.liveAi) }
         say("Configure audio ${if (p.liveAi) "off" else "48 kHz stereo AAC"}: ${audio.words()}")
 
         val control = ask(StreamType.CONTROL_STREAM_REQUEST) { controlStream(it, StreamAction.START) }
@@ -619,6 +638,7 @@ class LiveStream(
                 fail(LiveProblem.GAVE_UP)
                 return
             }
+            if (params?.let { it.overWifi && !it.glassesHost } == true && ++groupStalls >= 2) _suggestGlassesHost.value = true
             say("Restarting the stream (attempt $attempts)")
             _status.value = LiveStatus(LivePhase.RESTARTING)
             recovering = true
@@ -639,6 +659,8 @@ class LiveStream(
         val config = VideoConfig(width = next.quality.width, height = next.quality.height, bitrate = next.bitrate, frameRate = next.frameRate, iFrameInterval = 1)
         lastConfig = config
         scope.launch {
+            // A stall can tear the session down first; the restart asks for the new rung itself.
+            if (noSession) return@launch
             val answer = ask(StreamType.CONFIGURE_VIDEO_STREAM_REQUEST) { configureVideo(it, config) }
             say("Quality to ${next.quality.label}, ${next.bitrate / 1000} kbit/s, ${next.frameRate} fps: ${answer.words()}")
         }
@@ -646,10 +668,13 @@ class LiveStream(
 
     private fun fail(problem: LiveProblem) {
         // Whatever broke, glasses put in the case while it was starting will not go on.
-        _status.value = LiveStatus(LivePhase.FAILED, if (charging()) LiveProblem.IN_CASE else problem)
+        _status.value = LiveStatus(LivePhase.FAILED, if (inCase()) LiveProblem.IN_CASE else problem)
     }
 
-    private fun charging() = connection.state.value.device?.battery?.charging == true
+    private fun inCase() = connection.state.value.device?.let { it.battery?.charging == true && it.hinge != "OPEN" } == true
+
+    // A Wi-Fi stream between sessions: its stream went with the old one, and Bluetooth has none (it answers 0xc001).
+    private val noSession: Boolean get() = params?.overWifi == true && wifi == null
 
     /** Which layer went quiet: the link, the DataX messages on it, or only the video. */
     private fun stallWords(now: Long): String {
@@ -679,7 +704,7 @@ class LiveStream(
         outputs.onStreamEnded()
         stopping = scope.launch {
             job?.cancel()
-            if (wifi != null || connection.state.value.link == LinkState.READY) {
+            if (wifi != null || (!noSession && connection.state.value.link == LinkState.READY)) {
                 val answer = ask(StreamType.CONTROL_STREAM_REQUEST) { controlStream(it, StreamAction.STOP) }
                 say("Stop: ${answer.words()}")
             }
@@ -712,6 +737,8 @@ class LiveStream(
             val mhz = g.create(band)
             groupBand = band
             say("The phone's group is up on $mhz MHz")
+            val own = phoneWifiMhz(context)
+            if (radioTakesTurns(context, own, mhz)) say("The phone's own Wi-Fi is on $own MHz: its radio takes turns between that and the group")
             var result: JoinResult? = null
             // Fresh out of a group, or of a Wi-Fi firmware restart, they answer INTERNAL_ERROR for up to half a minute.
             for (attempt in 1..JOIN_TRIES) {
@@ -733,49 +760,113 @@ class LiveStream(
             if (result == null) return false.also { if (_status.value.phase != LivePhase.RESTARTING) fail(LiveProblem.JOIN_FAILED) }
             say("The glasses joined at ${result.address}:${result.port}")
             if (_status.value.phase != LivePhase.RESTARTING) _status.value = LiveStatus(LivePhase.GLASSES)
-
-            val host = hosts.create(GlassesTarget(GlassesLink.Wifi(checkNotNull(result.address), result.port), target.serial), bundle)
-            val ready = CompletableDeferred<Boolean>()
-            // Connect first and let go of Bluetooth after: the window to connect is short.
-            host.start(scope)
-            wifiEvents = scope.launch {
-                host.events.collect { event ->
-                    when (event) {
-                        is LinkStateChanged -> when (event.state) {
-                            LinkState.READY -> ready.complete(true)
-                            LinkState.LOST, LinkState.DISCONNECTED -> if (ready.isCompleted && !tearingDown) {
-                                say("The Wi-Fi link dropped" + if (event.reason.isNotBlank()) ": ${event.reason}" else "")
-                                linkDropped = true
-                            }
-                            else -> Unit
-                        }
-                        is ServiceData -> {
-                            messageAt = System.currentTimeMillis()
-                            onWifiMessage(event)
-                        }
-                        is ProtocolError -> say("Wi-Fi: ${event.detail}")
-                        else -> Unit
-                    }
-                }
-            }
-            wifi = host
-            connection.pause("Paused while the live view runs over Wi-Fi")
-            if (withTimeoutOrNull(45_000) { ready.await() } != true) {
-                say("The glasses did not open a session over Wi-Fi")
-                if (_status.value.phase != LivePhase.RESTARTING) fail(LiveProblem.SESSION_FAILED)
-                false
-            } else {
-                say("Connected over Wi-Fi")
-                keepalive = scope.launch { keepAlive(host) }
-                host.submit { _wifiSession.value = it }
-                true
-            }
+            openWifiSession(target, bundle, checkNotNull(result.address), result.port)
         } catch (unavailable: WifiUnavailable) {
             say("Wi-Fi Direct: ${unavailable.message}")
             if (_status.value.phase != LivePhase.RESTARTING) fail(LiveProblem.JOIN_FAILED)
             false
         } finally {
             joined = null
+        }
+    }
+
+    /**
+     * The glasses host the network and the phone joins it: their own 2.4 GHz network at 20 MHz, where they keep the
+     * width they are asked for. Android asks the person to allow the join. False if it did not work.
+     */
+    private suspend fun bringUpGlassesNetwork(): Boolean {
+        if (!wifiIsOn(context)) return false.also { say("Turn on Wi-Fi first"); fail(LiveProblem.WIFI_OFF) }
+        val target = connection.state.value.target ?: return false.also { fail(LiveProblem.NOT_CONNECTED) }
+        val bundle = withContext(Dispatchers.IO) { store.all().firstOrNull { it.serial == target.serial } }
+            ?: return false.also { say("These glasses have no key on this phone"); fail(LiveProblem.NO_KEY) }
+        val random = SecureRandom()
+        val ssid = "Visor-" + (1..4).joinToString("") { "%x".format(random.nextInt(16)) }
+        val password = (1..20).joinToString("") { NETWORK_ALPHABET[random.nextInt(NETWORK_ALPHABET.length)].toString() }
+        return try {
+            val answer = CompletableDeferred<SoftApInfo>().also { hosted = it to (ssid to password) }
+            connection.submit { createSoftAp(it, ssid, password, countryCode(context)) }
+            say("Asking the glasses to host a network")
+            val info = withTimeoutOrNull(30_000) { answer.await() }
+                ?: return false.also { say("The glasses did not answer"); if (_status.value.phase != LivePhase.RESTARTING) fail(LiveProblem.JOIN_FAILED) }
+            if (!info.ok) return false.also { say("The glasses could not host a network (${info.statusName})"); if (_status.value.phase != LivePhase.RESTARTING) fail(LiveProblem.JOIN_FAILED) }
+            onGlassesNetwork = true
+            say("The glasses host ${info.ssid} at ${info.address}:${info.port}; joining it")
+            val net = GlassesNetwork(context).also { glassesNetwork = it }
+            val network = net.join(info.ssid, info.password)
+            // A VPN that apps may not bypass refuses every socket on another network.
+            runCatching { network.socketFactory.createSocket().close() }.exceptionOrNull()?.let { refused ->
+                say("A VPN on this phone keeps Visor off the glasses' network (${refused.message})")
+                fail(LiveProblem.VPN)
+                return false
+            }
+            say("The phone is on the glasses' network")
+            if (_status.value.phase != LivePhase.RESTARTING) _status.value = LiveStatus(LivePhase.GLASSES)
+            openWifiSession(target, bundle, checkNotNull(info.address), info.port, network.socketFactory)
+        } catch (unavailable: WifiUnavailable) {
+            say("Wi-Fi: ${unavailable.message}")
+            if (_status.value.phase != LivePhase.RESTARTING) fail(LiveProblem.JOIN_FAILED)
+            false
+        } finally {
+            hosted = null
+        }
+    }
+
+    /** The stream that runs on the phone's group goes on over the glasses' own network instead. */
+    fun useGlassesHost() {
+        val p = params ?: return
+        if (!p.overWifi || p.glassesHost) return
+        params = p.copy(glassesHost = true)
+        _suggestGlassesHost.value = false
+        say("Switching to the glasses' own network")
+        if (wanted) scope.launch {
+            _status.value = LiveStatus(LivePhase.RESTARTING)
+            restart()
+        }
+    }
+
+    /** A session with the glasses at [address]:[port] over Wi-Fi, its socket from [sockets] when given. */
+    private suspend fun openWifiSession(
+        target: GlassesTarget,
+        bundle: com.macedonga.visor.core.identity.IdentityBundle,
+        address: String,
+        port: Int,
+        sockets: javax.net.SocketFactory? = null,
+    ): Boolean {
+        val host = hosts.create(GlassesTarget(GlassesLink.Wifi(address, port, sockets), target.serial), bundle)
+        val ready = CompletableDeferred<Boolean>()
+        // Connect first and let go of Bluetooth after: the window to connect is short.
+        host.start(scope)
+        wifiEvents = scope.launch {
+            host.events.collect { event ->
+                when (event) {
+                    is LinkStateChanged -> when (event.state) {
+                        LinkState.READY -> ready.complete(true)
+                        LinkState.LOST, LinkState.DISCONNECTED -> if (ready.isCompleted && !tearingDown) {
+                            say("The Wi-Fi link dropped" + if (event.reason.isNotBlank()) ": ${event.reason}" else "")
+                            linkDropped = true
+                        }
+                        else -> Unit
+                    }
+                    is ServiceData -> {
+                        messageAt = System.currentTimeMillis()
+                        onWifiMessage(event)
+                    }
+                    is ProtocolError -> say("Wi-Fi: ${event.detail}")
+                    else -> Unit
+                }
+            }
+        }
+        wifi = host
+        connection.pause("Paused while the live view runs over Wi-Fi")
+        return if (withTimeoutOrNull(45_000) { ready.await() } != true) {
+            say("The glasses did not open a session over Wi-Fi")
+            if (_status.value.phase != LivePhase.RESTARTING) fail(LiveProblem.SESSION_FAILED)
+            false
+        } else {
+            say("Connected over Wi-Fi")
+            keepalive = scope.launch { keepAlive(host) }
+            host.submit { _wifiSession.value = it }
+            true
         }
     }
 
@@ -834,9 +925,11 @@ class LiveStream(
         val host = wifi
         wifi = null
         if (host != null) {
-            // Leave the group before it goes, as the Meta app does, so the next join finds their Wi-Fi free.
+            // Leave the group before it goes, as the Meta app does, so the next join finds their Wi-Fi free; their own
+            // network they are asked to close instead.
             if (!linkDropped) {
-                host.submit { runCatching { it.sendOnService(SVC_ATC, MT_LEAVE_ACCESS_POINT, ByteArray(0)) } }
+                val leave = if (onGlassesNetwork) MT_DESTROY_SOFT_AP else MT_LEAVE_ACCESS_POINT
+                host.submit { runCatching { it.sendOnService(SVC_ATC, leave, ByteArray(0)) } }
                 delay(300)
             }
             host.stop()
@@ -845,10 +938,15 @@ class LiveStream(
         }
         group?.remove()
         group = null
+        glassesNetwork?.leave()
+        glassesNetwork = null
         if (host != null) {
             connection.resume()
             say("Back on Bluetooth")
         }
+        // Over Wi-Fi they may not have heard it; they close their network on their own soon after anyway.
+        if (onGlassesNetwork) connection.submit { runCatching { it.sendOnService(SVC_ATC, MT_DESTROY_SOFT_AP, ByteArray(0)) } }
+        onGlassesNetwork = false
         tearingDown = false
     }
 
@@ -859,7 +957,7 @@ class LiveStream(
     fun requestKeyframe() {
         val config = lastConfig ?: return
         val now = System.currentTimeMillis()
-        if (!_running.value || now - keyframeAskedAt < 2_000) return
+        if (!_running.value || noSession || now - keyframeAskedAt < 2_000) return
         keyframeAskedAt = now
         scope.launch {
             val answer = ask(StreamType.CONFIGURE_VIDEO_STREAM_REQUEST) { configureVideo(it, config) }
@@ -872,7 +970,7 @@ class LiveStream(
      * Asked for with a UserEventNotification; null if none came in a few seconds.
      */
     suspend fun capturePhoto(): ByteArray? {
-        if (!_running.value) return null
+        if (!_running.value || noSession) return null
         return coroutineScope {
             val photo = async(start = CoroutineStart.UNDISPATCHED) { receiver.photos.first() }
             send { it.sendOnService(SVC_MEDIA_STREAMING_CONTROL, StreamType.USER_EVENT_NOTIFICATION, requestPhotoCapture()) }
@@ -969,16 +1067,13 @@ data class StreamHealth(val thermal: String? = null, val battery: Int? = null)
 private const val JOIN_TRIES = 8
 private const val PHOTO_WAIT_MS = 8_000L
 
+// The audio every Live asks for: AAC-LC at 48 kHz, stereo.
+private val LIVE_AUDIO = AudioConfig()
+
 /** The Wi-Fi Direct group's band, as [PhoneGroup.create] takes it. */
 const val BAND_AUTO = 0
 const val BAND_2GHZ = 2
 const val BAND_5GHZ = 5
-
-fun bandWords(band: Int): String = when (band) {
-    BAND_2GHZ -> "2.4 GHz"
-    BAND_5GHZ -> "5 GHz"
-    else -> "Phone's choice"
-}
 
 private fun snappWords(code: Long): String = when (code) {
     1L -> "started"
@@ -1009,3 +1104,6 @@ fun nalTypes(data: ByteArray): List<Int> {
     }
     return out
 }
+
+// For the glasses' network's password: letters and digits only, as Android takes any.
+private const val NETWORK_ALPHABET = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
