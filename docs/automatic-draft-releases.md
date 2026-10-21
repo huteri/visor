@@ -17,8 +17,8 @@ API failures. Existing PRs are not merged or backfilled by this change.
 ## Versions and retries
 
 Android codes retain the existing `major * 10000 + minor * 100 + patch` mapping.
-The first automatic candidate is **1.3.9 / 10309**, above distributed code 10308
-and checked-in default 10307. All fork draft releases, published releases and
+The minimum new automatic candidate is **1.3.15 / 10315**, above locally distributed
+code 10314 and checked-in default 10307. All fork draft releases, published releases and
 version tags count when selecting the next version. A larger existing version
 wins. Base-100 rollover is explicit: 1.3.99 becomes 1.4.0. Nonrepresentable tags
 (minor or patch >= 100) fail rather than alias another Android code.

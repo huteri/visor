@@ -28,12 +28,13 @@ def tag(name, sha=SHA):
 
 class ReleaseLogicTests(unittest.TestCase):
     def test_baseline_above_distributed_build(self):
-        self.assertEqual(release.next_version([], []), '1.3.9')
-        self.assertEqual(release.version_code('v1.3.9'), 10309)
+        self.assertEqual(release.next_version([], []), '1.3.15')
+        self.assertEqual(release.version_code('v1.3.15'), 10315)
+        self.assertGreater(release.version_code(release.next_version([], [])), 10314)
 
     def test_all_drafts_releases_and_tags_count(self):
-        self.assertEqual(release.next_version(['v1.3.10', 'unrelated'],
-                         [dict(tag_name='v1.3.12-test.1', draft=True)]), '1.3.13')
+        self.assertEqual(release.next_version(['v1.3.16', 'unrelated'],
+                         [dict(tag_name='v1.3.18-test.1', draft=True)]), '1.3.19')
 
     def test_base100_rollover_and_future_major(self):
         self.assertEqual(release.next_version(['v1.3.99'], []), '1.4.0')
@@ -50,12 +51,12 @@ class ReleaseLogicTests(unittest.TestCase):
         self.assertIsNone(release.eligible_pr([], SHA, REPO))
 
     def test_draft_idempotency_and_refuse_published_or_changed(self):
-        draft = dict(tag_name='v1.3.9', draft=True, target_commitish=SHA)
-        self.assertIs(release.existing_draft([draft], 'v1.3.9', SHA), draft)
-        self.assertIsNone(release.existing_draft([], 'v1.3.9', SHA))
+        draft = dict(tag_name='v1.3.15', draft=True, target_commitish=SHA)
+        self.assertIs(release.existing_draft([draft], 'v1.3.15', SHA), draft)
+        self.assertIsNone(release.existing_draft([], 'v1.3.15', SHA))
         for changes in [dict(draft=False), dict(target_commitish='b'*40)]:
             with self.assertRaises(ValueError):
-                release.existing_draft([dict(draft, **changes)], 'v1.3.9', SHA)
+                release.existing_draft([dict(draft, **changes)], 'v1.3.15', SHA)
 
     def run_prepare(self, prs, refs, releases=None, api_effect=None):
         # Keep fixture output under caller's scratch TMPDIR, never repo tree.
@@ -75,44 +76,44 @@ class ReleaseLogicTests(unittest.TestCase):
             return output.read_text() if output.exists() else '', api.call_args_list, command.call_args_list
 
     def test_nonmerge_skips_without_tag_mutation(self):
-        output, calls, _ = self.run_prepare([], [tag('v1.3.9')])
+        output, calls, _ = self.run_prepare([], [tag('v1.3.15')])
         self.assertEqual(output, '')
         self.assertEqual(calls, [])
 
     def test_reservation_retry_reuses_same_version(self):
-        output, calls, commands = self.run_prepare([pr()], [tag('v1.3.9')],
-            [dict(tag_name='v1.3.9', draft=True, target_commitish=SHA)])
-        self.assertIn('name=1.3.9\ncode=10309', output)
+        output, calls, commands = self.run_prepare([pr()], [tag('v1.3.15')],
+            [dict(tag_name='v1.3.15', draft=True, target_commitish=SHA)])
+        self.assertIn('name=1.3.15\ncode=10315', output)
         self.assertEqual(calls, [])
         self.assertEqual(commands[-1].args[0], ['git', 'merge-base', '--is-ancestor', SHA, 'FETCH_HEAD'])
 
     def test_below_floor_tag_on_merged_sha_allocates_safe_version(self):
-        output, calls, _ = self.run_prepare([pr()], [tag('v1.3.8')])
-        self.assertIn('name=1.3.9\ncode=10309', output)
+        output, calls, _ = self.run_prepare([pr()], [tag('v1.3.14')])
+        self.assertIn('name=1.3.15\ncode=10315', output)
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0].args[1], dict(ref='refs/tags/v1.3.9', sha=SHA))
+        self.assertEqual(calls[0].args[1], dict(ref='refs/tags/v1.3.15', sha=SHA))
 
     def test_below_floor_tags_do_not_conflict_with_safe_reservation(self):
         output, calls, _ = self.run_prepare([pr()],
-            [tag('v1.3.7'), tag('v1.3.8'), tag('v1.3.10')],
-            [dict(tag_name='v1.3.10', draft=True, target_commitish=SHA)])
-        self.assertIn('name=1.3.10\ncode=10310', output)
+            [tag('v1.3.13'), tag('v1.3.14'), tag('v1.3.16')],
+            [dict(tag_name='v1.3.16', draft=True, target_commitish=SHA)])
+        self.assertIn('name=1.3.16\ncode=10316', output)
         self.assertEqual(calls, [])
 
     def test_first_reservation_exact_sha(self):
-        output, calls, _ = self.run_prepare([pr()], [tag('v1.3.8', 'b'*40)])
+        output, calls, _ = self.run_prepare([pr()], [tag('v1.3.14', 'b'*40)])
         self.assertIn('eligible=true', output)
-        self.assertEqual(calls[0].args[1], dict(ref='refs/tags/v1.3.9', sha=SHA))
+        self.assertEqual(calls[0].args[1], dict(ref='refs/tags/v1.3.15', sha=SHA))
 
     def test_concurrent_tag_conflict_advances(self):
-        output, calls, _ = self.run_prepare([pr()], [[tag('v1.3.8', 'b'*40)],
-            [tag('v1.3.9', 'b'*40)]], api_effect=[subprocess.CalledProcessError(1, 'gh'), {}, {}])
-        self.assertIn('name=1.3.10', output)
+        output, calls, _ = self.run_prepare([pr()], [[tag('v1.3.14', 'b'*40)],
+            [tag('v1.3.15', 'b'*40)]], api_effect=[subprocess.CalledProcessError(1, 'gh'), {}, {}])
+        self.assertIn('name=1.3.16', output)
         self.assertEqual(calls[-1].args[1]['sha'], SHA)
 
     def test_same_sha_retry_after_failed_build(self):
-        output, calls, _ = self.run_prepare([pr()], [tag('v1.3.9')])
-        self.assertIn('name=1.3.9', output)
+        output, calls, _ = self.run_prepare([pr()], [tag('v1.3.15')])
+        self.assertIn('name=1.3.15', output)
         self.assertEqual(calls, [])
 
 

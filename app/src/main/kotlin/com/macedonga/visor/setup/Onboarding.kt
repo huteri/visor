@@ -162,9 +162,12 @@ class OnboardingViewModel @Inject constructor(
     var loginOpened by mutableStateOf(false)
     private var watching: Job? = null
     private var firstRun = false
+    // Setting a known pair up again: it is taken as soon as it is found, bonded or heard, with nothing to pick.
+    private var wanted: String? = null
 
     /** A fresh setup: from the welcome on the first run, otherwise from the first page with something to do. */
-    fun begin(welcome: Boolean, login: Boolean) {
+    fun begin(welcome: Boolean, login: Boolean, address: String? = null) {
+        wanted = address
         history.clear()
         asked = emptySet()
         loginOpened = false
@@ -184,7 +187,17 @@ class OnboardingViewModel @Inject constructor(
 
     fun go(to: Page) {
         if (to == page) return
+        // A known pair this phone is bonded to needs no pairing page: straight to linking it.
+        val known = if (to == Page.PAIRING && chosen == null) wanted?.let { a ->
+            runCatching { nearby.bonded() }.getOrDefault(emptyList()).firstOrNull { it.address.equals(a, ignoreCase = true) }
+        } else null
         history += page
+        if (known != null) {
+            chosen = known
+            page = Page.LINKING
+            link()
+            return
+        }
         page = to
     }
 
@@ -207,6 +220,7 @@ class OnboardingViewModel @Inject constructor(
         watching = viewModelScope.launch {
             bonded = withContext(Dispatchers.IO) { nearby.bonded() }
             setUpHere = withContext(Dispatchers.IO) { runCatching { store.all().map { it.glassesAddress.uppercase() }.toSet() }.getOrDefault(emptySet()) }
+            takeWanted(bonded)
             while (true) {
                 if (!nearby.enabled) {
                     bluetoothOff = true
@@ -217,7 +231,10 @@ class OnboardingViewModel @Inject constructor(
                 if (bluetoothOff) bonded = withContext(Dispatchers.IO) { nearby.bonded() }
                 bluetoothOff = false
                 try {
-                    nearby.scan().collect { heard.value = it }
+                    nearby.scan().collect { found ->
+                        heard.value = found
+                        takeWanted(found)
+                    }
                 } catch (stop: CancellationException) {
                     throw stop
                 } catch (failed: Exception) {
@@ -225,6 +242,11 @@ class OnboardingViewModel @Inject constructor(
                 }
             }
         }
+    }
+
+    private fun takeWanted(found: List<NearbyPair>) {
+        val known = wanted?.let { a -> found.firstOrNull { it.address.equals(a, ignoreCase = true) } } ?: return
+        if (chosen == null && page == Page.PAIRING) choose(known)
     }
 
     fun stopWatching() {
@@ -274,6 +296,7 @@ class OnboardingViewModel @Inject constructor(
 fun OnboardingScreen(
     welcome: Boolean,
     login: Boolean,
+    address: String? = null,
     onLogin: () -> Unit,
     onEventLog: () -> Unit,
     onDone: (GlassesTarget) -> Unit,
@@ -282,7 +305,7 @@ fun OnboardingScreen(
 ) {
     // Saved with the entry, so coming back from the login page goes on where it was.
     rememberSaveable {
-        model.begin(welcome, login)
+        model.begin(welcome, login, address)
         true
     }
     val debugPage by StageDebug.onboardingPage.collectAsStateWithLifecycle()

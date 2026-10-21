@@ -54,9 +54,10 @@ class LastSeen @Inject constructor(
             connection.state.collect { state ->
                 val device = state.device ?: return@collect
                 if (state.link != LinkState.READY) return@collect
-                // The case's "present" only says the case is known; charging is what says they sit in it.
+                // The case's "present" only says the case is known; charging folded is what says they sit in it.
                 val was = _posture.value
-                writePosture(LastPosture(folded = device.hinge?.let { it == "CLOSED" } ?: was.folded, inCase = device.battery?.charging ?: was.inCase))
+                val inCase = device.battery?.charging?.let { it && device.hinge != "OPEN" }
+                writePosture(LastPosture(folded = device.hinge?.let { it == "CLOSED" } ?: was.folded, inCase = inCase ?: was.inCase))
             }
         }
         // The glasses stream only open and out of the case: a Live that ran says so while Bluetooth is away for it, and

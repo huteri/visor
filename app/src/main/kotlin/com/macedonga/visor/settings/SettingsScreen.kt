@@ -107,7 +107,6 @@ import com.macedonga.visor.core.connection.GlassesConnection
 import com.macedonga.visor.core.connection.GlassesState
 import com.macedonga.visor.core.design.Visor
 import com.macedonga.visor.core.media.LiveSettingsStore
-import com.macedonga.visor.core.media.bandWords
 import com.macedonga.visor.core.session.LinkState
 import com.macedonga.visor.core.settings.Control
 import com.macedonga.visor.core.settings.GROUPS
@@ -295,7 +294,7 @@ fun SettingsScreen(open: (NavKey) -> Unit, model: SettingsViewModel = hiltViewMo
             }
             StatusPill(
                 glasses, mood, remembered, paired = glasses.target?.let { true }, allowed = true, importing = false, importProgress = 0f, waiting = 0,
-                onImport = {}, onAllow = {}, onSetUp = { open(OnboardingKey()) },
+                onImport = {}, onAllow = {}, onSetUp = { open(OnboardingKey()) }, onChangeOwner = { open(OnboardingKey(login = true, address = it)) },
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 26.dp).graphicsLayer { alpha = (1f - (scrollFold * 2.5f).coerceIn(0f, 1f)) * stage.shown(spot) },
             )
         }
@@ -588,7 +587,6 @@ private fun summary(topic: Topic, model: SettingsViewModel, state: SettingsState
             val live by model.live.settings.collectAsStateWithLifecycle()
             listOf(
                 if (live.manual) live.quality.label else stringResource(R.string.live_auto),
-                bandWords(live.band),
                 stringResource(R.string.sum_replay, spanWords(live.replaySeconds.toLong())),
             ).joinToString(" · ")
         }

@@ -37,6 +37,7 @@ import com.macedonga.visor.core.media.LiveSettingsStore
 import com.macedonga.visor.core.media.SVC_AIRSHIP
 import com.macedonga.visor.core.media.SVC_MEDIA_STREAMING_CONTROL
 import com.macedonga.visor.core.media.StreamReceiver
+import com.macedonga.visor.core.session.DataXConnection
 import com.macedonga.visor.core.session.Responder
 import com.macedonga.visor.core.settings.GlassesSettings
 import com.macedonga.visor.core.settings.RlDriveResponder
@@ -69,14 +70,32 @@ object ConnectionModule {
      */
     @Provides
     @Singleton
-    fun transportFactory(@ApplicationContext context: Context, meter: LinkMeter, kind: LinkKind, keeper: LeKeeper): TransportFactory =
-        AndroidTransportFactory(
+    fun transportFactory(@ApplicationContext context: Context, meter: LinkMeter, kind: LinkKind, keeper: LeKeeper): TransportFactory {
+        if (BuildConfig.DEBUG) DataXConnection.trace = dataxTrace(File(context.filesDir, "datax.log"))
+        return AndroidTransportFactory(
             context,
             wireLog = if (BuildConfig.DEBUG) FileWireLog(File(context.filesDir, "wire.log")) else null,
             wifiMeter = meter,
             kind = kind,
             keeper = keeper,
         )
+    }
+
+    // Starts over past 32 MB; flushed at most four times a second, like the wire log.
+    private fun dataxTrace(file: File): (String) -> Unit {
+        val out = java.io.PrintWriter(java.io.BufferedWriter(java.io.FileWriter(file, file.length() < 32L shl 20), 1 shl 16))
+        var flushedAt = 0L
+        return { lines ->
+            synchronized(out) {
+                val now = System.currentTimeMillis()
+                out.append(java.time.LocalTime.now().toString()).append(' ').append(lines).append('\n')
+                if (now - flushedAt >= 250) {
+                    out.flush()
+                    flushedAt = now
+                }
+            }
+        }
+    }
 
     @Provides
     @Singleton
