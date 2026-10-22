@@ -187,6 +187,11 @@ class StreamReceiver : Responder {
 
     override suspend fun respond(message: DataXMessage, connection: DataXConnection) {
         val payload = message.payload
+        // Service destruction does not necessarily include a DataX close. Retire on the
+        // originating mux synchronously, before control delivery can race a new capture.
+        if (message.info.messageType == StreamType.CONTROL_STREAM_STOPPED &&
+            parseStreamStopped(payload) == 23L
+        ) connection.invalidateServiceChannel(SVC_MEDIA_STREAMING_CONTROL, message.info.channelId)
         when (message.info.messageType) {
             StreamType.VIDEO_CAST_BUFFER -> chunk(payload)
             StreamType.VIDEO_CAST_BUFFER_END -> {
@@ -488,7 +493,7 @@ class LiveStream(
     }
 
     /** Whether the stream running now is Live AI's, and not the Live view's. */
-    val forLiveAi: Boolean get() = _running.value && params?.liveAi == true
+    val forLiveAi: Boolean get() = wanted && params?.liveAi == true
 
     fun start(
         app: GlassesApp,
@@ -503,7 +508,7 @@ class LiveStream(
         liveAi: Boolean = false,
         glassesHost: Boolean = false,
     ) {
-        if (job?.isActive == true) return
+        if (job?.isActive == true || stopping?.isActive == true) return
         val p = Params(app, session, quality, bitrate, frameRate, bypassDonCheck, overWifi, groupBand, auto, liveAi, glassesHost)
         params = p
         groupStalls = 0
@@ -518,7 +523,8 @@ class LiveStream(
         supported = null
         outputs.onStreamStarted()
         wanted = true
-        job = scope.launch { run(p) }
+        job = scope.launch(start = CoroutineStart.LAZY) { run(p) }
+        job?.start()
         watchdog?.cancel()
         watchdog = scope.launch { watch() }
     }
@@ -699,6 +705,7 @@ class LiveStream(
         // Once is enough: a second call while the first tears down, or after, does nothing.
         if (stopping?.isActive == true || (!wanted && !_running.value)) return
         wanted = false
+        job?.cancel()
         watchdog?.cancel()
         _status.value = LiveStatus()
         outputs.onStreamEnded()
@@ -851,7 +858,11 @@ class LiveStream(
                         messageAt = System.currentTimeMillis()
                         onWifiMessage(event)
                     }
-                    is ProtocolError -> say("Wi-Fi: ${event.detail}")
+                    is com.macedonga.visor.core.session.ChannelNote -> say(event.detail)
+                    is ProtocolError -> {
+                        connection.reportProtocolError(event)
+                        say("Wi-Fi: ${event.detail}")
+                    }
                     else -> Unit
                 }
             }
@@ -1004,7 +1015,13 @@ class LiveStream(
     /** Run on the Wi-Fi session while there is one, else on Bluetooth. */
     private fun send(work: suspend (DataXConnection) -> Unit) {
         val host = wifi
-        if (host != null) host.submit(work) else connection.submit(work)
+        val owner = params
+        val startup = if (wanted && owner?.liveAi == true) job else null
+        val guarded: suspend (DataXConnection) -> Unit = { link ->
+            // submit queues work outside the startup coroutine; cancellation must revoke that queue too.
+            if (startup == null || (wanted && params === owner && !startup.isCancelled)) work(link)
+        }
+        if (host != null) host.submit(guarded) else connection.submit(guarded)
     }
 
     private suspend fun ask(type: Int, body: (Int) -> ByteArray): StreamAnswer? {

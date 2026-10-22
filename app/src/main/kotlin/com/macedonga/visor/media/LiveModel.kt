@@ -53,7 +53,11 @@ class LiveViewModel @Inject constructor(
         live.start(s)
     }
 
-    fun stop() = live.stop()
+    // Leaving the Live view must not stop the singleton camera owned by Live AI.
+    // forLiveAi includes pending startup; explicit AI stop/privacy still use live.stop().
+    fun stop() {
+        if (!live.forLiveAi) live.stop()
+    }
 
     /** Whether the Live has a reason to go on with nobody watching: something is being made of it. */
     fun keepsGoing(): Boolean = outputs.recording.value != null || outputs.broadcast.running

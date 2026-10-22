@@ -23,7 +23,30 @@ class DataXMessage(val info: MessageInfo, val payload: ByteArray)
 class DataXConnection(
     private val link: PlaintextLink,
     private val registry: ChannelRegistry,
+    private val channelTrace: ((String) -> Unit)? = null,
 ) {
+    private var cameraTraceCount = 0
+    private var cameraReuseCount = 0L
+    private var cameraReuseChannel = -1
+
+    // Metadata only, bounded per connection. No payload, transcript, network or device IDs.
+    private fun traceCameraChannel(serviceId: Int, channelId: Int, action: String) {
+        if (serviceId != 51350 || channelTrace == null) return
+        synchronized(serviceChannels) {
+            if (action == "reused") {
+                if (cameraReuseChannel == channelId) cameraReuseCount++
+                return
+            }
+            if (cameraTraceCount >= 12) return
+            cameraTraceCount++
+            val reused = if (cameraReuseChannel == channelId) cameraReuseCount else 0
+            channelTrace.invoke("Camera channel: $action local=0x%04x service=%d reused=%d".format(java.util.Locale.ROOT, channelId, serviceId, reused))
+            if (action == "opened") {
+                cameraReuseChannel = channelId
+                cameraReuseCount = 0
+            }
+        }
+    }
 
     // Messages waiting in front of anything the reader has produced.
     private val inbox = ArrayDeque<DataXMessage>()
@@ -106,14 +129,28 @@ class DataXConnection(
 
     /** Send on this connection's one channel for [serviceId], opening it the first time. */
     suspend fun sendOnService(serviceId: Int, messageType: Int, payload: ByteArray) {
-        val known = synchronized(serviceChannels) { serviceChannels[serviceId] }
-        if (known != null) {
-            send(known, payload, messageType = messageType)
-            return
+        // Allocate and publish atomically with invalidation. No later send completion can
+        // put a retired channel back in the cache.
+        val (channel, opened) = synchronized(serviceChannels) {
+            val known = serviceChannels[serviceId]
+            if (known != null) known to false else {
+                val fresh = openChannel(serviceId)
+                serviceChannels[serviceId] = fresh
+                fresh to true
+            }
         }
-        val channel = openChannel(serviceId)
-        synchronized(serviceChannels) { serviceChannels[serviceId] = channel }
-        send(channel, payload, messageType = messageType, serviceId = serviceId)
+        traceCameraChannel(serviceId, channel, if (opened) "opened" else "reused")
+        send(channel, payload, messageType = messageType, serviceId = if (opened) serviceId else null)
+    }
+
+    /** Retire only this mux's matching local channel; keep attribution until real close. */
+    fun invalidateServiceChannel(serviceId: Int, expectedInboundChannel: Int): Boolean = synchronized(serviceChannels) {
+        if (expectedInboundChannel and 0x8000 != 0) return@synchronized false
+        val local = serviceChannels[serviceId] ?: return@synchronized false
+        if (mirror(local) != expectedInboundChannel) return@synchronized false
+        serviceChannels.remove(serviceId)
+        traceCameraChannel(serviceId, local, "invalidated")
+        true
     }
 
     /** Send a bare DataX status frame: an error id tag, zero payload, on [channelId]. */
@@ -134,8 +171,26 @@ class DataXConnection(
     }
 
     private fun deliver(message: DataXMessage): DataXMessage {
+        val info = message.info
+        // Narrow fallback for firmware that reports a vanished camera service without
+        // CONTROL_STREAM_STOPPED or channel close. Attribution must precede invalidation.
+        if (info.flags.hasError && info.errorId == 0xc001 &&
+            registry.serviceForInbound(info.channelId) == 51350
+        ) invalidateServiceChannel(51350, info.channelId)
         if (message.info.flags.isClosed) {
-            registry.closeInbound(message.info.channelId)
+            val inbound = message.info.channelId
+            // A peer reply to our channel clears the originator bit. Peer-opened channels
+            // occupy a separate namespace, even when their low channel number matches.
+            if (inbound and 0x8000 == 0) {
+                synchronized(serviceChannels) {
+                    serviceChannels.entries.removeAll { (service, local) ->
+                        (mirror(local) == inbound).also { closed ->
+                            if (closed) traceCameraChannel(service, local, "peer-closed")
+                        }
+                    }
+                }
+            }
+            registry.closeInbound(inbound)
         }
         return message
     }

@@ -10,4 +10,5 @@ dependencies {
     // The whole of this module's repository dependencies.
     api(project(":core:protocol"))
     api(project(":core:transport"))
+    testImplementation(libs.junit)
 }

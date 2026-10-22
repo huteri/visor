@@ -25,6 +25,8 @@ data class GlassesState(
     /** Null when no glasses are claimed on this phone. Not a failure, and [reason] says so. */
     val target: GlassesTarget? = null,
     val link: LinkState = LinkState.DISCONNECTED,
+    /** Monotonic session attempt, including reconnects to the same device. */
+    val generation: Long = 0,
     /** Plain words about why, for a person to read. */
     val reason: String = "",
     /** What a person could do about a connect that failed. Null when none has. */
