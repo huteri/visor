@@ -14,7 +14,6 @@
     <string name="mood_charging">Заряжаются</string>
     <string name="mood_recording">Идёт запись</string>
     <string name="mood_low_battery">Низкий заряд батареи</string>
-    <string name="home_glasses_name">Ray-Ban Meta</string>
     <string name="home_reading_glasses">Очки</string>
     <string name="home_reading_case">Футляр</string>
     <string name="home_allow_bluetooth">Разрешить Bluetooth</string>
@@ -67,7 +66,11 @@
     <string name="fact_free">Свободное место</string>
     <string name="fact_volume">Громкость</string>
     <string name="fact_temperature">Температура</string>
+    <string name="live_battery">Батарея</string>
+    <string name="onboard_allowed">Разрешено</string>
     <string name="fact_last_capture">Последний снимок</string>
+    <string name="shutter_take_photo">Сделать фото</string>
+    <string name="shutter_record_video">Снять видео</string>
     <string name="ago_now">только что</string>
     <string name="ago_minutes">%d мин назад</string>
     <string name="ago_hours">%d ч назад</string>
@@ -368,6 +371,8 @@
     <string name="settings_no_way_to_write">Очки не позволяют её записать.</string>
     <string name="settings_flags">Флаги функций</string>
     <string name="settings_flags_sub">Переключатели Meta для функций, которые она не включила</string>
+    <string name="settings_developer">Режим разработчика</string>
+    <string name="settings_developer_sub">Интенты камеры и события съёмки для других приложений</string>
     <string name="settings_diagnostics_sub">Связь, ключ и то, что сообщают очки</string>
     <string name="settings_event_log_sub">Всё, что делала связь, новые внизу</string>
     <string name="tiles_hint">Удерживайте настройку, чтобы закрепить её здесь</string>
@@ -430,8 +435,7 @@
     <string name="sum_access_missing">Не разрешено: %1$d</string>
     <string name="glasses_title">Очки</string>
     <string name="glasses_owned">Очки: %s</string>
-    <string name="glasses_default_name">Ray-Ban Meta</string>
-    <string name="glasses_default_named">Ray-Ban Meta %s</string>
+    <string name="glasses_default_name">Очки Meta</string>
     <string name="glasses_frame">Оправа</string>
     <string name="glasses_color">Цвет</string>
     <string name="glasses_lenses">Линзы</string>
@@ -595,6 +599,14 @@
     <string name="about_debug">Отладочная сборка</string>
     <string name="about_credits">Сделано с помощью</string>
     <string name="about_foot">Каждый компонент - под своей лицензией.</string>
+    <string name="about_report">Сообщить о проблеме</string>
+    <string name="about_discuss">Начать обсуждение</string>
+    <string name="about_star">Поставить звезду</string>
+    <string name="star_title">Нравится Visor?</string>
+    <string name="star_text">Поставьте ему звезду на GitHub.</string>
+    <string name="star_ok">OK</string>
+    <string name="star_no">Нет</string>
+    <string name="star_never">Больше не показывать</string>
     <string name="about_sum_update">Visor %1$s, вышла версия %2$s</string>
     <string name="update_channel">Обновления</string>
     <string name="update_ready">Вышел Visor %1$s</string>
@@ -607,7 +619,7 @@
     <string name="language_in_use">Используется</string>
     <string name="language_kept">Очки оставили прежний язык.</string>
     <string name="live_problem_in_case">Очки заряжаются в футляре, а в нём камера у них выключена. Достаньте их, чтобы запустить прямой эфир.</string>
-    <string name="onboard_tagline">Ваши Ray-Ban Meta под управлением этого телефона.</string>
+    <string name="onboard_tagline">Ваши очки Meta под управлением этого телефона.</string>
     <string name="onboard_begin">Начать</string>
     <string name="onboard_access_title">Что запрашивает Visor</string>
     <string name="onboard_access_lede">Каждое разрешение нужно для одной задачи. Для начала нужно только первое.</string>
@@ -686,6 +698,8 @@
     <string name="widget_name">Очки</string>
     <string name="widget_description">Заряд очков и футляра, их состояние и ваш последний снимок.</string>
     <string name="widget_case">Футляр %1$d%%</string>
+    <string name="notify_glasses">Очки %1$d%%</string>
+    <string name="notify_glasses_charging">Очки %1$d%%, заряжаются</string>
     <string name="widget_no_moment">Пока нет фото</string>
     <string name="widget_sample_case">Футляр 64%</string>
     <string name="tile_subtitle">%1$s · %2$d%%</string>

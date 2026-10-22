@@ -110,7 +110,7 @@ fun GlassesPage(open: (NavKey) -> Unit, model: GlassesPageModel = hiltViewModel(
     val stored = state.stored[NAME_KEY] ?: model.settings.value(NAME_KEY)
     val custom = stored?.takeIf { it.isNotBlank() && it != LEFTOVER_NAME }
     val name = custom ?: firstName?.let { stringResource(R.string.glasses_owned, it) }
-        ?: look?.styleName?.let { stringResource(R.string.glasses_default_named, it) } ?: stringResource(R.string.glasses_default_name)
+        ?: look?.styleName ?: stringResource(R.string.glasses_default_name)
     // An old build's write test named the pair; the name goes back to none, unannounced.
     LaunchedEffect(ready, state.stored[NAME_KEY]) {
         if (ready && state.stored[NAME_KEY] == LEFTOVER_NAME) model.settings.writeQuietly(NAME_KEY, "")
@@ -277,7 +277,7 @@ private fun Readout(label: String, value: String?, charging: Boolean, fresh: Boo
         Text(label, style = Visor.type.label, color = Visor.colors.textSecondary)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(value ?: "–", style = Visor.type.readout, color = Visor.colors.textPrimary)
-            if (charging) Icon(VisorIcons.Bolt, null, Modifier.padding(start = 6.dp).size(22.dp), tint = Visor.colors.textPrimary)
+            if (charging) Icon(VisorIcons.Bolt, stringResource(R.string.mood_charging), Modifier.padding(start = 6.dp).size(22.dp), tint = Visor.colors.textPrimary)
         }
     }
 }

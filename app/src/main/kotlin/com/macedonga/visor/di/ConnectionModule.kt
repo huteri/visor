@@ -25,6 +25,7 @@ import com.macedonga.visor.core.assistant.mcp.McpStore
 import com.macedonga.visor.core.connection.GlassesConnection
 import com.macedonga.visor.core.connection.RealSessionHostFactory
 import com.macedonga.visor.core.connection.SessionHostFactory
+import com.macedonga.visor.core.connection.Shutter
 import com.macedonga.visor.core.connection.TransportFactory
 import com.macedonga.visor.core.identity.IdentityStore
 import com.macedonga.visor.core.identity.KeystoreSealer
@@ -154,6 +155,10 @@ object ConnectionModule {
     @Provides
     @Singleton
     fun hearing(connection: GlassesConnection): Hearing = Hearing(connection)
+
+    @Provides
+    @Singleton
+    fun shutter(connection: GlassesConnection): Shutter = Shutter(connection)
 
     @Provides
     @Singleton

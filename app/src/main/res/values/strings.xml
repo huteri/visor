@@ -15,7 +15,6 @@
     <string name="mood_charging">Charging</string>
     <string name="mood_recording">Recording</string>
     <string name="mood_low_battery">Battery low</string>
-    <string name="home_glasses_name">Ray-Ban Meta</string>
     <string name="home_reading_glasses">Glasses</string>
     <string name="home_reading_case">Case</string>
     <string name="home_allow_bluetooth">Allow Bluetooth</string>
@@ -62,7 +61,11 @@
     <string name="fact_free">Free space</string>
     <string name="fact_volume">Volume</string>
     <string name="fact_temperature">Temperature</string>
+    <string name="live_battery">Battery</string>
+    <string name="onboard_allowed">Allowed</string>
     <string name="fact_last_capture">Last capture</string>
+    <string name="shutter_take_photo">Take photo</string>
+    <string name="shutter_record_video">Record video</string>
     <string name="ago_now">just now</string>
     <string name="ago_minutes">%d min ago</string>
     <string name="ago_hours">%d h ago</string>
@@ -351,6 +354,8 @@
     <string name="settings_no_way_to_write">The glasses give no way to write this one.</string>
     <string name="settings_flags">Feature flags</string>
     <string name="settings_flags_sub">Meta\'s switches for features it has not turned on</string>
+    <string name="settings_developer">Developer mode</string>
+    <string name="settings_developer_sub">Camera intents and capture events for other apps</string>
     <string name="settings_diagnostics_sub">The link, the key and what the glasses report</string>
     <string name="settings_event_log_sub">Everything the link did, newest last</string>
     <string name="tiles_hint">Hold any setting to pin it here</string>
@@ -417,8 +422,7 @@
 
     <string name="glasses_title">Glasses</string>
     <string name="glasses_owned">%s\'s glasses</string>
-    <string name="glasses_default_name">Ray-Ban Meta</string>
-    <string name="glasses_default_named">Ray-Ban Meta %s</string>
+    <string name="glasses_default_name">Meta glasses</string>
     <string name="glasses_frame">Frame</string>
     <string name="glasses_color">Colour</string>
     <string name="glasses_lenses">Lenses</string>
@@ -589,6 +593,14 @@
     <string name="about_debug">Debug build</string>
     <string name="about_credits">Made with</string>
     <string name="about_foot">Each under its own licence.</string>
+    <string name="about_report">Report a problem</string>
+    <string name="about_discuss">Start a discussion</string>
+    <string name="about_star">Leave a star</string>
+    <string name="star_title">Enjoying Visor?</string>
+    <string name="star_text">Leave it a star on GitHub.</string>
+    <string name="star_ok">OK</string>
+    <string name="star_no">No</string>
+    <string name="star_never">Don\'t show again</string>
     <string name="about_sum_update">Visor %1$s, %2$s is out</string>
     <string name="update_channel">Updates</string>
     <string name="update_ready">Visor %1$s is out</string>
@@ -604,7 +616,7 @@
     <string name="live_problem_in_case">They are charging in their case, and there the glasses keep the camera off. Take them out to go live.</string>
 
     <!-- Onboarding -->
-    <string name="onboard_tagline">Your Ray-Ban Meta, run from this phone.</string>
+    <string name="onboard_tagline">Your Meta glasses, run from this phone.</string>
     <string name="onboard_begin">Begin</string>
     <string name="onboard_access_title">What Visor asks for</string>
     <string name="onboard_access_lede">Each one is for one thing. Only the first is needed to start.</string>
@@ -686,6 +698,8 @@
     <string name="widget_name">Glasses</string>
     <string name="widget_description">Their battery and the case\'s, how they are, and your latest moment.</string>
     <string name="widget_case">Case %1$d%%</string>
+    <string name="notify_glasses">Glasses %1$d%%</string>
+    <string name="notify_glasses_charging">Glasses %1$d%%, charging</string>
     <string name="widget_no_moment">No photos yet</string>
     <string name="widget_sample_battery" translatable="false">82%</string>
     <string name="widget_sample_case">Case 64%</string>
