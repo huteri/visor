@@ -338,7 +338,10 @@ class Brain(
             Dispatchers.IO.dispatch(pending.context, Runnable {
                 try {
                     pending.context.ensureActive()
-                    val answer = request(http, headers, body, progressReadTimeout(pending.context)) { pending.context.ensureActive() }
+                    val answer = request(http, headers, body, progressReadTimeout(pending.context)) {
+                        pending.context.ensureActive()
+                        pending.context[LiveImageLease]?.validate()
+                    }
                     pending.context.ensureActive()
                     pending.resume(answer)
                 } catch (error: Exception) {
@@ -359,8 +362,12 @@ class Brain(
         http.setRequestProperty("content-type", "application/json")
         headers.forEach(http::setRequestProperty)
         http.setRequestProperty("accept", "text/event-stream, application/json")
+        val payload = JSONObject(body.toString()).put("stream", true).toString().toByteArray(Charsets.UTF_8)
         checkCancelled()
-        http.outputStream.use { it.write(JSONObject(body.toString()).put("stream", true).toString().toByteArray(Charsets.UTF_8)) }
+        http.outputStream.use {
+            checkCancelled()
+            it.write(payload)
+        }
         checkCancelled()
         val code = http.responseCode
         if (code !in 200..299) {

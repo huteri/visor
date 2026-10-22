@@ -66,6 +66,8 @@ data class SettingsState(
     val stored: Map<String, String> = emptyMap(),
     val reading: Boolean = false,
     val readAt: Long? = null,
+    val connectionGeneration: Long = -1,
+    val complete: Boolean = false,
     // Written and not yet seen on a read, key to the value asked for.
     val pending: Map<String, String> = emptyMap(),
     // Written, read back, and still the old value.
@@ -75,7 +77,17 @@ data class SettingsState(
     val problem: String = "",
     // The Meta product id of the glasses last connected (266 for Ray-Ban Meta Gen 2), for what the catalogue offers.
     val product: Int? = null,
-)
+) {
+    /** Never infer camera consent from catalogue defaults or another connection's read. */
+    fun liveAiVoiceOnly(generation: Long, ready: Boolean): Boolean? {
+        if (!ready || generation != connectionGeneration || !complete || problem.isNotEmpty() || "live_ai_voice_only" in pending) return null
+        return when (stored["live_ai_voice_only"]?.trim()?.lowercase()) {
+            "true", "1" -> true
+            "false", "0" -> false
+            else -> null
+        }
+    }
+}
 
 /**
  * Reads the glasses' settings over RLDrive and writes them on svc31. A full read at every connect,
@@ -134,11 +146,11 @@ class GlassesSettings(private val connection: GlassesConnection, drive: RlDriveR
             }
         }
         scope.launch {
-            connection.state.map { it.link == LinkState.READY && it.info != null }.distinctUntilChanged().collect { ready ->
+            connection.state.map { it.generation to (it.link == LinkState.READY && it.info != null) }.distinctUntilChanged().collect { (_, ready) ->
                 if (ready) {
                     read(full = true)
                 } else {
-                    _state.update { it.copy(pending = emptyMap()) }
+                    _state.update { it.copy(pending = emptyMap(), complete = false, connectionGeneration = -1) }
                 }
             }
         }
@@ -228,7 +240,7 @@ class GlassesSettings(private val connection: GlassesConnection, drive: RlDriveR
         val requests = namespaces.associateBy { UUID.randomUUID().toString() }
         val s = Sync(ConcurrentHashMap(requests), push)
         sync = s
-        _state.update { it.copy(reading = true) }
+        _state.update { it.copy(reading = true, complete = if (full) false else it.complete) }
         connection.submit { link ->
             for ((id, namespace) in requests) {
                 link.sendOnService(SVC_RLDRIVE, MT_SYNC_MESSAGE, buildSync(namespace, id, 0, known[namespace].orEmpty()))
@@ -237,7 +249,8 @@ class GlassesSettings(private val connection: GlassesConnection, drive: RlDriveR
         val finished = withTimeoutOrNull(READ_TIMEOUT_MILLIS) { s.done.await() } != null
         sync = null
 
-        val stores = byNamespace.toMutableMap()
+        if (connection.state.value.generation != glasses.generation || connection.state.value.link != LinkState.READY) return
+        val stores = if (full) mutableMapOf<String, Map<String, String>>() else byNamespace.toMutableMap()
         for ((namespace, objects) in s.objects) {
             val before = if (full) emptyMap() else stores[namespace].orEmpty()
             stores[namespace] = before.toMutableMap().apply {
@@ -266,6 +279,8 @@ class GlassesSettings(private val connection: GlassesConnection, drive: RlDriveR
                 stored = stored,
                 reading = false,
                 readAt = if (finished || changed > 0) now else it.readAt,
+                connectionGeneration = glasses.generation,
+                complete = finished && uuid.isNotEmpty() && (full || it.complete),
                 pending = it.pending - settled.keys - kept.toSet(),
                 kept = it.kept + kept,
                 problem = when {

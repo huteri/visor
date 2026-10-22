@@ -56,7 +56,7 @@ class ServiceData(
 }
 
 /** Something went wrong and the link did not necessarily end. */
-class ProtocolError(val detail: String, val frame: ByteArray = ByteArray(0)) : SessionEvent {
+class ProtocolError(val detail: String, val frame: ByteArray = ByteArray(0), val origin: DataXConnection? = null) : SessionEvent {
 
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -68,6 +68,9 @@ class ProtocolError(val detail: String, val frame: ByteArray = ByteArray(0)) : S
 
     override fun toString(): String = "ProtocolError($detail)"
 }
+
+/** Bounded payload-free channel lifecycle metadata for exported event notes. */
+class ChannelNote(val detail: String) : SessionEvent
 
 /** One SDU, as it went over the wire. */
 class WireFrame(val outbound: Boolean, val data: ByteArray) : SessionEvent {

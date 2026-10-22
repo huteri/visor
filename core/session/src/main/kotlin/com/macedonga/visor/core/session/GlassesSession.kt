@@ -145,7 +145,10 @@ class GlassesSession(
             }
 
             registry = ChannelRegistry()
-            val mux = DataXConnection(link, registry)
+            val mux = DataXConnection(link, registry, channelTrace = {
+                android.util.Log.i("Visor", it)
+                publish(ChannelNote(it))
+            })
             connection = mux
 
             // One reader from here to the end of the attempt, and it is the same one `pump`
@@ -284,6 +287,7 @@ class GlassesSession(
                         // render these in them.
                         "service %d answered status 0x%04x on channel 0x%04x"
                             .format(java.util.Locale.ROOT, serviceId, info.errorId, info.channelId),
+                        origin = mux,
                     ),
                 )
             }

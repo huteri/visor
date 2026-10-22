@@ -61,6 +61,8 @@ class GlassesConnection(
      * What the session reported as a protocol error, and any service message that would not decode.
      */
     val warnings: SharedFlow<String> = _warnings.asSharedFlow()
+    private val _protocolErrors = MutableSharedFlow<ProtocolError>(extraBufferCapacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    val protocolErrors: SharedFlow<ProtocolError> = _protocolErrors.asSharedFlow()
 
     private var job: Job? = null
 
@@ -102,11 +104,11 @@ class GlassesConnection(
                 GlassesTarget(GlassesLink.Bluetooth(it.glassesAddress), it.serial)
             }
             if (target == null) {
-                _state.value = GlassesState(reason = idleReason(bundles))
+                _state.value = GlassesState(reason = idleReason(bundles), generation = _state.value.generation)
                 return@launch
             }
 
-            _state.value = GlassesState(target = target)
+            _state.value = GlassesState(target = target, generation = _state.value.generation)
             val opened = hosts.create(target, bundle)
             host = opened
             opened.start(this)
@@ -170,6 +172,7 @@ class GlassesConnection(
                 val refused = event.state == LinkState.READY && !host.trustComplete && host.credentialReceived
                 _state.value = _state.value.copy(
                     link = if (refused) LinkState.LOST else event.state,
+                    generation = _state.value.generation + if (fresh) 1 else 0,
                     // The session publishes CONNECTING at the top of every attempt, including a
                     // reconnect, so that is where the slate is cleared.
                     reason = if (fresh) "" else event.reason,
@@ -212,10 +215,17 @@ class GlassesConnection(
                 if (event.serviceId != SVC_AIRSHIP && event.serviceId != SVC_MEDIA_STREAMING_CONTROL) _serviceData.emit(event)
             }
 
-            is ProtocolError -> _warnings.tryEmit(event.detail)
+            is com.macedonga.visor.core.session.ChannelNote -> _warnings.tryEmit(event.detail)
+            is ProtocolError -> reportProtocolError(event)
 
             else -> Unit
         }
+    }
+
+    /** Both Bluetooth and Live Wi-Fi feed this bus; keep exact mux origin for ownership checks. */
+    fun reportProtocolError(error: ProtocolError) {
+        _protocolErrors.tryEmit(error)
+        _warnings.tryEmit(error.detail)
     }
 
     /** Fold a decoded service message into the state, or report why it would not decode. */

@@ -9,4 +9,5 @@ android {
 dependencies {
     api(project(":core:connection"))
     implementation(libs.flatbuffers.java)
+    testImplementation(libs.junit)
 }

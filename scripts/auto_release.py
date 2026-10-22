@@ -10,7 +10,7 @@ import re
 import subprocess
 import time
 
-BASELINE_CODE = 10314  # Highest previously distributed APK, even if not tagged.
+BASELINE_CODE = 10322  # Highest previously distributed APK, even if not tagged.
 VERSION = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.]+)?$")
 
 
