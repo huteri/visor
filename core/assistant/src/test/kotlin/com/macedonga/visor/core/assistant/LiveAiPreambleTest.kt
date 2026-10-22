@@ -88,7 +88,7 @@ class LiveAiPreambleTest {
         set(assistant, "store", store)
         set(assistant, "brain", brain)
         val diary = mock(Diary::class.java)
-        val directory = java.nio.file.Files.createTempDirectory(java.nio.file.Path.of("/home/huteri/.hermes/cache/scratch"), "visor-jpeg-test-").toFile()
+        val directory = java.nio.file.Files.createTempDirectory("visor-jpeg-test-").toFile()
         `when`(diary.photos).thenReturn(directory)
         set(assistant, "diary", diary)
         var setting = voiceOnly
