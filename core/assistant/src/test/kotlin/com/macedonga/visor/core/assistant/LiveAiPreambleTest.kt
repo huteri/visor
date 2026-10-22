@@ -113,10 +113,6 @@ class LiveAiPreambleTest {
         set(assistant, "_phase", MutableStateFlow(AssistantPhase.WAITING))
         val notes = MutableSharedFlow<String>(extraBufferCapacity = 64)
         set(assistant, "_notes", notes)
-        val diagnostics = mutableListOf<String>()
-        val noteJob = CoroutineScope(currentCoroutineContext()).launch(start = CoroutineStart.UNDISPATCHED) {
-            notes.collect { if (it.startsWith("NativeDelivery:")) diagnostics.add(it) }
-        }
         val writes = java.util.concurrent.CopyOnWriteArrayList<Sent>()
         val audioTypes = java.util.concurrent.CopyOnWriteArrayList<Int?>()
         var stopLive: (() -> Unit)? = null
@@ -141,7 +137,7 @@ class LiveAiPreambleTest {
         val hostClass = Class.forName("com.macedonga.visor.core.assistant.Assistant\$liveAi\$1")
         val host = hostClass.getDeclaredConstructor(Assistant::class.java).apply { isAccessible = true }.newInstance(assistant) as LiveAiHost
         val job = SupervisorJob()
-        val live = LiveAi(context, CoroutineScope(job + Dispatchers.Unconfined), host, { 0L })
+        val live = LiveAi(context, CoroutineScope(job + Dispatchers.Unconfined), host)
         set(assistant, "liveAi", live)
         val eventScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         val errors = MutableSharedFlow<ProtocolError>(extraBufferCapacity = 64)
@@ -283,16 +279,8 @@ class LiveAiPreambleTest {
             assertArrayEquals(varm(sub, "Question", "Native reply.", onGlasses = true, voiceId = "voice-id"), writes.single { it.event.id == EV_VOICE_ACTION_RESPONSE }.event.body)
             assertArrayEquals(interactionComplete(sub, "Native reply.", expectsAnswer = false), writes.single { it.event.id == EV_MWA_VOICE_INTERACTION_COMPLETE }.event.body)
             assertTrue(writes.drop(3).all { it.type == MT_NET_EVENT })
-            yield()
-            assertTrue("native transport diagnostics missing", diagnostics.any { "stage=begin" in it })
-            assertTrue(diagnostics.any { "mode=${if (liveTurn) "live" else "ordinary"}" in it })
-            assertTrue(diagnostics.any { "simplified=$simplified" in it })
             assertEquals("Ordering must not mutate effective forwarding state", simplified, linkClass.getDeclaredField("simplified").apply { isAccessible = true }.get(link))
-            assertTrue(diagnostics.any { "stage=sent event=53" in it && "streaming=false partial=false" in it })
-            assertTrue(diagnostics.any { "stage=sent event=60" in it && "status=1000" in it })
-            assertTrue(diagnostics.any { "stage=complete" in it })
-            assertTrue(diagnostics.none { "Question" in it || "Native reply." in it || "voice-id" in it || sub in it })
-        } finally { eventScope.cancel(); noteJob.cancel(); job.cancel(); decoder.close(); directory.deleteRecursively() }
+        } finally { eventScope.cancel(); job.cancel(); decoder.close(); directory.deleteRecursively() }
     }
     @Test fun wifiChannelCloseDuringBlockedModelPreventsImageRequest() = runBlocking { sequence(true, true, false, jpeg = true, closeDuringModel = true) }
     @Test fun disableDuringBlockedModelPreventsImageRequest() = runBlocking { sequence(true, true, false, jpeg = true, disableDuringModel = true) }

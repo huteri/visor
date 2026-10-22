@@ -35,7 +35,7 @@ class LiveAiCameraLifecycleTest {
             try {
                 for (setting in listOf(true, null, false)) {
                     val host = Host().apply { voiceOnly = setting }
-                    val live = LiveAi(mock(Context::class.java), scope, host, { 0L })
+                    val live = LiveAi(mock(Context::class.java), scope, host)
                     live.onModeLiveAi("session", emptyMap())
                     live.onModeLiveAi("session", emptyMap())
                     live.onStartInteraction(mapOf(1 to "turn", 5 to 3), Locale.US)
@@ -59,7 +59,7 @@ class LiveAiCameraLifecycleTest {
     @Test fun repeatedConfirmedSettingDoesNotRestartCameraOrRevokeTurns() {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         val host = Host()
-        val live = LiveAi(mock(Context::class.java), scope, host, { 0L })
+        val live = LiveAi(mock(Context::class.java), scope, host)
         try {
             live.onModeLiveAi("session", emptyMap())
             val token = live.turnGeneration
@@ -79,7 +79,7 @@ class LiveAiCameraLifecycleTest {
         mockConstruction(GlassesEars::class.java).use { ears ->
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
             val host = Host()
-            val live = LiveAi(mock(Context::class.java), scope, host, { 0L })
+            val live = LiveAi(mock(Context::class.java), scope, host)
             try {
                 live.onModeLiveAi("session", emptyMap())
                 live.onStartInteraction(mapOf(1 to "turn", 5 to 3), Locale.US)
@@ -116,7 +116,7 @@ class LiveAiCameraLifecycleTest {
             override fun note(text: String) = Unit
         }
         mockConstruction(GlassesEars::class.java).use { ears ->
-            val live = LiveAi(mock(Context::class.java), backgroundScope, host, { 0L })
+            val live = LiveAi(mock(Context::class.java), backgroundScope, host)
             live.onStartInteraction(mapOf(1 to "old", 5 to 3), Locale.US)
             assertEquals(1, ears.constructed().size)
             block = true
@@ -142,7 +142,7 @@ class LiveAiCameraLifecycleTest {
         mockConstruction(GlassesEars::class.java).use {
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
             val host = Host()
-            val live = LiveAi(mock(Context::class.java), scope, host, { 0L })
+            val live = LiveAi(mock(Context::class.java), scope, host)
             try {
                 repeat(2) { cycle ->
                     live.onStartInteraction(mapOf(1 to "turn-$cycle", 5 to 3), Locale.US)

@@ -36,7 +36,7 @@ class AssistantRegistrationLifecycleTest {
         set(assistant, "_notes", MutableSharedFlow<String>(extraBufferCapacity = 64))
         set(assistant, "_phase", MutableStateFlow(AssistantPhase.REGISTERING))
         set(assistant, "progressTurn", java.util.concurrent.atomic.AtomicLong())
-        val live = LiveAi(mock(Context::class.java), backgroundScope, mock(LiveAiHost::class.java), { 0L })
+        val live = LiveAi(mock(Context::class.java), backgroundScope, mock(LiveAiHost::class.java))
         set(assistant, "liveAi", live)
         val errors = MutableSharedFlow<ProtocolError>(extraBufferCapacity = 64)
         val connection = mock(GlassesConnection::class.java, CALLS_REAL_METHODS)

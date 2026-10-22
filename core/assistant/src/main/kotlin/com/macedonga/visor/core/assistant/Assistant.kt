@@ -163,9 +163,6 @@ class Assistant(
     }
 
     private val liveAi = LiveAi(context, scope, object : LiveAiHost {
-        override val rawAudioCaptureEnabled: Boolean = rawMicrophoneCaptureAllowed(runCatching {
-            context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull())
         override suspend fun event(id: Int, body: ByteArray) {
             val l = link ?: return
             val m0 = l.m0 ?: return
@@ -294,12 +291,6 @@ class Assistant(
         // ev57's field 30, MobileConfig assistant_on_sn.simplify_mwa_message_forwarding. Off (the factory value),
         // the glasses act on a VARM the moment it lands and end the turn there.
         @Volatile var simplified = true
-        @Volatile var simplifiedSource = "link-default"
-        @Volatile var simplifiedInteraction: String? = null
-        @Volatile var startUseCase: Long? = null
-        @Volatile var sessionTurnSource = "link-default"
-        var nativeTraceCount = 0
-        val nativeTraces = java.util.ArrayDeque<NativeDeliveryTrace>()
         // Segmented messages being put back together, by id: their type, size and bytes so far.
         val segments = ConcurrentHashMap<String, Triple<Int, Int, java.io.ByteArrayOutputStream>>()
         // The text the glasses read in each question's photo, from their ev65.
@@ -551,7 +542,7 @@ class Assistant(
                 }
             }
             MT_STREAM_HEADER -> {
-                if (liveAi.active) liveAi.onMicHeader(payload, type, message.info.channelId, message.info.flags.hasExtension)
+                if (liveAi.active) liveAi.onMicHeader()
                 val header = Wire.parse(payload)
                 val stream = header.bytes(1).decodeToString()
                 val interaction = header.bytes(2).decodeToString()
@@ -564,7 +555,6 @@ class Assistant(
             // The microphone: Live AI's, or one turn's, which the server may have to recognise itself.
             MT_STREAM_AUDIO, 0 -> if (liveAi.active) liveAi.onMic(payload, type, message.info.channelId, message.info.flags.hasExtension) else ears?.hear(payload)
             MT_STREAM_END -> {
-                liveAi.onMicShutdown(payload, type, message.info.channelId, message.info.flags.hasExtension)
                 micEnded?.complete(Unit)
                 ears?.finish()
             }
@@ -596,13 +586,11 @@ class Assistant(
         if (type == MT_START_INTERACTION) {
             progressTurn.incrementAndGet() // New interaction revokes previous delayed audio.
             val fields = runCatching { Thrift.loads(blob) }.getOrDefault(emptyMap())
-            l.startUseCase = fields[5] as? Long
             // Use case 3 is LIVE_AI_INTERACTION; after a switch to LIVE_AI the next interaction is the session's.
             if (fields[5] == 3L || liveAi.phase.value == LiveAiPhase.STARTING) liveAi.onStartInteraction(fields, l.locale)
             else {
                 // Use case 7 opens a session ("SCI", English): there the glasses never speak text from the phone.
                 l.sessionTurn = fields[5] == SESSION_USE_CASE
-                l.sessionTurnSource = "ordinary-start-field5"
                 say("Assistant: start interaction ${deep(fields)}")
             }
             return
@@ -619,11 +607,6 @@ class Assistant(
         } catch (error: Exception) {
             say("Assistant: an unreadable event (${error.message})")
             return
-        }
-        // Stream receipts are observations only; native delivery need not produce them.
-        if (event.id in listOf(53, 60, 316, 359, 360)) {
-            val id = runCatching { Thrift.loads(event.body)[1].asText() }.getOrDefault("")
-            synchronized(l.nativeTraces) { l.nativeTraces.toList() }.forEach { it.receipt(event.id, id) }
         }
         when (event.id) {
             EV_SESSION_MODE_UPDATE_RESPONSE -> {
@@ -770,8 +753,6 @@ class Assistant(
         }
         m[8].asText().takeIf { it.length > 8 && !l.streamIds.containsKey(interaction) }?.let { l.streamIds[interaction] = it }
         l.simplified = m[30] != false
-        l.simplifiedSource = if (m.containsKey(30)) "ev57-field30" else "ev57-absent-default"
-        l.simplifiedInteraction = interaction
         val visual = Visual.from(m)
         say("Heard \"$transcript\" (request ${describe(body)}, understanding ${describeRead(m[2])})")
         // The glasses' own understanding of the request, e.g. IN:REPLY_MESSAGE, and its slots: fields 23 and 26, or the
@@ -1203,7 +1184,7 @@ class Assistant(
     }
 
     /** ev71, ev52 and ev342, which open every answer. ev52 and ev342 go at a tagged type 0, as the app sends them. */
-    private suspend fun preamble(l: Link, interaction: String, transcript: String, text: String, speechAnnounced: Boolean = false, validate: () -> Unit = {}, trace: NativeDeliveryTrace? = null) {
+    private suspend fun preamble(l: Link, interaction: String, transcript: String, text: String, speechAnnounced: Boolean = false, validate: () -> Unit = {}) {
         val m0 = checkNotNull(l.m0)
         val e71 = ThriftWriter().str(1, interaction).done()
         val e52 = ThriftWriter().str(1, transcript.ifEmpty { text }).i32(2, 0).str(4, "").bool(7, false).str(8, interaction).done()
@@ -1215,9 +1196,7 @@ class Assistant(
         )) {
             validate()
             if (speechAnnounced && event != EV_ON_PHONE_UNDERSTANDING) continue
-            trace?.emit("stage=write event=$event type=$type")
             l.mux.send(m0, netEvent(event, body), messageType = type)
-            trace?.emit("stage=sent event=$event type=$type")
             delay(20)
         }
     }
@@ -1226,50 +1205,24 @@ class Assistant(
      * The answer in the glasses' own voice: a VARM that streams nothing, then ev60 with the text, which is what makes
      * them speak it with their own TTS.
      */
-    private suspend fun speakOnGlasses(l: Link, interaction: String, transcript: String, text: String, speechAnnounced: Boolean = false, liveNativeOrder: Boolean = false, validate: () -> Unit = {}) {
-        val parent = if (liveAi.active) liveAi.interaction else l.sessionOf[interaction] ?: l.listening
-        val trace = synchronized(l.nativeTraces) {
-            NativeDeliveryTrace(++l.nativeTraceCount, interaction, parent, ::say).also {
-                if (l.nativeTraces.size == 4) l.nativeTraces.removeFirst()
-                l.nativeTraces.addLast(it)
-            }
-        }
-        val selectedVoice = glassesVoice()
-        trace.emit("stage=begin mode=${if (liveAi.active) "live" else "ordinary"} simplified=${l.simplified} simplifiedSource=${l.simplifiedSource} simplifiedOwner=${if (l.simplifiedInteraction == null) "absent" else if (l.simplifiedInteraction == interaction) "request" else if (l.simplifiedInteraction == parent) "parent" else "other"} startUseCase=${l.startUseCase} sessionTurn=${l.sessionTurn} sessionSource=${l.sessionTurnSource} announced=$speechAnnounced parent=${if (parent.isNullOrEmpty()) "absent" else if (parent == interaction) "request" else "distinct"} mapped=${l.sessionOf.containsKey(interaction)} closed=${l.closed.contains(interaction)} transcriptChars=${transcript.length} answerChars=${text.length}")
-        var stage = "channel"
-        try {
+    private suspend fun speakOnGlasses(l: Link, interaction: String, transcript: String, text: String, speechAnnounced: Boolean = false, validate: () -> Unit = {}) {
         val m0 = checkNotNull(l.m0)
-        stage = "preamble"
-        preamble(l, interaction, transcript, text, speechAnnounced, validate, trace)
+        preamble(l, interaction, transcript, text, speechAnnounced, validate)
         _phase.value = AssistantPhase.SPEAKING
         val voiceId = glassesVoice()
         val answer = netEvent(EV_VOICE_ACTION_RESPONSE, varm(interaction, transcript, text, onGlasses = true, voiceId = voiceId))
         // An answer that asks something has the glasses listen for the reply, without the wake word.
         val complete = netEvent(EV_MWA_VOICE_INTERACTION_COMPLETE, interactionComplete(interaction, text, expectsAnswer = ASKS.containsMatchIn(text)))
-        // Experimental Live AI ordering probe: text before VARM, forwarding state unchanged.
-        // Ordinary delivery retains its field-dependent order.
-        for (event in if (l.simplified && !liveNativeOrder) listOf(answer, complete) else listOf(complete, answer)) {
+        for (event in if (l.simplified) listOf(answer, complete) else listOf(complete, answer)) {
             validate()
-            val id = parseNetEvent(event).id
-            stage = "write-$id"
-            trace.emit("stage=write event=$id type=$MT_NET_EVENT")
             l.mux.send(m0, event, messageType = MT_NET_EVENT)
-            trace.emit("stage=sent event=$id type=$MT_NET_EVENT " + if (id == EV_VOICE_ACTION_RESPONSE) "streaming=false partial=false voicePresent=${!voiceId.isNullOrEmpty()} voiceEqual=${voiceId == selectedVoice}" else "status=1000 requiresAnswer=${ASKS.containsMatchIn(text)} streaming=false")
             delay(20)
         }
         val mono = System.nanoTime() / 1_000_000
         val e392 = ThriftWriter().str(1, "VoiceActionResponseMessage").i32(2, (mono and 0xFFFF).toInt()).i32(3, 1).done()
         validate()
-        stage = "write-392"
-        trace.emit("stage=write event=392 type=$MT_NET_EVENT")
         l.mux.send(m0, netEvent(EV_KEEP_AIR_SESSION_ALIVE, e392), messageType = MT_NET_EVENT)
-        trace.emit("stage=sent event=392 type=$MT_NET_EVENT")
-        trace.emit("stage=complete")
         say("Answered in the glasses' voice${voiceId?.let { " ($it)" }.orEmpty()}: \"$text\"")
-        } catch (error: Exception) {
-            trace.emit("stage=error boundary=$stage error=${error.javaClass.simpleName}")
-            throw error
-        }
     }
 
     /**

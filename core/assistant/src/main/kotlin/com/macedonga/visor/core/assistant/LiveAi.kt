@@ -17,8 +17,6 @@ import kotlinx.coroutines.launch
 
 /** What Live AI needs from the assistant around it. */
 internal interface LiveAiHost {
-    /** Host APK version opt-in, never inferred from library build type. */
-    val rawAudioCaptureEnabled: Boolean get() = false
     /** Null means unread: fail closed, never infer voice-only OFF. */
     val voiceOnly: Boolean? get() = null
     /** A NetEvent on the message channel. */
@@ -44,10 +42,7 @@ enum class LiveAiPhase { OFF, STARTING, LISTENING, THINKING }
  * the microphone on s0 with their own speech recognition unloaded. The server acknowledges the interaction,
  * listens, and answers each utterance as a sub-interaction of it, with the camera's picture.
  */
-internal class LiveAi(private val context: Context, private val scope: CoroutineScope, private val host: LiveAiHost,
-    private val elapsedMs: () -> Long = { android.os.SystemClock.elapsedRealtime() },
-) {
-    private var rawCapture: RawMicrophoneCapture? = null
+internal class LiveAi(private val context: Context, private val scope: CoroutineScope, private val host: LiveAiHost) {
     private var cameraRequested = false
     private val turns = java.util.concurrent.ConcurrentHashMap.newKeySet<Job>()
     private val generation = AtomicInteger()
@@ -75,10 +70,6 @@ internal class LiveAi(private val context: Context, private val scope: Coroutine
         host.note("Live AI camera: requested=true")
     }
 
-    private fun beginRawCapture() {
-        rawCapture?.close()
-        rawCapture = RawMicrophoneCapture(host.rawAudioCaptureEnabled, elapsedMs, host::note)
-    }
     private val _phase = MutableStateFlow(LiveAiPhase.OFF)
     val phase: StateFlow<LiveAiPhase> = _phase.asStateFlow()
 
@@ -111,7 +102,6 @@ internal class LiveAi(private val context: Context, private val scope: Coroutine
         if (active && session == sessionId) return
         sessionGeneration.incrementAndGet()
         if (active) revokeTurns()
-        if (!active) beginRawCapture()
         sessionId = session
         _phase.value = LiveAiPhase.STARTING
         ensureCamera()
@@ -127,7 +117,7 @@ internal class LiveAi(private val context: Context, private val scope: Coroutine
             return
         }
         val startup = sessionGeneration.incrementAndGet()
-        if (active) revokeTurns() else beginRawCapture()
+        if (active) revokeTurns()
         ensureCamera()
         interaction = id
         heardAudio = false
@@ -173,20 +163,14 @@ internal class LiveAi(private val context: Context, private val scope: Coroutine
     }
 
     /** The glasses' own header for their microphone stream. */
-    fun onMicHeader(chunk: ByteArray, messageType: Int, channelId: Int, hasExtension: Boolean) {
+    fun onMicHeader() {
         if (!active) return
-        rawCapture?.header(chunk, messageType, channelId, hasExtension)
         host.note("Live AI stages: microphone-header cameraModeSeen=${sessionId.isNotEmpty()}")
-    }
-
-    fun onMicShutdown(chunk: ByteArray, messageType: Int, channelId: Int, hasExtension: Boolean) {
-        if (active) rawCapture?.shutdown(chunk, messageType, channelId, hasExtension)
     }
 
     /** A chunk of the microphone. The first one is the audio payload the server acknowledges as received. */
     fun onMic(chunk: ByteArray, messageType: Int, channelId: Int, hasExtension: Boolean) {
         if (!active) return
-        rawCapture?.packet(chunk, messageType, channelId, hasExtension)
         inputStats.record(chunk.size, messageType, channelId, hasExtension)
         if (micChunks++ == 0) host.note("Live AI stages: first-input bytes=${chunk.size} type=$messageType channel=$channelId extensions=$hasExtension")
         if (!heardAudio && interaction.isNotEmpty()) {
@@ -267,8 +251,6 @@ internal class LiveAi(private val context: Context, private val scope: Coroutine
         revokeTurns()
         inputDiagnostics?.cancel()
         inputDiagnostics = null
-        rawCapture?.close()
-        rawCapture = null
         inputSnapshot()
         host.note("Live AI: ended ($why)")
         _phase.value = LiveAiPhase.OFF
