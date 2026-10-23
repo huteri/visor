@@ -14,7 +14,6 @@
     <string name="mood_charging">In carica</string>
     <string name="mood_recording">Registrano</string>
     <string name="mood_low_battery">Batteria quasi scarica</string>
-    <string name="home_glasses_name">Ray-Ban Meta</string>
     <string name="home_reading_glasses">Occhiali</string>
     <string name="home_reading_case">Custodia</string>
     <string name="home_allow_bluetooth">Consenti il Bluetooth</string>
@@ -61,7 +60,11 @@
     <string name="fact_free">Spazio libero</string>
     <string name="fact_volume">Volume</string>
     <string name="fact_temperature">Temperatura</string>
+    <string name="live_battery">Batteria</string>
+    <string name="onboard_allowed">Consentito</string>
     <string name="fact_last_capture">Ultimo scatto</string>
+    <string name="shutter_take_photo">Scatta foto</string>
+    <string name="shutter_record_video">Registra video</string>
     <string name="ago_now">adesso</string>
     <string name="ago_minutes">%d min fa</string>
     <string name="ago_hours">%d h fa</string>
@@ -350,6 +353,8 @@
     <string name="settings_no_way_to_write">Gli occhiali non danno modo di scriverla.</string>
     <string name="settings_flags">Feature flag</string>
     <string name="settings_flags_sub">Gli interruttori di Meta per funzioni che non ha attivato</string>
+    <string name="settings_developer">Modalità sviluppatore</string>
+    <string name="settings_developer_sub">Intent della fotocamera ed eventi di scatto per altre app</string>
     <string name="settings_diagnostics_sub">Il collegamento, la chiave e cosa riportano gli occhiali</string>
     <string name="settings_event_log_sub">Tutto ciò che ha fatto il collegamento, dal più vecchio</string>
     <string name="tiles_hint">Tieni premuta un\'impostazione per fissarla qui</string>
@@ -416,8 +421,7 @@
 
     <string name="glasses_title">Occhiali</string>
     <string name="glasses_owned">Occhiali di %s</string>
-    <string name="glasses_default_name">Ray-Ban Meta</string>
-    <string name="glasses_default_named">Ray-Ban Meta %s</string>
+    <string name="glasses_default_name">Occhiali Meta</string>
     <string name="glasses_frame">Montatura</string>
     <string name="glasses_color">Colore</string>
     <string name="glasses_lenses">Lenti</string>
@@ -588,6 +592,14 @@
     <string name="about_debug">Build di debug</string>
     <string name="about_credits">Fatto con</string>
     <string name="about_foot">Ognuno con la sua licenza.</string>
+    <string name="about_report">Segnala un problema</string>
+    <string name="about_discuss">Apri una discussione</string>
+    <string name="about_star">Lascia una stella</string>
+    <string name="star_title">Ti piace Visor?</string>
+    <string name="star_text">Lasciagli una stella su GitHub.</string>
+    <string name="star_ok">OK</string>
+    <string name="star_no">No</string>
+    <string name="star_never">Non mostrare più</string>
     <string name="about_sum_update">Visor %1$s, disponibile la %2$s</string>
     <string name="update_channel">Aggiornamenti</string>
     <string name="update_ready">Visor %1$s è disponibile</string>
@@ -603,7 +615,7 @@
     <string name="live_problem_in_case">Sono in carica nella custodia, e lì gli occhiali tengono la fotocamera spenta. Tirali fuori per andare live.</string>
 
     <!-- Onboarding -->
-    <string name="onboard_tagline">I tuoi Ray-Ban Meta, guidati da questo telefono.</string>
+    <string name="onboard_tagline">I tuoi occhiali Meta, guidati da questo telefono.</string>
     <string name="onboard_begin">Inizia</string>
     <string name="onboard_access_title">Cosa chiede Visor</string>
     <string name="onboard_access_lede">Ognuno serve a una cosa sola. Per iniziare basta il primo.</string>
@@ -685,6 +697,8 @@
     <string name="widget_name">Occhiali</string>
     <string name="widget_description">La batteria degli occhiali e della custodia, come stanno, e il tuo ultimo momento.</string>
     <string name="widget_case">Custodia %1$d%%</string>
+    <string name="notify_glasses">Occhiali %1$d%%</string>
+    <string name="notify_glasses_charging">Occhiali %1$d%%, in carica</string>
     <string name="widget_no_moment">Ancora nessuna foto</string>
     <string name="widget_sample_case">Custodia 64%</string>
     <string name="tile_subtitle">%1$s · %2$d%%</string>
