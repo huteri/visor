@@ -4,7 +4,6 @@ import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLConnection
-import java.net.URLStreamHandler
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -66,11 +65,7 @@ class BrainHttpLeaseTest {
     companion object {
         @Volatile private var connection: URLConnection? = null
         init {
-            URL.setURLStreamHandlerFactory { protocol ->
-                if (protocol == "visor-lease-test") object : URLStreamHandler() {
-                    override fun openConnection(url: URL): URLConnection = checkNotNull(connection)
-                } else null
-            }
+            TestHttpConnections.handlers["request"] = { checkNotNull(connection) }
         }
     }
 }

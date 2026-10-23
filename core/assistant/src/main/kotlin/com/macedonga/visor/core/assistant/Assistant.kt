@@ -917,7 +917,7 @@ class Assistant(
             // The glasses give up after their processing timeout; speech and streaming need the last seconds of it.
             val budget = (processingTimeoutS() ?: FACTORY_PROCESSING_S) * 1000 - DELIVERY_MS
             val left = (budget - (System.currentTimeMillis() - started)).coerceAtLeast(MIN_MODEL_MS)
-            withTimeout(left) { brain.answer(transcript, l.locale, pastOf(interaction), image, note) }
+            withTimeout(left) { inConversation(interaction) { brain.answer(transcript, l.locale, pastOf(interaction), image, note) } }
         } catch (error: Exception) {
             problem = error.message ?: error::class.simpleName.orEmpty()
             Reply(fallback(l.locale, store.config.value.apiKey.isBlank() && store.config.value.provider == Provider.CLAUDE))
@@ -1025,7 +1025,7 @@ class Assistant(
                 } else null,
                 normalFinal = { text -> deliver(l, interaction, transcript, text) { check(owned()) { "Spoken progress: final ownership lost" } } },
             ).run(started, minOf(config.answerWaitSeconds.toLong(), processingTimeoutS() ?: config.answerWaitSeconds.toLong()), progressPhrase(l.locale)) {
-                reply = try { kotlinx.coroutines.withContext(ProgressNetworkBudget()) { brain.answer(transcript, l.locale, pastOf(interaction), image, note) } }
+                reply = try { inConversation(interaction, ProgressNetworkBudget()) { brain.answer(transcript, l.locale, pastOf(interaction), image, note) } }
                 catch (cancel: kotlinx.coroutines.CancellationException) { throw cancel }
                 catch (error: Exception) {
                     say("Spoken progress: model failed: ${error.message}")
@@ -1075,7 +1075,7 @@ class Assistant(
         fun owned() = liveAi.turnIsCurrent(token) && link === l && store.config.value.enabled && store.generation.get() == configGeneration
         val started = System.currentTimeMillis()
         val session = liveAi.sessionId.ifEmpty { liveAi.interaction }
-        record(TurnRecord(sub, started, question, source = TurnSource.LIVE_AI, session = session, conversation = "live-$session"))
+        record(TurnRecord(sub, started, question, source = TurnSource.LIVE_AI, session = session, conversation = diary.liveConversationAt(started, windowMs(), session, question.trim().matches(Regex("new conversation[.!?]*", RegexOption.IGNORE_CASE)))))
         val frame = if (liveAi.imageAllowed) runCatching { liveFrame() }.getOrNull() else null
         kotlin.coroutines.coroutineContext.ensureActive()
         if (!owned()) return
@@ -1091,7 +1091,7 @@ class Assistant(
         }
         var problem = ""
         val reply = try {
-            withContext(LiveImageLease {
+            inConversation(sub, LiveImageLease {
                 check(owned() && (image == null || liveAi.imageAllowed))
             }) { brain.answer(question, l.locale, pastOf(sub), image, liveAiNote()) }
         } catch (error: Exception) {
@@ -1318,8 +1318,7 @@ class Assistant(
     /** [id]'s question again, with the model and settings as they are now; the new answer replaces the old one. */
     fun askAgain(id: String) {
         if (diary.turn(id) == null) return
-        diary.update(id) { it.copy(answer = "", problem = "", remembered = emptyList(), actions = emptyList(), modelMs = 0) }
-        scope.launch { answerHere(id) }
+        scope.launch { answerHere(id, replay = true) }
     }
 
     /** The conversation a question asked now from the app would continue, or null when it would start a new one. */
@@ -1328,19 +1327,20 @@ class Assistant(
         return last.conversation.takeIf { System.currentTimeMillis() - last.at <= windowMs() }
     }
 
-    private suspend fun answerHere(id: String) {
+    private suspend fun answerHere(id: String, replay: Boolean = false) {
         val turn = diary.turn(id) ?: return
         val started = System.currentTimeMillis()
         val image = turn.image.takeIf { it.isNotEmpty() }?.let { runCatching { File(it).readBytes() }.getOrNull() }
         val phone = turn.source == TurnSource.PHONE
         try {
-            val reply = withTimeout(PHONE_BUDGET_MS) {
+            withTimeout(PHONE_BUDGET_MS) { inConversation(id, replay = replay) {
+            val reply =
                 brain.answer(
                     turn.question, if (phone) phoneLocale() else locale, pastOf(id), image,
                     if (turn.source == TurnSource.LIVE_AI) liveAiNote() else "", if (phone) Audience.PHONE else Audience.GLASSES,
                 )
-            }
             diary.update(id) { it.copy(answer = reply.text, problem = "", remembered = reply.remembered, actions = reply.actions, modelMs = System.currentTimeMillis() - started) }
+            } }
         } catch (error: Exception) {
             val why = if (error is kotlinx.coroutines.TimeoutCancellationException) "no answer in ${PHONE_BUDGET_MS / 1000} s" else error.message ?: error::class.simpleName.orEmpty()
             say("The model did not answer in the app: $why")
@@ -1385,18 +1385,51 @@ class Assistant(
     /** The app's language: what the phone's own words are in. */
     private fun phoneLocale(): Locale = context.resources.configuration.locales[0]
 
+    private suspend fun <T> inConversation(
+        id: String, extra: kotlin.coroutines.CoroutineContext = kotlin.coroutines.EmptyCoroutineContext,
+        replay: Boolean = false,
+        block: suspend () -> T,
+    ): T {
+        val context = contextOf(id, replay)
+        return withContext(context + extra) {
+            if (context is ConversationContext) context.serialized {
+                block().also { result ->
+                    // Publish completed history before the next queued turn selects its context.
+                    if (result is Reply) diary.update(id) {
+                        it.copy(answer = result.text, problem = "", remembered = result.remembered, actions = result.actions)
+                    }
+                }
+            } else block()
+        }
+    }
+
+    private fun contextOf(id: String, replay: Boolean = false): kotlin.coroutines.CoroutineContext {
+        val turn = diary.turn(id) ?: return kotlin.coroutines.EmptyCoroutineContext
+        if (turn.conversation.isBlank()) return kotlin.coroutines.EmptyCoroutineContext
+        // Voice-only Live AI must not resume a server transcript holding camera images.
+        val privacyScope = if (turn.source == TurnSource.LIVE_AI && !liveAi.imageAllowed) ":live-voice-only" else ""
+        return ConversationContext(diary, turn.conversation + privacyScope, replay)
+    }
+
     /** What the model has heard of [id]'s conversation before it. */
     private fun pastOf(id: String): List<Exchange> {
         val conversation = diary.turn(id)?.conversation ?: return emptyList()
-        return diary.past(conversation, before = id).map { Exchange(it.question, it.answer, it.actions) }
+        val turns = diary.past(conversation, before = id)
+        val allowed = store.config.value.vision && (diary.turn(id)?.source != TurnSource.LIVE_AI || liveAi.imageAllowed)
+        val reference = if (allowed) turns.lastOrNull { it.image.isNotEmpty() } else null
+        return turns.map { t ->
+            val image = if (t === reference) runCatching {
+                File(t.image).takeIf { it.isFile && it.length() <= 2 * 1024 * 1024 }?.readBytes()
+            }.getOrNull() else null
+            Exchange(t.question, t.answer, t.actions, image)
+        }
     }
 
     /** Into the diary, in the open conversation unless it names its own. */
     private fun record(turn: TurnRecord) {
         if (turn.conversation.isNotEmpty()) return diary.record(turn)
-        // A follow-up continues the open conversation; a new "Hey Meta" only if it comes right after the last turn.
-        val window = if (link?.fresh?.contains(turn.interactionId) == true) minOf(windowMs(), FRESH_WINDOW_MS) else windowMs()
-        diary.record(turn.copy(conversation = diary.conversationAt(turn.at, window)))
+        // Both fresh wakes and follow-ups honor the configured conversation window.
+        diary.record(turn.copy(conversation = diary.conversationAt(turn.at, windowMs())))
     }
 
     private fun update(interaction: String, change: (TurnRecord) -> TurnRecord) = diary.update(interaction, change)
@@ -1429,7 +1462,6 @@ class Assistant(
         const val QUESTION_GRACE_MS = 3_000L
         // ev57 field 11, invocationMethod: 1 for the wake word, 3 for a follow-up the glasses listened for.
         const val FOLLOW_UP_INVOCATION = 3L
-        const val FRESH_WINDOW_MS = 2 * 60_000L
         val WAKE_WORD_ONLY = Regex("^(hey|hi|ehi|ei|ok|okay)?[ ,]*(meta|mata|metta|matta|meda)[.!?]*$", RegexOption.IGNORE_CASE)
         const val MIN_MODEL_MS = 6_000L
         const val PHOTO_WAIT_MS = 8_000L

@@ -88,6 +88,7 @@ class LiveAiPreambleTest {
         set(assistant, "store", store)
         set(assistant, "brain", brain)
         val diary = mock(Diary::class.java)
+        `when`(diary.liveConversationAt(anyLong(), anyLong(), anyString(), anyBoolean())).thenReturn("live-conversation")
         val directory = java.nio.file.Files.createTempDirectory("visor-jpeg-test-").toFile()
         `when`(diary.photos).thenReturn(directory)
         set(assistant, "diary", diary)

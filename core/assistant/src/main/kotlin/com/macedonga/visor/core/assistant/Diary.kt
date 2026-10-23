@@ -59,6 +59,41 @@ class Diary(private val dir: File, legacyTurns: File? = null, legacyPhotos: File
         load()
     }
 
+    // Session IDs are opaque credentials-adjacent metadata, never raw API keys.
+    private val sessionFile = File(dir, "sessions.json")
+    private var sessionGeneration = 0L
+    @Synchronized fun generation(): Long = sessionGeneration
+    @Synchronized fun validateGeneration(generation: Long) {
+        check(generation == sessionGeneration) { "Conversation deleted; request not replayed." }
+    }
+    private val sessionRequests = mutableMapOf<String, SessionRequest>()
+    internal class SessionRequest(val scope: String, val generation: Long)
+    @Synchronized internal fun beginSessionRequest(scope: String, generation: Long): SessionRequest {
+        validateGeneration(generation)
+        return SessionRequest(scope, generation).also { sessionRequests[scope] = it }
+    }
+    @Synchronized internal fun endSessionRequest(request: SessionRequest) {
+        if (sessionRequests[request.scope] === request) sessionRequests.remove(request.scope)
+    }
+    @Synchronized internal fun captureSession(request: SessionRequest, id: String) {
+        // Ownership, cancellation and persistence share this monitor: no check-then-write window.
+        if (sessionRequests[request.scope] !== request) return
+        validateGeneration(request.generation)
+        keepSession(request.scope, id)
+    }
+    @Synchronized fun session(scope: String): String? = runCatching {
+        JSONObject(sessionFile.readText()).optString(scope).takeIf { it.isNotBlank() }
+    }.getOrNull()
+    @Synchronized fun keepSession(scope: String, id: String) {
+        val json = runCatching { JSONObject(sessionFile.readText()) }.getOrDefault(JSONObject())
+        json.put(scope, id)
+        while (json.length() > 128) {
+            val victim = json.keys().asSequence().first { it != scope }
+            json.remove(victim)
+        }
+        write(sessionFile, json.toString())
+    }
+
     // --- turns ---------------------------------------------------------------
 
     fun record(turn: TurnRecord) {
@@ -79,6 +114,8 @@ class Diary(private val dir: File, legacyTurns: File? = null, legacyPhotos: File
         val gone = _turns.value.filter { it.interactionId in ids }
         if (gone.isEmpty()) return gone
         _turns.update { list -> list.filterNot { it.interactionId in ids } }
+        // A continued server transcript could resurrect deleted local content.
+        synchronized(this) { sessionGeneration++; sessionFile.delete() }
         // A day's lines speak of what was deleted: gone with the day, or to be written again.
         val left = _turns.value.map { it.date }.toSet()
         _lines.update { lines ->
@@ -114,6 +151,15 @@ class Diary(private val dir: File, legacyTurns: File? = null, legacyPhotos: File
     fun conversationAt(at: Long, windowMs: Long): String {
         val last = _turns.value.lastOrNull { it.source != TurnSource.LIVE_AI && it.conversation.isNotEmpty() }
         return if (last != null && at - last.at in 0..windowMs) last.conversation else UUID.randomUUID().toString()
+    }
+
+    /** Pin each Live AI session on first question; only an explicit reset selects a new conversation. */
+    fun liveConversationAt(at: Long, windowMs: Long, session: String, newConversation: Boolean = false): String {
+        if (newConversation) return UUID.randomUUID().toString()
+        _turns.value.lastOrNull { it.source == TurnSource.LIVE_AI && it.session == session && it.conversation.isNotEmpty() }
+            ?.let { return it.conversation }
+        val recent = _turns.value.lastOrNull { it.conversation.isNotEmpty() }
+        return if (recent != null && at - recent.at in 0..windowMs) recent.conversation else UUID.randomUUID().toString()
     }
 
     /** The answered turns of [conversation] before [before] (all of them if null), oldest first. */

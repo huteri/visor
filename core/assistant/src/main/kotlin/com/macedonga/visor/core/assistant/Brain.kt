@@ -30,7 +30,7 @@ import org.json.JSONObject
 enum class Provider { CLAUDE, OPENAI_COMPATIBLE }
 
 /** One question, its answer and what the tools did for it: the conversation behind the next question. */
-data class Exchange(val question: String, val answer: String, val actions: List<ToolAction> = emptyList())
+data class Exchange(val question: String, val answer: String, val actions: List<ToolAction> = emptyList(), val image: ByteArray? = null)
 
 /** The answer as the model reads it later: with Visor's note of what the tools did, so words alone never pass for an action. */
 private fun Exchange.told(): String = if (actions.isEmpty()) answer else
@@ -83,6 +83,12 @@ class Brain(
         note: String = "",
         audience: Audience = Audience.GLASSES,
     ): Reply = withContext(Dispatchers.IO) {
+        val conversation = coroutineContext[ConversationContext]
+        if (conversation != null) conversation.serialized { answerTurn(question, locale, past, image, note, audience) }
+        else answerTurn(question, locale, past, image, note, audience)
+    }
+
+    private suspend fun answerTurn(question: String, locale: Locale, past: List<Exchange>, image: ByteArray?, note: String, audience: Audience): Reply {
         val c = config()
         check(c.apiKey.isNotBlank() || c.provider == Provider.OPENAI_COMPATIBLE) { "no API key is set" }
         // The tools never stand in the way of an answer: without them the model still answers.
@@ -100,10 +106,10 @@ class Brain(
         val tokens = if (audience == Audience.PHONE) PHONE_TOKENS else GLASSES_TOKENS
         val text = when (c.provider) {
             Provider.CLAUDE -> claude(c, c.model.ifBlank { DEFAULT_CLAUDE_MODEL }, system, recent, question, image, tokens, c.webSearch, turn)
-            Provider.OPENAI_COMPATIBLE -> openAi(c, c.model, system, recent, question, image, tokens, turn)
+            Provider.OPENAI_COMPATIBLE -> openAi(c, c.model, system, past, question, image, tokens, turn)
         }.replace(VISOR_NOTE, "").trim()
         check(text.isNotEmpty()) { "the model gave an empty answer" }
-        Reply(text, turn.remembered, turn.actions)
+        return Reply(text, turn.remembered, turn.actions)
     }
 
     /** One sentence for the wearer, in [locale]'s language, written from [what]; outside the conversation. */
@@ -182,7 +188,7 @@ class Brain(
     ): String {
         val messages = JSONArray()
         for (e in past) {
-            messages.put(JSONObject().put("role", "user").put("content", e.question))
+            messages.put(JSONObject().put("role", "user").put("content", historicalUser(e, claude = true)))
             messages.put(JSONObject().put("role", "assistant").put("content", e.told()))
         }
         val content = JSONArray()
@@ -237,9 +243,24 @@ class Brain(
         c: AssistantConfig, model: String, system: String, past: List<Exchange>, question: String, image: ByteArray?,
         tokens: Int, turn: Turn?,
     ): String {
-        val messages = JSONArray().put(JSONObject().put("role", "system").put("content", system))
-        for (e in past) {
-            messages.put(JSONObject().put("role", "user").put("content", e.question))
+        val conversation = coroutineContext[ConversationContext]?.takeIf {
+            turn != null && c.apiKey.isNotBlank() &&
+                (it.diary.session(sessionScope(c, it.conversation)) != null || supportsSessions(c))
+        }
+        conversation?.validate()
+        val scope = conversation?.let { sessionScope(c, it.conversation) }
+        check(conversation?.replay != true) {
+            "Retry/Again is unavailable for Hermes server conversations: the previous request may already have run tools. Send a new question explicitly; request not replayed."
+        }
+        val session = if (scope != null) conversation.diary.session(scope) else null
+        if (session != null) verifySession(c, session)
+        val sessionSystem = system + (conversation?.let {
+            // Never reuse a fingerprint after deletion/reset, even within the same minute.
+            " [Visor conversation: ${it.conversation}; bootstrap: ${if (session == null) java.util.UUID.randomUUID() else "continued"}]"
+        } ?: "")
+        val messages = JSONArray().put(JSONObject().put("role", "system").put("content", sessionSystem))
+        for (e in if (session != null) emptyList() else if (conversation != null) past else past.takeLast(MAX_EXCHANGES)) {
+            messages.put(JSONObject().put("role", "user").put("content", historicalUser(e, claude = false)))
             messages.put(JSONObject().put("role", "assistant").put("content", e.told()))
         }
         val user: Any = if (image == null) question else JSONArray()
@@ -251,7 +272,8 @@ class Brain(
                 ),
             )
         messages.put(JSONObject().put("role", "user").put("content", user))
-        val headers = if (c.apiKey.isBlank()) emptyMap() else mapOf("Authorization" to "Bearer ${c.apiKey}")
+        val headers = (if (c.apiKey.isBlank()) emptyMap() else mapOf("Authorization" to "Bearer ${c.apiKey}")) +
+            (session?.let { mapOf("X-Hermes-Session-Id" to it) } ?: emptyMap())
         val url = c.baseUrl.trimEnd('/') + "/chat/completions"
         var tools: JSONArray? = JSONArray().apply {
             if (turn != null && book != null) {
@@ -264,19 +286,22 @@ class Brain(
         }.takeIf { it.length() > 0 }
         var said = ""
         repeat(MAX_TOOL_ROUNDS) {
+            conversation?.validate()
             val body = JSONObject().put("model", model).put("messages", messages).put("max_tokens", tokens)
             tools?.let { body.put("tools", it) }
             val answer = try {
-                send(url, headers, body)
+                withContext(SessionCapture(conversation, scope)) { send(url, headers, body) }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: IllegalStateException) {
                 // A server without tools refuses the field; then the conversation goes on without memory. The person's
                 // own tools are never dropped unseen: their refusal is the answer's error.
-                if (tools == null || turn?.box?.tools.orEmpty().isNotEmpty() || !TOOLS_REFUSED.containsMatchIn(error.message.orEmpty())) throw error
+                conversation?.validate()
+                if (session != null || (scope != null && conversation.diary.session(scope) != null) || tools == null || turn?.box?.tools.orEmpty().isNotEmpty() || !TOOLS_REFUSED.containsMatchIn(error.message.orEmpty())) throw error
                 tools = null
                 send(url, headers, body.apply { remove("tools") })
             }
+            conversation?.validate()
             val choice = answer.getJSONArray("choices").getJSONObject(0)
             val message = choice.getJSONObject("message")
             val text = message.optString("content").takeUnless { message.isNull("content") }.orEmpty().replace(THINKING, "")
@@ -313,6 +338,9 @@ class Brain(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: IllegalStateException) {
+                val capture = coroutineContext[SessionCapture]
+                if (headers.containsKey("X-Hermes-Session-Id") || capture?.known() == true) throw error
+                coroutineContext[ConversationContext]?.validate()
                 val why = error.message.orEmpty()
                 f = when {
                     known == null && f.reasoningOff && "reasoning" in why -> f.copy(reasoningOff = false)
@@ -331,28 +359,35 @@ class Brain(
     private suspend fun post(url: String, headers: Map<String, String>, body: JSONObject): JSONObject =
         suspendCancellableCoroutine { pending ->
             val http = URL(url).openConnection() as HttpURLConnection
-            // disconnect may block behind a read on some JDKs; never block the cancelling thread.
+            val capture = pending.context[SessionCapture]
+            val request = capture?.begin()
+            // Revoke publication synchronously; disconnect may block behind a JDK read.
             pending.invokeOnCancellation {
+                capture?.end(request)
                 Dispatchers.IO.dispatch(EmptyCoroutineContext, Runnable { http.disconnect() })
             }
             Dispatchers.IO.dispatch(pending.context, Runnable {
                 try {
                     pending.context.ensureActive()
-                    val answer = request(http, headers, body, progressReadTimeout(pending.context)) {
+                    val answer = request(http, headers, body, progressReadTimeout(pending.context), { id ->
+                        capture?.keep(request, id)
+                    }) {
                         pending.context.ensureActive()
                         pending.context[LiveImageLease]?.validate()
+                        pending.context[ConversationContext]?.validate()
                     }
                     pending.context.ensureActive()
                     pending.resume(answer)
                 } catch (error: Exception) {
                     pending.resumeWithException(error)
                 } finally {
+                    capture?.end(request)
                     http.disconnect()
                 }
             })
         }
 
-    private fun request(http: HttpURLConnection, headers: Map<String, String>, body: JSONObject, readTimeoutMs: Int, checkCancelled: () -> Unit): JSONObject {
+    private fun request(http: HttpURLConnection, headers: Map<String, String>, body: JSONObject, readTimeoutMs: Int, captureSession: (String) -> Unit, checkCancelled: () -> Unit): JSONObject {
         checkCancelled()
         http.requestMethod = "POST"
         http.connectTimeout = 5_000
@@ -376,8 +411,67 @@ class Brain(
             val message = runCatching { JSONObject(text).getJSONObject("error").getString("message") }.getOrDefault(text.take(200))
             error("the model answered $code: $message")
         }
+        http.getHeaderField("X-Hermes-Session-Id")?.trim()?.takeIf { it.isNotEmpty() }?.let(captureSession)
         return http.inputStream.reader(Charsets.UTF_8).use {
             ModelResponse.read(it, headers.containsKey("anthropic-version"), checkCancelled)
+        }
+    }
+
+    private fun historicalUser(e: Exchange, claude: Boolean): Any {
+        val image = e.image ?: return e.question
+        val encoded = java.util.Base64.getEncoder().encodeToString(image)
+        val photo = if (claude) JSONObject().put("type", "image").put("source", JSONObject()
+            .put("type", "base64").put("media_type", "image/jpeg").put("data", encoded))
+        else JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", "data:image/jpeg;base64,$encoded"))
+        return JSONArray().put(JSONObject().put("type", "text").put("text", e.question + " [Prior reference photo, not the current view.]"))
+            .put(photo)
+    }
+
+    private val sessionSupport = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    private fun supportsSessions(c: AssistantConfig): Boolean = sessionSupport.getOrPut(sessionScope(c, "capabilities")) {
+        val http = URL(c.baseUrl.trimEnd('/') + "/capabilities").openConnection() as HttpURLConnection
+        try {
+            http.connectTimeout = 2_000
+            http.readTimeout = 2_000
+            http.setRequestProperty("Authorization", "Bearer ${c.apiKey}")
+            http.responseCode == 200 && http.inputStream.bufferedReader().use {
+                JSONObject(it.readText()).optJSONObject("features")?.optString("session_continuity_header") == "X-Hermes-Session-Id"
+            }
+        } catch (_: Exception) { false } finally { http.disconnect() }
+    }
+
+    private fun sessionScope(c: AssistantConfig, conversation: String): String =
+        java.security.MessageDigest.getInstance("SHA-256").digest(
+            "${c.baseUrl.trimEnd('/')}\u0000${c.apiKey}\u0000${c.model}\u0000${c.vision}\u0000$conversation".toByteArray(),
+        ).joinToString("") { "%02x".format(it) }
+
+    /** Hermes accepts unknown IDs as empty histories: check existence BEFORE any side-effecting POST. */
+    private fun verifySession(c: AssistantConfig, id: String) {
+        val base = c.baseUrl.trimEnd('/').removeSuffix("/v1")
+        val encoded = java.net.URLEncoder.encode(id, "UTF-8")
+        val http = URL("$base/api/sessions/$encoded").openConnection() as HttpURLConnection
+        try {
+            http.connectTimeout = 5_000
+            http.readTimeout = 5_000
+            http.setRequestProperty("Authorization", "Bearer ${c.apiKey}")
+            check(http.responseCode in 200..299) {
+                "Hermes conversation unavailable (${http.responseCode}); start a new conversation explicitly. Request not replayed."
+            }
+        } finally { http.disconnect() }
+    }
+
+    private class SessionCapture(val conversation: ConversationContext?, val scope: String?) :
+        kotlin.coroutines.AbstractCoroutineContextElement(Key) {
+        companion object Key : kotlin.coroutines.CoroutineContext.Key<SessionCapture>
+        fun known() = scope != null && conversation?.diary?.session(scope) != null
+        fun begin(): Diary.SessionRequest? = if (scope != null && conversation != null)
+            conversation.diary.beginSessionRequest(scope, conversation.generation) else null
+        fun end(request: Diary.SessionRequest?) {
+            if (request != null) conversation?.diary?.endSessionRequest(request)
+        }
+        fun keep(request: Diary.SessionRequest?, id: String) {
+            if (request != null && id.length <= 512 && id.none { it.isISOControl() })
+                conversation?.diary?.captureSession(request, id)
         }
     }
 
