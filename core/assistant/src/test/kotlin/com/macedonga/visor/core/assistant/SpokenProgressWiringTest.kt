@@ -14,7 +14,7 @@ class SpokenProgressWiringTest {
         assertTrue(assistant.contains("voice.progressPcm"))
         assertTrue(assistant.contains("voice.progressEncoder"))
         assertTrue(assistant.contains("val streamId = l.streamIds[interaction] ?: l.sessionOf[interaction]?.let"))
-        assertTrue(assistant.contains("if (!forcePhoneVoice && store.config.value.glassesVoice && !l.sessionTurn)"))
+        assertTrue(assistant.contains("if (!forcePhoneVoice && store.config.value.glassesVoice && !l.sessionTurn && store.config.value.speechLanguage.isEmpty())"))
     }
     @Test fun `settings disclose phone voice and provide off by default toggle`() {
         val root = File("../../app/src/main")

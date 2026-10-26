@@ -46,6 +46,7 @@ import com.macedonga.visor.core.assistant.AssistantPhase
 import com.macedonga.visor.core.assistant.ModelInfo
 import com.macedonga.visor.core.assistant.ModelsError
 import com.macedonga.visor.core.assistant.Provider
+import com.macedonga.visor.core.assistant.SPEECH_LANGUAGES
 import com.macedonga.visor.core.assistant.listModels
 import com.macedonga.visor.core.assistant.mcp.McpHub
 import com.macedonga.visor.core.design.Visor
@@ -193,6 +194,13 @@ fun AssistantSettingsScreen(open: (NavKey) -> Unit, model: AssistantViewModel = 
                         )
                     },
                     {
+                        ValueRow(
+                            stringResource(R.string.ai_speech_language),
+                            config.speechLanguage.takeIf { it.isNotEmpty() }?.let(::languageName) ?: stringResource(R.string.ai_speech_language_glasses),
+                            onClick = { sheet = "speech" },
+                        )
+                    },
+                    {
                         PillsRow(
                             stringResource(R.string.ai_spoken_progress),
                             listOf(false to stringResource(R.string.ai_spoken_progress_off), true to stringResource(R.string.ai_spoken_progress_on)),
@@ -203,6 +211,7 @@ fun AssistantSettingsScreen(open: (NavKey) -> Unit, model: AssistantViewModel = 
                     },
                     { VisorToggleRow(model.toggles.byId("vision")!!, sub = stringResource(R.string.ai_vision_sub)) },
                     if (claude) row { VisorToggleRow(model.toggles.byId("web")!!, sub = stringResource(R.string.ai_web_sub)) } else null,
+                    { VisorToggleRow(model.toggles.byId("quiet_actions")!!, sub = stringResource(R.string.ai_quiet_actions_sub)) },
                     {
                         PillsRow(
                             stringResource(R.string.ai_memory_window),
@@ -267,6 +276,24 @@ fun AssistantSettingsScreen(open: (NavKey) -> Unit, model: AssistantViewModel = 
             stringResource(R.string.ai_instructions), config.instructions, onSave = { text -> model.store.update { it.copy(instructions = text) } },
             onDismiss = { sheet = null }, sub = stringResource(R.string.ai_instructions_sub), singleLine = false,
         )
+        "speech" -> VisorSheet({ sheet = null }, full = true) {
+            SheetTitle(stringResource(R.string.ai_speech_language))
+            LazyColumn(Modifier.heightIn(max = 560.dp)) {
+                item {
+                    ModelRow(stringResource(R.string.ai_speech_language_glasses), null, config.speechLanguage.isEmpty()) {
+                        model.store.update { it.copy(speechLanguage = "") }
+                        sheet = null
+                    }
+                }
+                items(SPEECH_LANGUAGES.size) { i ->
+                    val tag = SPEECH_LANGUAGES[i]
+                    ModelRow(languageName(tag), null, config.speechLanguage == tag) {
+                        model.store.update { it.copy(speechLanguage = tag) }
+                        sheet = null
+                    }
+                }
+            }
+        }
         "model", "lines" -> {
             val lines = sheet == "lines"
             ModelSheet(
@@ -326,6 +353,10 @@ private fun ModelRow(name: String, id: String?, on: Boolean, onClick: () -> Unit
         if (on) Icon(VisorIcons.Check, null, Modifier.padding(start = 12.dp).size(22.dp), tint = Color.White)
     }
 }
+
+/** A language's own name: "Русский (Россия)". */
+private fun languageName(tag: String): String =
+    java.util.Locale.forLanguageTag(tag).let { l -> l.getDisplayName(l).replaceFirstChar { it.titlecase(l) } }
 
 private fun paste(context: Context): String? =
     context.getSystemService(ClipboardManager::class.java)?.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString()

@@ -88,7 +88,7 @@ class AssistantProgressOwnershipTest {
             @Suppress("UNCHECKED_CAST") val continuation = invocation.rawArguments.last() as kotlin.coroutines.Continuation<Reply>
             val model: suspend () -> Reply = { try { delay(70_000); Reply("late") } finally { canceled = true } }
             model.startCoroutineUninterceptedOrReturn(continuation)
-        }.`when`(f.brain).answer(anyString(), any<Locale>(), any<List<Exchange>>(), anyOrNull<ByteArray>(), anyString(), any<Audience>())
+        }.`when`(f.brain).answer(anyString(), any<Locale>(), any<List<Exchange>>(), anyOrNull<ByteArray>(), anyString(), any<Audience>(), anyBoolean())
         var utterance: ((String, Long, Long) -> Unit)? = null
         mockConstruction(GlassesEars::class.java) { _, context ->
             @Suppress("UNCHECKED_CAST")
@@ -108,17 +108,19 @@ class AssistantProgressOwnershipTest {
         }
     }
 
-    private fun nativeHandoff(simplified: Boolean, closeAfter: Int? = null, glasses: Boolean = true, text: String = "native final") = runTest {
+    private fun nativeHandoff(simplified: Boolean, closeAfter: Int? = null, glasses: Boolean = true, text: String = "native final", ends: Boolean = false, language: String = "") = runTest {
         clock.`when`<Long> { android.os.SystemClock.elapsedRealtime() }.thenAnswer { testScheduler.currentTime }
         val f = Fixture(this); f.associate()
-        f.config.value = f.config.value.copy(glassesVoice = glasses, vision = false)
+        f.config.value = f.config.value.copy(glassesVoice = glasses, vision = false, speechLanguage = language)
         put(f.link, "simplified", simplified)
         f.state<MutableMap<String, String>>("streamIds")["parent"] = "parent-stream"
         doAnswer { invocation ->
             @Suppress("UNCHECKED_CAST") val continuation = invocation.rawArguments.last() as kotlin.coroutines.Continuation<Reply>
-            val model: suspend () -> Reply = { delay(41_000); Reply(text) }
+            assertTrue("Ordinary progress turns must offer end_conversation", invocation.getArgument<Boolean>(6))
+            assertEquals(if (language.isEmpty()) "en" else language, invocation.getArgument<Locale>(1).language)
+            val model: suspend () -> Reply = { delay(41_000); Reply(text, ends = ends) }
             model.startCoroutineUninterceptedOrReturn(continuation)
-        }.`when`(f.brain).answer(anyString(), any<Locale>(), any<List<Exchange>>(), anyOrNull<ByteArray>(), anyString(), any<Audience>())
+        }.`when`(f.brain).answer(anyString(), any<Locale>(), any<List<Exchange>>(), anyOrNull<ByteArray>(), anyString(), any<Audience>(), anyBoolean())
         `when`(f.voice.progressPcm(anyString(), any<Locale>())).thenReturn(ShortArray(960))
         `when`(f.voice.progressEncoder()).thenReturn(object : ProgressEncoder {
             override fun push(pcm: ShortArray, end: Boolean) = listOf(OpusPacket(byteArrayOf(if (end) 9 else 0), 20_000))
@@ -134,15 +136,20 @@ class AssistantProgressOwnershipTest {
         }.`when`(f.mux).send(anyInt(), any<ByteArray>(), anyOrNull<Int>(), anyOrNull<Int>())
         f.answer()
         verify(f.voice, never()).speak(anyString(), any<Locale>())
-        verify(f.voice, times(if (glasses) 1 else 2)).progressPcm(anyString(), any<Locale>())
+        val native = glasses && language.isEmpty()
+        verify(f.voice, times(if (native) 1 else 2)).progressPcm(anyString(), any<Locale>())
+        verify(f.voice, atLeastOnce()).progressPcm(anyString(), org.mockito.kotlin.eq(Locale.forLanguageTag(if (language.isEmpty()) "en-US" else language)))
         val end = events.indexOf(MT_STREAM_END)
         assertTrue("stream ended", end >= 0)
         if (closeAfter != null) {
             assertFalse("no native completion after close", events.contains(EV_MWA_VOICE_INTERACTION_COMPLETE))
             assertEquals(closeAfter, events.last())
-        } else if (!glasses) {
-            assertFalse(events.contains(EV_MWA_VOICE_INTERACTION_COMPLETE))
-            assertEquals(listOf(EV_TTS_END_INFO, EV_KEEP_AIR_SESSION_ALIVE), events.drop(end + 1))
+        } else if (!native) {
+            assertTrue(events.contains(EV_MWA_VOICE_INTERACTION_COMPLETE))
+            assertEquals((if (simplified) emptyList() else listOf(EV_VOICE_ACTION_RESPONSE)) + listOf(EV_MWA_VOICE_INTERACTION_COMPLETE, EV_TTS_END_INFO, EV_KEEP_AIR_SESSION_ALIVE), events.drop(end + 1))
+            val completion = mockingDetails(f.mux).invocations.filter { it.method.name == "send" && it.arguments[2] == MT_NET_EVENT }
+                .map { parseNetEvent(it.arguments[1] as ByteArray) }.single { it.id == EV_MWA_VOICE_INTERACTION_COMPLETE }
+            assertArrayEquals(interactionComplete("child", text, expectsAnswer = !ends && text.endsWith("?"), followUp = !ends, streamed = true), completion.body)
         } else {
             assertEquals(listOf(EV_TTS_END_INFO, EV_START_OF_USER_SPEECH, EV_FINAL_TRANSCRIPTION, EV_ON_PHONE_UNDERSTANDING) +
                 (if (simplified) listOf(EV_VOICE_ACTION_RESPONSE, EV_MWA_VOICE_INTERACTION_COMPLETE) else listOf(EV_MWA_VOICE_INTERACTION_COMPLETE, EV_VOICE_ACTION_RESPONSE)) + EV_KEEP_AIR_SESSION_ALIVE,
@@ -151,7 +158,8 @@ class AssistantProgressOwnershipTest {
                 .map { parseNetEvent(it.arguments[1] as ByteArray) }.filter { it.id == EV_MWA_VOICE_INTERACTION_COMPLETE }
             assertTrue(String(completions.single().body).contains("child"))
             val fulfillment = Thrift.loads(completions.single().body)[4] as Map<*, *>
-            assertEquals(text.endsWith("?"), fulfillment[3])
+            assertEquals(!ends && text.endsWith("?"), fulfillment[3])
+            assertEquals(!ends, fulfillment[11])
         }
     }
     @Test fun `native handoff simplified preserves ordinary framing after audio end`() = nativeHandoff(true)
@@ -162,10 +170,37 @@ class AssistantProgressOwnershipTest {
     @Test fun `remote close at timing prevents native writes`() = nativeHandoff(false, EV_TTS_END_INFO)
     @Test fun `remote close during native preamble prevents completion`() = nativeHandoff(true, EV_START_OF_USER_SPEECH)
     @Test fun `saved phone voice keeps streamed final`() = nativeHandoff(true, glasses = false)
+    @Test fun `phone progress end conversation suppresses both followup flags`() = nativeHandoff(false, glasses = false, text = "Anything else?", ends = true)
+    @Test fun `native progress end conversation suppresses both followup flags`() = nativeHandoff(true, text = "Anything else?", ends = true)
+    @Test fun `speech override progress uses phone for final and selected language`() = nativeHandoff(false, language = "ru")
+
+    @Test fun `fast progress end conversation suppresses both followup flags`() = runTest {
+        val f = Fixture(this)
+        f.config.value = f.config.value.copy(glassesVoice = true, vision = false)
+        `when`(f.brain.answer(anyString(), any<Locale>(), any<List<Exchange>>(), anyOrNull<ByteArray>(), anyString(), any<Audience>(), anyBoolean())).thenReturn(Reply("Goodbye?", ends = true))
+        f.answer()
+        val completion = mockingDetails(f.mux).invocations.filter { it.method.name == "send" && it.arguments[2] == MT_NET_EVENT }
+            .map { parseNetEvent(it.arguments[1] as ByteArray) }.single { it.id == EV_MWA_VOICE_INTERACTION_COMPLETE }
+        val fulfillment = Thrift.loads(completion.body)[4] as Map<*, *>
+        assertEquals(false, fulfillment[3]); assertEquals(false, fulfillment[11])
+        verifyNoInteractions(f.voice)
+    }
+
+    @Test fun `fast progress quiet successful actions do not synthesize final speech`() = runTest {
+        val f = Fixture(this)
+        f.config.value = f.config.value.copy(quietAfterActions = true, vision = false)
+        val action = com.macedonga.visor.core.assistant.mcp.ToolAction("phone", "play", true)
+        `when`(f.brain.answer(anyString(), any<Locale>(), any<List<Exchange>>(), anyOrNull<ByteArray>(), anyString(), any<Audience>(), anyBoolean())).thenReturn(Reply("Playing.", actions = listOf(action)))
+        f.answer()
+        verifyNoInteractions(f.voice)
+        val completion = mockingDetails(f.mux).invocations.filter { it.method.name == "send" && it.arguments[2] == MT_NET_EVENT }
+            .map { parseNetEvent(it.arguments[1] as ByteArray) }.single { it.id == EV_MWA_VOICE_INTERACTION_COMPLETE }
+        assertArrayEquals(interactionComplete("child", "", expectsAnswer = false, followUp = false), completion.body)
+    }
     @Test fun `fast selected glasses voice never synthesizes phone audio`() = runTest {
         val f = Fixture(this)
         f.config.value = f.config.value.copy(glassesVoice = true, vision = false)
-        `when`(f.brain.answer(anyString(), any<Locale>(), any<List<Exchange>>(), anyOrNull<ByteArray>(), anyString(), any<Audience>())).thenReturn(Reply("fast"))
+        `when`(f.brain.answer(anyString(), any<Locale>(), any<List<Exchange>>(), anyOrNull<ByteArray>(), anyString(), any<Audience>(), anyBoolean())).thenReturn(Reply("fast"))
         f.answer()
         verifyNoInteractions(f.voice)
         val events = mockingDetails(f.mux).invocations.filter { it.method.name == "send" && it.arguments[2] == MT_NET_EVENT }
@@ -177,7 +212,7 @@ class AssistantProgressOwnershipTest {
     private fun preparationRevocation(change: Fixture.() -> Unit) = runTest {
         val f = Fixture(this); f.associate()
         f.prepare = { delay(100); f.change(); null }
-        `when`(f.brain.answer(anyString(), any<Locale>(), any<List<Exchange>>(), anyOrNull<ByteArray>(), anyString(), any<Audience>())).thenReturn(Reply("stale"))
+        `when`(f.brain.answer(anyString(), any<Locale>(), any<List<Exchange>>(), anyOrNull<ByteArray>(), anyString(), any<Audience>(), anyBoolean())).thenReturn(Reply("stale"))
         `when`(f.voice.speak(anyString(), any<Locale>())).thenReturn(emptyList())
         f.answer()
         verifyNoInteractions(f.brain)
@@ -193,7 +228,7 @@ class AssistantProgressOwnershipTest {
     @Test fun `turn begun off keeps baseline when enabled during preparation`() = runTest {
         val f = Fixture(this, enabled = false)
         f.prepare = { delay(100); f.generation.incrementAndGet(); f.config.value = f.config.value.copy(spokenProgress = true); null }
-        `when`(f.brain.answer(anyString(), any<Locale>(), any<List<Exchange>>(), anyOrNull<ByteArray>(), anyString(), any<Audience>())).thenReturn(Reply("baseline"))
+        `when`(f.brain.answer(anyString(), any<Locale>(), any<List<Exchange>>(), anyOrNull<ByteArray>(), anyString(), any<Audience>(), anyBoolean())).thenReturn(Reply("baseline"))
         `when`(f.voice.speak(anyString(), any<Locale>())).thenReturn(emptyList())
         f.answer()
         verify(f.voice).speak(anyString(), any<Locale>())
@@ -202,7 +237,7 @@ class AssistantProgressOwnershipTest {
 
     @Test fun `parent close during normal final synthesis prevents all writes`() = runTest {
         val f = Fixture(this); f.associate()
-        `when`(f.brain.answer(anyString(), any<Locale>(), any<List<Exchange>>(), anyOrNull<ByteArray>(), anyString(), any<Audience>())).thenReturn(Reply("ready"))
+        `when`(f.brain.answer(anyString(), any<Locale>(), any<List<Exchange>>(), anyOrNull<ByteArray>(), anyString(), any<Audience>(), anyBoolean())).thenReturn(Reply("ready"))
         var synthesisCanceled = false
         doAnswer { invocation ->
             @Suppress("UNCHECKED_CAST") val continuation = invocation.rawArguments.last() as kotlin.coroutines.Continuation<List<OpusPacket>>

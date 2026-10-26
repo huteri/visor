@@ -36,13 +36,22 @@ data class Exchange(val question: String, val answer: String, val actions: List<
 private fun Exchange.told(): String = if (actions.isEmpty()) answer else
     answer + " [Visor: " + actions.joinToString("; ") { "${it.server} · ${it.what}, " + if (it.ok) "done" else "failed" }.replace(']', ')') + "]"
 
-/** An answer, what the model chose to remember while giving it, and what it did with the person's tools. */
-data class Reply(val text: String, val remembered: List<String> = emptyList(), val actions: List<ToolAction> = emptyList())
+/**
+ * An answer, what the model chose to remember while giving it, and what it did with the person's tools. [ends]: the
+ * model ended the conversation, so the glasses should stop listening after the answer.
+ */
+data class Reply(
+    val text: String, val remembered: List<String> = emptyList(), val actions: List<ToolAction> = emptyList(), val ends: Boolean = false,
+)
 
-/** What one answer may use and what it did with it; [photo] is the glasses' JPEG that came with the question. */
-private class Turn(val box: Toolbox, val photo: ByteArray? = null) {
+/**
+ * What one answer may use and what it did with it; [photo] is the glasses' JPEG that came with the question, [canEnd]
+ * whether the model may end the conversation.
+ */
+private class Turn(val box: Toolbox, val photo: ByteArray? = null, val canEnd: Boolean = false) {
     val remembered = ArrayList<String>()
     val actions = ArrayList<ToolAction>()
+    var ends = false
 }
 
 /** What the assistant keeps about the wearer across conversations; the model adds and drops entries with its tools. */
@@ -52,8 +61,11 @@ interface MemoryBook {
     fun forget(id: String): Memory?
 }
 
-/** What an OpenAI-compatible server and model take: reasoning_effort none, max_completion_tokens for max_tokens. */
-data class Fields(val reasoningOff: Boolean, val completionTokens: Boolean)
+/**
+ * What an OpenAI-compatible server and model take: reasoning_effort none, max_completion_tokens for max_tokens. [thinks]:
+ * the model thinks anyway, and its answer needs room for that.
+ */
+data class Fields(val reasoningOff: Boolean, val completionTokens: Boolean, val thinks: Boolean = false)
 
 /** Where [Fields] are kept, by address and model, until either changes. */
 interface FieldBook {
@@ -74,7 +86,10 @@ class Brain(
 ) {
     private val phoneTools = phone?.let(::PhoneTools)
 
-    /** The answer to [question] after [past], with [image] (a JPEG) when the glasses sent one. Throws on any failure. */
+    /**
+     * The answer to [question] after [past], with [image] (a JPEG) when the glasses sent one; [canEnd] offers the
+     * end_conversation tool. Throws on any failure.
+     */
     suspend fun answer(
         question: String,
         locale: Locale,
@@ -82,22 +97,24 @@ class Brain(
         image: ByteArray? = null,
         note: String = "",
         audience: Audience = Audience.GLASSES,
+        canEnd: Boolean = false,
     ): Reply = withContext(Dispatchers.IO) {
         val conversation = coroutineContext[ConversationContext]
-        if (conversation != null) conversation.serialized { answerTurn(question, locale, past, image, note, audience) }
-        else answerTurn(question, locale, past, image, note, audience)
+        if (conversation != null) conversation.serialized { answerTurn(question, locale, past, image, note, audience, canEnd) }
+        else answerTurn(question, locale, past, image, note, audience, canEnd)
     }
 
-    private suspend fun answerTurn(question: String, locale: Locale, past: List<Exchange>, image: ByteArray?, note: String, audience: Audience): Reply {
+    private suspend fun answerTurn(question: String, locale: Locale, past: List<Exchange>, image: ByteArray?, note: String, audience: Audience, canEnd: Boolean): Reply {
         val c = config()
         check(c.apiKey.isNotBlank() || c.provider == Provider.OPENAI_COMPATIBLE) { "no API key is set" }
         // The tools never stand in the way of an answer: without them the model still answers.
-        val turn = Turn(hub?.let { runCatching { it.toolbox() }.getOrNull() } ?: Toolbox(emptyList(), ""), image)
+        val turn = Turn(hub?.let { runCatching { it.toolbox() }.getOrNull() } ?: Toolbox(emptyList(), ""), image, canEnd)
         val system = (if (audience == Audience.PHONE) PHONE_PROMPT else SYSTEM_PROMPT) +
             " It is ${ZonedDateTime.now().format(DateTimeFormatter.ofPattern("EEEE d MMMM yyyy, HH:mm", Locale.ENGLISH))}." +
             (if (audience == Audience.GLASSES) " The glasses are set to ${locale.getDisplayLanguage(Locale.ENGLISH)}." else "") +
             memoryPrompt() +
             phoneTools?.prompt.orEmpty() +
+            (if (canEnd) END_PROMPT else "") +
             turn.box.prompt +
             (if (image != null && turn.box.tools.isNotEmpty()) PHOTO_PROMPT else "") +
             (if (note.isNotBlank()) " $note" else "") +
@@ -109,7 +126,7 @@ class Brain(
             Provider.OPENAI_COMPATIBLE -> openAi(c, c.model, system, past, question, image, tokens, turn)
         }.replace(VISOR_NOTE, "").trim()
         check(text.isNotEmpty()) { "the model gave an empty answer" }
-        return Reply(text, turn.remembered, turn.actions)
+        return Reply(text, turn.remembered, turn.actions, turn.ends)
     }
 
     /** One sentence for the wearer, in [locale]'s language, written from [what]; outside the conversation. */
@@ -155,6 +172,10 @@ class Brain(
     /** A tool run for the model: remember or forget, or one of the person's servers'. What it is told back. */
     private suspend fun runTool(name: String, input: JSONObject, turn: Turn): ToolResult {
         coroutineContext.ensureActive()
+        if (turn.canEnd && name == END_TOOL) {
+            turn.ends = true
+            return ToolResult("the glasses stop listening after your answer", false)
+        }
         val book = book
         if (book != null && name == "remember") {
             val fact = input.optString("fact").trim()
@@ -209,6 +230,7 @@ class Brain(
             tools.put(JSONObject().put("name", "remember").put("description", REMEMBER_HELP).put("input_schema", schema("fact", FACT_HELP)))
             tools.put(JSONObject().put("name", "forget").put("description", FORGET_HELP).put("input_schema", schema("id", "The fact's id.")))
         }
+        if (turn?.canEnd == true) tools.put(JSONObject().put("name", END_TOOL).put("description", END_HELP).put("input_schema", NO_INPUT))
         if (turn != null) phoneTools?.tools?.forEach { (name, help, input) -> tools.put(JSONObject().put("name", name).put("description", help).put("input_schema", input)) }
         turn?.box?.tools?.forEach { t -> tools.put(JSONObject().put("name", t.name).put("description", t.help()).put("input_schema", t.tool.schema)) }
         var said = ""
@@ -280,6 +302,7 @@ class Brain(
                 put(function("remember", REMEMBER_HELP, schema("fact", FACT_HELP)))
                 put(function("forget", FORGET_HELP, schema("id", "The fact's id.")))
             }
+            if (turn?.canEnd == true) put(function(END_TOOL, END_HELP, NO_INPUT))
             if (turn != null) phoneTools?.tools?.forEach { (name, help, input) -> put(function(name, help, input)) }
             // Some servers behind this API refuse a schema that names its own dialect.
             turn?.box?.tools?.forEach { t -> put(function(t.name, t.help(), JSONObject(t.tool.schema.toString()).apply { remove("\$schema") })) }
@@ -334,7 +357,14 @@ class Brain(
         var f = known ?: Fields(reasoningOff = true, completionTokens = "api.openai.com" in url)
         while (true) {
             try {
-                return post(url, headers, shaped(body, f)).also { if (f != known) fields?.keep(key, f) }
+                val answer = post(url, headers, shaped(body, f))
+                // A model that cannot stop thinking (Gemini's Pro models) spends a spoken answer's tokens on it.
+                if (known == null && !f.reasoningOff && !f.thinks && thoughtOnly(answer) &&
+                    !headers.containsKey("X-Hermes-Session-Id") && coroutineContext[SessionCapture]?.known() != true) {
+                    f = f.copy(thinks = true)
+                    continue
+                }
+                return answer.also { if (f != known) fields?.keep(key, f) }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: IllegalStateException) {
@@ -343,7 +373,9 @@ class Brain(
                 coroutineContext[ConversationContext]?.validate()
                 val why = error.message.orEmpty()
                 f = when {
-                    known == null && f.reasoningOff && "reasoning" in why -> f.copy(reasoningOff = false)
+                    error is ModelResponse.ThinkingBudgetExhausted && known == null && !f.reasoningOff && !f.thinks -> f.copy(thinks = true)
+                    // Not every server names the field: Google's answer is "Request contains an invalid argument" (#46).
+                    known == null && f.reasoningOff && ("reasoning" in why || "answered 400:" in why) -> f.copy(reasoningOff = false)
                     known == null && !f.completionTokens && "max_completion_tokens" in why -> f.copy(completionTokens = true)
                     else -> throw error
                 }
@@ -351,8 +383,16 @@ class Brain(
         }
     }
 
+    private fun thoughtOnly(answer: JSONObject): Boolean {
+        val choice = answer.optJSONArray("choices")?.optJSONObject(0) ?: return false
+        val message = choice.optJSONObject("message") ?: return false
+        val text = message.optString("content").takeUnless { message.isNull("content") }.orEmpty().replace(THINKING, "")
+        return choice.optString("finish_reason") == "length" && text.isBlank() && message.optJSONArray("tool_calls") == null
+    }
+
     private fun shaped(body: JSONObject, f: Fields) = JSONObject(body.toString()).apply {
         if (f.reasoningOff) put("reasoning_effort", "none")
+        if (f.thinks) put("max_tokens", getInt("max_tokens") + THINKING_TOKENS)
         if (f.completionTokens) put("max_completion_tokens", remove("max_tokens"))
     }
 
@@ -503,6 +543,13 @@ class Brain(
         const val REMEMBER_HELP = "Keep a lasting fact about the wearer for later conversations."
         const val FORGET_HELP = "Drop a fact you remember that is wrong or outdated, or that the wearer asks you to forget."
         const val FACT_HELP = "One short sentence addressed to the wearer, in their language, e.g. \"Your sister is called Giulia.\""
+        const val END_TOOL = "end_conversation"
+        const val END_HELP = "After each answer the glasses keep listening for another question. Call this when the wearer is " +
+            "done: they say no, that's all, thanks, stop or goodbye, or they turn down what you offered. The glasses then " +
+            "stop listening after this answer. Still answer, in a few words."
+        val NO_INPUT: JSONObject get() = JSONObject().put("type", "object").put("properties", JSONObject())
+        const val END_PROMPT = " After each answer the glasses keep listening. When the wearer thanks you, says goodbye, " +
+            "says they need nothing more or turns down what you offered, call end_conversation and answer in a few words."
 
         fun schema(field: String, help: String): JSONObject = JSONObject().put("type", "object")
             .put("properties", JSONObject().put(field, JSONObject().put("type", "string").put("description", help)))

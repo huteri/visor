@@ -142,10 +142,13 @@ class BrainStreamingTest {
     }
 
     @Test fun keepsToolsRefusalRetry() = runBlocking {
-        serve({ _, number -> if (number == 1) 400 to """{"error":{"message":"tools unsupported"}}""" else 200 to complete("Hello") }, Book()) { brain, requests ->
+        serve({ body, _ -> if (body.has("tools")) 400 to """{"error":{"message":"tools unsupported"}}""" else 200 to complete("Hello") }, Book()) { brain, requests ->
             assertEquals("Hello", brain.answer("Hi", Locale.ENGLISH).text)
             assertTrue(requests[0].has("tools"))
-            assertFalse(requests[1].has("tools"))
+            // Upstream probes generic 400s by removing reasoning first, then retries without tools.
+            assertFalse(requests[1].has("reasoning_effort"))
+            assertEquals(3, requests.size)
+            assertFalse(requests[2].has("tools"))
             assertTrue(requests.all { it.getBoolean("stream") })
         }
     }

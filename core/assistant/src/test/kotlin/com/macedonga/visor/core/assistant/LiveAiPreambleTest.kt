@@ -32,7 +32,7 @@ class LiveAiPreambleTest {
             // Optional per-delivery flag defaults false on ordinary calls.
             val supplied = args.toMutableList()
             while (supplied.size < method.parameterCount - 1) {
-                supplied.add(if (method.parameterTypes[supplied.size] == Boolean::class.javaPrimitiveType) false else ({}))
+                supplied.add(if (method.parameterTypes[supplied.size] == Boolean::class.javaPrimitiveType) supplied.size == 4 else ({}))
             }
             method.invoke(target, *supplied.toTypedArray(), continuation)
         }
@@ -278,7 +278,7 @@ class LiveAiPreambleTest {
             assertEquals(0, writes[2].type)
             assertArrayEquals(ThriftWriter().str(1, sub).bool(2, false).str(3, REPLY_INTENT).bool(4, false).done(), writes[2].event.body)
             assertArrayEquals(varm(sub, "Question", "Native reply.", onGlasses = true, voiceId = "voice-id"), writes.single { it.event.id == EV_VOICE_ACTION_RESPONSE }.event.body)
-            assertArrayEquals(interactionComplete(sub, "Native reply.", expectsAnswer = false), writes.single { it.event.id == EV_MWA_VOICE_INTERACTION_COMPLETE }.event.body)
+            assertArrayEquals(interactionComplete(sub, "Native reply.", expectsAnswer = false, followUp = true), writes.single { it.event.id == EV_MWA_VOICE_INTERACTION_COMPLETE }.event.body)
             assertTrue(writes.drop(3).all { it.type == MT_NET_EVENT })
             assertEquals("Ordering must not mutate effective forwarding state", simplified, linkClass.getDeclaredField("simplified").apply { isAccessible = true }.get(link))
         } finally { eventScope.cancel(); job.cancel(); decoder.close(); directory.deleteRecursively() }

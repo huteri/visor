@@ -20,6 +20,11 @@ data class AssistantConfig(
     val vision: Boolean = true,
     // Answers in the glasses' own voice, the one that reads notifications; off, the phone's voice streamed to them.
     val glassesVoice: Boolean = true,
+    // No spoken answer when every tool the model used did what was asked, such as music that now plays (#48).
+    val quietAfterActions: Boolean = false,
+    // The language the wearer speaks, as a BCP 47 tag, when the glasses have no pack for it; empty, the glasses' own.
+    // The phone then hears every question, the model answers in it, and the phone's voice speaks.
+    val speechLanguage: String = "",
     // Opt-in phone speech for progress; final uses saved voice (native handoff experimental).
     val spokenProgress: Boolean = false,
     val instructions: String = "",
@@ -27,6 +32,12 @@ data class AssistantConfig(
     val memoryMinutes: Int = 10,
     // How long the glasses wait for an answer before they give up, written to them on connect.
     val answerWaitSeconds: Int = 45,
+)
+
+/** Languages the wearer can speak that the glasses have no pack for, heard and spoken by the phone (issue #38). */
+val SPEECH_LANGUAGES = listOf(
+    "ru-RU", "uk-UA", "pl-PL", "cs-CZ", "ro-RO", "hu-HU", "el-GR", "sv-SE", "da-DK", "nb-NO", "fi-FI",
+    "he-IL", "ar-SA", "vi-VN", "id-ID", "th-TH",
 )
 
 /** The waits offered: 20 is the glasses' own; their watchdog ends a turn still processing at 60. */
@@ -41,12 +52,12 @@ class AssistantConfigStore(context: Context) : FieldBook {
 
     override fun fields(key: String): Fields? = runCatching {
         JSONObject(prefs.getString(FIELDS, null) ?: return null).optJSONObject(key)
-            ?.let { Fields(it.getBoolean("reasoning_off"), it.getBoolean("completion_tokens")) }
+            ?.let { Fields(it.getBoolean("reasoning_off"), it.getBoolean("completion_tokens"), it.optBoolean("thinks")) }
     }.getOrNull()
 
     override fun keep(key: String, fields: Fields) {
         val all = runCatching { JSONObject(prefs.getString(FIELDS, null) ?: "{}") }.getOrDefault(JSONObject())
-        all.put(key, JSONObject().put("reasoning_off", fields.reasoningOff).put("completion_tokens", fields.completionTokens))
+        all.put(key, JSONObject().put("reasoning_off", fields.reasoningOff).put("completion_tokens", fields.completionTokens).put("thinks", fields.thinks))
         prefs.edit().putString(FIELDS, all.toString()).apply()
     }
 
@@ -69,6 +80,8 @@ class AssistantConfigStore(context: Context) : FieldBook {
             .putBoolean("web_search", next.webSearch)
             .putBoolean("vision", next.vision)
             .putBoolean("glasses_voice", next.glassesVoice)
+            .putBoolean("quiet_after_actions", next.quietAfterActions)
+            .putString("speech_language", next.speechLanguage)
             .putBoolean("spoken_progress", next.spokenProgress)
             .putString("instructions", next.instructions)
             .putInt("memory_minutes", next.memoryMinutes)
@@ -90,6 +103,8 @@ class AssistantConfigStore(context: Context) : FieldBook {
             webSearch = prefs.getBoolean("web_search", d.webSearch),
             vision = prefs.getBoolean("vision", d.vision),
             glassesVoice = prefs.getBoolean("glasses_voice", d.glassesVoice),
+            quietAfterActions = prefs.getBoolean("quiet_after_actions", d.quietAfterActions),
+            speechLanguage = prefs.getString("speech_language", d.speechLanguage).orEmpty(),
             spokenProgress = prefs.getBoolean("spoken_progress", d.spokenProgress),
             instructions = prefs.getString("instructions", d.instructions).orEmpty(),
             memoryMinutes = prefs.getInt("memory_minutes", d.memoryMinutes),

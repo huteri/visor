@@ -6,6 +6,8 @@ import org.json.JSONObject
 
 /** Rebuild the non-streaming response consumed by Brain's tool loops. */
 internal object ModelResponse {
+    class ThinkingBudgetExhausted : IllegalStateException("the model stream failed: finish_reason=length (thinking only)")
+
     fun read(reader: Reader, claude: Boolean, checkCancelled: () -> Unit = {}): JSONObject {
         val input = java.io.PushbackReader(reader.buffered(), 1)
         var first: Int
@@ -81,13 +83,19 @@ internal object ModelResponse {
             }
             if (!choice.isNull("finish_reason")) {
                 finish = choice.getString("finish_reason")
-                check(finish == "stop" || finish == "tool_calls") {
+                check(finish == "stop" || finish == "tool_calls" || finish == "length") {
                     "the model stream failed: finish_reason=$finish"
                 }
             }
             false
         }
         check(done && finish.isNotEmpty()) { "the model stream ended before completion" }
+        if (finish == "length") {
+            if (message.getString("content").isBlank() && message.optString("reasoning_content").isNotBlank() && calls.isEmpty()) {
+                throw ThinkingBudgetExhausted()
+            }
+            error("the model stream failed: finish_reason=length")
+        }
         for (call in calls.values) {
             check(call.optString("id").isNotBlank() && call.getJSONObject("function").optString("name").isNotBlank()) {
                 "the model stream ended with an incomplete tool call"
