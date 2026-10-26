@@ -12,8 +12,8 @@ android {
     defaultConfig {
         applicationId = "com.macedonga.visor"
         // A release build takes both from its tag (.github/workflows/release.yml).
-        versionCode = providers.environmentVariable("VISOR_VERSION_CODE").orNull?.toInt() ?: 10322
-        versionName = providers.environmentVariable("VISOR_VERSION_NAME").orNull ?: "1.3.22-camerarecovery.1"
+        versionCode = providers.environmentVariable("VISOR_VERSION_CODE").orNull?.toInt() ?: 10407
+        versionName = providers.environmentVariable("VISOR_VERSION_NAME").orNull ?: "1.4.7-context.1"
     }
 
     // The release key comes from the environment: the CI's secrets, or a shell that exports the same names.
