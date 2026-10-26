@@ -373,6 +373,7 @@ class Brain(
                 coroutineContext[ConversationContext]?.validate()
                 val why = error.message.orEmpty()
                 f = when {
+                    error is ModelResponse.ThinkingBudgetExhausted && known == null && !f.reasoningOff && !f.thinks -> f.copy(thinks = true)
                     // Not every server names the field: Google's answer is "Request contains an invalid argument" (#46).
                     known == null && f.reasoningOff && ("reasoning" in why || "answered 400:" in why) -> f.copy(reasoningOff = false)
                     known == null && !f.completionTokens && "max_completion_tokens" in why -> f.copy(completionTokens = true)

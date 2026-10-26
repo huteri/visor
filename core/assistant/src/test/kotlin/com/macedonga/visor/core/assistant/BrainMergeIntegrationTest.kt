@@ -46,8 +46,9 @@ class BrainMergeIntegrationTest {
 
     @Test fun genericReasoning400StillAllowsThinkingBudgetProbe() = thinkingProbe(false)
     @Test fun acceptedHermesThinkingResponseCannotReplayPost() = thinkingProbe(true)
+    @Test fun partialLengthResponseCannotRetryOrReturnAnswer() = thinkingProbe(false, partial = true)
 
-    private fun thinkingProbe(session: Boolean) = runBlocking {
+    private fun thinkingProbe(session: Boolean, partial: Boolean = false) = runBlocking {
         val host = UUID.randomUUID().toString()
         val requests = mutableListOf<JSONObject>()
         val dir = Files.createTempDirectory("thinking-session").toFile()
@@ -68,8 +69,12 @@ class BrainMergeIntegrationTest {
             override fun getErrorStream() = """{"error":{"message":"Request contains an invalid argument"}}""".byteInputStream()
             override fun getInputStream() = (when (url.path) {
                 "/capabilities" -> if (session) """{"features":{"session_continuity_header":"X-Hermes-Session-Id"}}""" else "{}"
-                else -> if (requests.size == 2) """{"choices":[{"message":{"content":""},"finish_reason":"length"}]}"""
-                    else """{"choices":[{"message":{"content":"Answer."},"finish_reason":"stop"}]}"""
+                else -> if (requests.size == 2) {
+                    "data: " + JSONObject().put("choices", org.json.JSONArray().put(JSONObject()
+                        .put("index", 0).put("delta", JSONObject().put("reasoning_content", "Thinking")
+                            .put("content", if (partial) "Partial answer" else ""))
+                        .put("finish_reason", "length"))) + "\n\ndata: [DONE]\n\n"
+                } else "data: {\"choices\":[{\"delta\":{\"content\":\"Answer.\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
             }).byteInputStream()
         } }
         try {
@@ -77,9 +82,11 @@ class BrainMergeIntegrationTest {
             val result = runCatching { withContext(ConversationContext(Diary(dir), "c")) { Brain({ config }).answer("Question", Locale.ENGLISH) } }
             assertTrue(requests.first().has("reasoning_effort"))
             assertFalse(requests[1].has("reasoning_effort"))
-            if (session) {
-                assertEquals("Accepted session requests must never be silently replayed", 2, requests.size)
+            assertTrue(requests.all { it.getBoolean("stream") })
+            if (session || partial) {
+                assertEquals("Accepted sessions and partial answers must never be silently replayed", 2, requests.size)
                 assertTrue(result.isFailure)
+                if (partial) assertTrue(result.exceptionOrNull()?.message.orEmpty().contains("finish_reason=length"))
             } else {
                 assertEquals("Answer.", result.getOrThrow().text)
                 assertEquals(3, requests.size)
