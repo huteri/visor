@@ -22,6 +22,11 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.runInterruptible
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -57,7 +62,10 @@ import kotlinx.coroutines.withContext
 private val FILE_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd-HHmmss")
 
 @HiltViewModel
-class EventLogViewModel @Inject constructor(val log: EventLog, val media: MediaImport) : ViewModel()
+class EventLogViewModel @Inject constructor(
+    val log: EventLog,
+    val media: MediaImport,
+) : ViewModel()
 
 /** The log as one card of lines, opened at the end: what matters is what just happened. */
 @Composable
@@ -66,6 +74,8 @@ fun EventLogScreen(model: EventLogViewModel = hiltViewModel()) {
     val lines by model.log.lines.collectAsStateWithLifecycle()
     val list = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    var capturingLogcat by remember { mutableStateOf(false) }
+    var logcatFailed by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { if (lines.isNotEmpty()) list.scrollToItem(lines.size + 1) }
     val create = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
         if (uri != null) scope.launch {
@@ -84,6 +94,29 @@ fun EventLogScreen(model: EventLogViewModel = hiltViewModel()) {
             RoundIcon(VisorIcons.Trash, stringResource(R.string.event_log_clear), model.log::clear)
         },
     ) {
+        item(key = "app-logcat") {
+            Column(Modifier.padding(horizontal = 32.dp, vertical = 16.dp)) {
+                Footnote(stringResource(R.string.event_log_logcat_disclosure))
+                ActionPill(
+                    stringResource(if (capturingLogcat) R.string.event_log_logcat_capturing else R.string.event_log_share_logcat),
+                    onClick = {
+                        if (!capturingLogcat) {
+                            capturingLogcat = true
+                            logcatFailed = false
+                            scope.launch {
+                                try { shareAppLogcat(context) }
+                                catch (cancelled: CancellationException) { throw cancelled }
+                                catch (_: Exception) { logcatFailed = true }
+                                finally { capturingLogcat = false }
+                            }
+                        }
+                    },
+                    quiet = true,
+                    enabled = !capturingLogcat,
+                )
+                if (logcatFailed) Footnote(stringResource(R.string.event_log_logcat_failed))
+            }
+        }
         if (lines.isEmpty()) item(key = "empty") { Footnote(stringResource(R.string.event_log_empty)) }
         itemsIndexed(lines, key = { i, _ -> i }) { i, line ->
             val shape = when {
@@ -153,4 +186,39 @@ private fun share(context: Context, text: String) {
 /** The log into the file the save window made. */
 private suspend fun save(context: Context, uri: Uri, text: String) = withContext(Dispatchers.IO) {
     checkNotNull(context.contentResolver.openOutputStream(uri)) { "the file could not be opened" }.use { it.write(report(context, text).toByteArray()) }
+}
+
+/** Separate opt-in export. Never append event-log text or Meta login trace. */
+private suspend fun shareAppLogcat(context: Context) {
+    var file: File? = null
+    var shared = false
+    try {
+        runInterruptible(Dispatchers.IO) {
+            val text = AppLogcat.capture(android.os.Process.myUid())
+            val directory = File(context.cacheDir, "app-logcat").apply { check(mkdirs() || isDirectory) }
+            // A new URI for each report: an old grant must never expose a later capture.
+            directory.listFiles()?.forEach { old ->
+                context.revokeUriPermission(FileProvider.getUriForFile(context, context.packageName + ".files", old), Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                check(old.delete())
+            }
+            file = File.createTempFile("visor-logcat-", ".txt", directory)
+            file!!.writeText(
+                "Visor ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})\n" +
+                    "Captured ${java.time.Instant.now()}\n" +
+                    "Command: ${AppLogcat.command(android.os.Process.myUid()).joinToString(" ")}\n" +
+                    "App-accessible logs only; previous crash may be unavailable. May contain sensitive app messages.\n\n" + text
+            )
+        }
+        val uri = FileProvider.getUriForFile(context, context.packageName + ".files", checkNotNull(file))
+        val intent = Intent(Intent.ACTION_SEND)
+            .setType("text/plain")
+            .putExtra(Intent.EXTRA_SUBJECT, "Visor app logcat")
+            .putExtra(Intent.EXTRA_STREAM, uri)
+            .apply { clipData = android.content.ClipData.newRawUri("Visor app logcat", uri) }
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        context.startActivity(Intent.createChooser(intent, null))
+        shared = true
+    } finally {
+        if (!shared) file?.delete()
+    }
 }

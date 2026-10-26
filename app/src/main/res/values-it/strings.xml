@@ -928,6 +928,10 @@
     <string name="hct_retry">Riprova</string>
     <string name="phone_directions">Indicazioni per %1$s</string>
     <string name="phone_play">Riproduci %1$s</string>
+    <string name="ai_spoken_progress">Avanzamento vocale (sperimentale)</string>
+    <string name="ai_spoken_progress_off">No</string>
+    <string name="ai_spoken_progress_on">Sì</string>
+    <string name="ai_spoken_progress_sub">Per risposte ordinarie lente, ripete l’avanzamento con la sintesi vocale del telefono ogni 40 secondi durante l’attesa; la risposta finale usa la voce scelta. Il passaggio alla voce degli occhiali è sperimentale; la voce del telefono mantiene lo streaming audio. Risposte rapide e scelta salvata restano invariate. Esclusi Live AI e modalità sessione. Limite di 300 secondi; gli occhiali potrebbero chiudere prima.</string>
     <string name="live_settings_glasses_host">Wi-Fi creato dagli occhiali</string>
     <string name="live_problem_vpn">Una VPN tiene Visor fuori dalla rete degli occhiali. Escludi Visor dalla VPN.</string>
     <string name="live_drops">Lo streaming si interrompe spesso</string>

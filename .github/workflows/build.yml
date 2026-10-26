@@ -1,5 +1,5 @@
-# Builds the debug APK on every push to main and every pull request.
-# There are no test suites: the glasses are the test. This only proves that the app still builds.
+# Runs the streaming parser tests and builds a release preview APK on main pushes and pull requests.
+# Protocol and playback behavior still require real-glasses verification.
 name: Build
 
 on:
@@ -12,13 +12,33 @@ permissions:
   contents: read
 
 concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: true
+  group: build-${{ github.event_name == 'push' && github.sha || github.ref }}
+  # Main merges must all finish; GitHub concurrency keeps only one pending run.
+  cancel-in-progress: false
 
 jobs:
+  merged-pr-draft:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'huteri/visor'
+    permissions:
+      contents: write
+      pull-requests: read
+    uses: ./.github/workflows/release.yml
+    with:
+      automatic: true
+    secrets: inherit
+
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      TRUSTED: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      VISOR_VERSION_NAME: 1.3.7-ci${{ github.run_number }}
+      # Preview-only fixed metadata, NOT merged release versions. Cannot update
+      # distributed 10308+; merged drafts allocate monotonic versions separately.
+      VISOR_VERSION_CODE: 10307
+    outputs:
+      apk-url: ${{ steps.apk.outputs.artifact-url }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -29,18 +49,120 @@ jobs:
 
       - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
         with:
-          packages: platform-tools platforms;android-37.0
+          packages: platform-tools platforms;android-37.0 build-tools;37.0.0
           log-accepted-android-sdk-licenses: false
 
       - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
-      - name: Build the debug APK
-        run: ./gradlew :app:assembleDebug
+      - name: Test streaming responses and source-scope regression
+        run: |
+          python3 -m unittest discover -s scripts/tests -v
+          ./gradlew :core:assistant:testDebugUnitTest :app:testDebugUnitTest
+
+      - name: Restore trusted release signing identity
+        if: env.TRUSTED == 'true'
+        env:
+          VISOR_KEYSTORE_BASE64: ${{ secrets.VISOR_KEYSTORE_BASE64 }}
+          VISOR_KEYSTORE_PASSWORD: ${{ secrets.VISOR_KEYSTORE_PASSWORD }}
+          VISOR_KEY_ALIAS: ${{ secrets.VISOR_KEY_ALIAS }}
+          VISOR_META_HW_TOKEN: ${{ secrets.VISOR_META_HW_TOKEN }}
+          VISOR_META_AR_TOKEN: ${{ secrets.VISOR_META_AR_TOKEN }}
+          VISOR_META_FRL_TOKEN: ${{ secrets.VISOR_META_FRL_TOKEN }}
+        run: |
+          for name in VISOR_KEYSTORE_BASE64 VISOR_KEYSTORE_PASSWORD VISOR_KEY_ALIAS VISOR_META_HW_TOKEN VISOR_META_AR_TOKEN VISOR_META_FRL_TOKEN; do
+            if [ -z "${!name}" ]; then
+              echo "error: required secret $name is not set" >&2
+              exit 1
+            fi
+          done
+          umask 077
+          printf '%s' "$VISOR_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/visor-release.p12"
+
+      - name: Build trusted signed release APK
+        if: env.TRUSTED == 'true'
+        env:
+          VISOR_KEYSTORE: ${{ runner.temp }}/visor-release.p12
+          VISOR_KEYSTORE_PASSWORD: ${{ secrets.VISOR_KEYSTORE_PASSWORD }}
+          VISOR_KEY_ALIAS: ${{ secrets.VISOR_KEY_ALIAS }}
+          VISOR_META_HW_TOKEN: ${{ secrets.VISOR_META_HW_TOKEN }}
+          VISOR_META_AR_TOKEN: ${{ secrets.VISOR_META_AR_TOKEN }}
+          VISOR_META_FRL_TOKEN: ${{ secrets.VISOR_META_FRL_TOKEN }}
+        run: ./gradlew :app:assembleRelease
+
+      - name: Build fork unsigned release APK (no signing or Meta secrets)
+        if: env.TRUSTED != 'true'
+        run: ./gradlew :app:assembleRelease
+
+      - name: Verify trusted APK certificate matches release key
+        if: env.TRUSTED == 'true'
+        env:
+          VISOR_KEYSTORE_PASSWORD: ${{ secrets.VISOR_KEYSTORE_PASSWORD }}
+          VISOR_KEY_ALIAS: ${{ secrets.VISOR_KEY_ALIAS }}
+        run: |
+          apk=app/build/outputs/apk/release/app-release.apk
+          "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --print-certs "$apk" > "$RUNNER_TEMP/visor-apk-certs.txt"
+          keytool -exportcert -keystore "$RUNNER_TEMP/visor-release.p12" -storetype PKCS12 -storepass:env VISOR_KEYSTORE_PASSWORD -alias "$VISOR_KEY_ALIAS" -file "$RUNNER_TEMP/visor-release-cert.der"
+          expected=$(sha256sum "$RUNNER_TEMP/visor-release-cert.der" | cut -d ' ' -f 1)
+          actual=$(sed -n 's/.*certificate SHA-256 digest: //p' "$RUNNER_TEMP/visor-apk-certs.txt")
+          test "$actual" = "$expected"
+
+      - name: Name release preview artifact
+        run: |
+          mkdir -p dist
+          if [ "$TRUSTED" = true ]; then
+            cp app/build/outputs/apk/release/app-release.apk dist/visor-release-preview.apk
+          else
+            echo "Fork PR: unsigned APK; Meta constants absent. Not installable until signed."
+            cp app/build/outputs/apk/release/app-release-unsigned.apk dist/visor-release-preview-unsigned.apk
+          fi
+
+      - name: Remove release key and certificate files
+        if: always()
+        run: rm -f "$RUNNER_TEMP/visor-release.p12" "$RUNNER_TEMP/visor-release-cert.der" "$RUNNER_TEMP/visor-apk-certs.txt"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: apk
         with:
-          name: visor-debug-${{ github.sha }}
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: dist/*.apk
+          archive: false
+          if-no-files-found: error
           retention-days: 14
+
+  comment:
+    needs: build
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Update PR APK download
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_NUMBER: ${{ github.run_number }}
+          APK_URL: ${{ needs.build.outputs.apk-url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python - <<'PY'
+          import json, os, subprocess
+          marker = '<!-- visor-debug-apk -->'
+          repo, number = os.environ['GH_REPO'], os.environ['PR_NUMBER']
+          body = (f"{marker}\n## Signed release preview APK\n\n[Download visor-release-preview.apk]({os.environ['APK_URL']}) — raw APK, no ZIP.\n\n"
+                  f"PR head: `{os.environ['HEAD_SHA']}`. [Build]({os.environ['RUN_URL']}).\n\n"
+                  "Package: `com.macedonga.visor`; app: **Visor**. Signed with the existing fork release key; "
+                  "includes required Meta application constants. Version `1.3.7-ci" + os.environ['RUN_NUMBER'] + "`, code `10307` "
+                  "is preview-only; cannot update distributed 10308+ or automatic merged-PR drafts. "
+                  "Do not uninstall the working release. Hardware unverified. "
+                  "Download requires GitHub sign-in and expires after 14 days. No public release published. "
+                  "After merge and successful main Build, a separate signed draft release gets a higher version code.")
+          pages = json.loads(subprocess.check_output(['gh', 'api', '--paginate', '--slurp', f'repos/{repo}/issues/{number}/comments'], text=True))
+          previous = next((c for page in pages for c in page if c['user']['login'] == 'github-actions[bot]' and marker in c['body']), None)
+          endpoint = f"repos/{repo}/issues/comments/{previous['id']}" if previous else f'repos/{repo}/issues/{number}/comments'
+          subprocess.run(['gh', 'api', '--method', 'PATCH' if previous else 'POST', endpoint, '--input', '-'],
+                         input=json.dumps({'body': body}), text=True, check=True)
+          PY

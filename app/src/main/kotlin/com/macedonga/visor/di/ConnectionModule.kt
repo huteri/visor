@@ -209,6 +209,11 @@ object ConnectionModule {
         hearing,
         { (glassesConfig.state.value.values[com.macedonga.visor.language.PROCESSING_TIMEOUT] as? Number)?.toLong() },
         phone,
+        liveAiSettingChanges = settings.state.map { Unit },
+        liveAiVoiceOnly = {
+            val link = connection.state.value
+            settings.state.value.liveAiVoiceOnly(link.generation, link.link == com.macedonga.visor.core.session.LinkState.READY)
+        },
     )
 
     @Provides

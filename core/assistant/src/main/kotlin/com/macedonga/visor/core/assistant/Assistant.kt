@@ -1,6 +1,7 @@
 package com.macedonga.visor.core.assistant
 
 import android.content.Context
+import kotlinx.coroutines.withContext
 import com.macedonga.visor.core.assistant.mcp.ToolAction
 import com.macedonga.visor.core.connection.GlassesConnection
 import com.macedonga.visor.core.connection.GlassesLink
@@ -30,6 +31,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -106,6 +108,9 @@ class Assistant(
     private val processingTimeoutS: () -> Long? = { null },
     /** The phone's player, for pausing, resuming and skipping by voice. */
     private val phone: Phone? = null,
+    /** Effective device setting, null until a successful settings read. */
+    private val liveAiVoiceOnly: () -> Boolean? = { null },
+    liveAiSettingChanges: Flow<Unit> = emptyFlow(),
 ) : Responder {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -143,7 +148,8 @@ class Assistant(
      * A NetEvent onto the session, at [type]. As the Meta app sends them: over 1 KB, to glasses of assistant protocol 1
      * or later, as a segmented message, a header (1002) {1 type, 2 size, 3 id} then pieces (1003) {1 bytes, 2 id, 3 last}.
      */
-    private suspend fun sendNetEvent(l: Link, m0: Int, event: ByteArray, type: Int = MT_NET_EVENT) {
+    private suspend fun sendNetEvent(l: Link, m0: Int, event: ByteArray, type: Int = MT_NET_EVENT, validate: () -> Unit = {}) {
+        validate()
         if (event.size <= SEGMENT_BYTES || l.protocol == 0) return l.mux.send(m0, event, messageType = type)
         val id = UUID.randomUUID().toString().encodeToByteArray()
         l.mux.send(m0, Wire.fieldVarint(1, MT_NET_EVENT.toLong()) + Wire.fieldVarint(2, event.size.toLong()) + Wire.fieldBytes(3, id), messageType = MT_SEGMENTED_HEADER)
@@ -151,6 +157,7 @@ class Assistant(
         while (at < event.size) {
             val end = minOf(event.size, at + SEGMENT_BYTES)
             val piece = Wire.fieldBytes(1, event.copyOfRange(at, end)) + Wire.fieldBytes(2, id) + Wire.fieldVarint(3, if (end == event.size) 1 else 0)
+            validate()
             l.mux.send(m0, piece, messageType = MT_SEGMENTED_BUFFER)
             at = end
         }
@@ -166,6 +173,13 @@ class Assistant(
         override suspend fun answer(subInteraction: String, question: String) {
             link?.let { liveAnswer(it, subInteraction, question) }
         }
+
+        override suspend fun stopSession(session: String) {
+            // Reuse existing SessionEnd encoder; no new Live AI/native-TTS packet schema.
+            if (!wakeWord.end(session)) say("Live AI: device session stop could not be sent")
+        }
+
+        override val voiceOnly: Boolean? get() = liveAiVoiceOnly?.invoke()
 
         override fun cameraOn() {
             camera?.on()
@@ -198,7 +212,9 @@ class Assistant(
     private fun listen(l: Link, interaction: String) {
         ears?.stop()
         val ended = CompletableDeferred<Unit>().also { micEnded = it }
+        if (l.listening != null && l.listening != interaction) progressTurn.incrementAndGet()
         l.listening = interaction
+        val recognition = l.fallback.listen(interaction)
         if (interaction.isEmpty() || !store.config.value.enabled) return
         say("Listening to the microphone for $interaction")
         ears = GlassesEars(
@@ -208,7 +224,7 @@ class Assistant(
                 if (store.config.value.speechLanguage.isNotEmpty()) l.heard.getOrPut(interaction) { CompletableDeferred() }.complete(text)
                 scope.launch {
                     delay(OWN_RECOGNITION_GRACE_MS)
-                    if (interaction in l.closed) return@launch
+                    if (interaction in l.closed || !l.fallback.allowed(recognition)) return@launch
                     when {
                         // The question itself, which the glasses recognised and sent as ev57.
                         interaction in l.taken && !l.answered.contains(interaction) -> Unit
@@ -217,7 +233,9 @@ class Assistant(
                             val sub = java.util.UUID.randomUUID().toString()
                             say("Heard \"$text\" myself: a follow-up, answered as $sub")
                             l.mux.send(checkNotNull(l.m0), netEvent(EV_START_OF_USER_SPEECH, ThriftWriter().str(1, sub).i64(2, startMs).done()), messageType = MT_NET_EVENT)
+                            if (!l.fallback.allowed(recognition)) return@launch
                             l.taken.add(sub)
+                            l.sessionOf[sub] = interaction
                             answer(l, sub, text, Visual(null, "", "", false, ""))
                         }
                         // Nothing came from the glasses: the whole question was left to the server. Their own
@@ -226,7 +244,7 @@ class Assistant(
                             if (WAKE_WORD_ONLY.matches(text.trim())) return@launch
                             withTimeoutOrNull(MIC_END_WAIT_MS) { ended.await() }
                             delay(QUESTION_GRACE_MS)
-                            if (interaction in l.taken || interaction in l.closed) return@launch
+                            if (interaction in l.taken || interaction in l.closed || !l.fallback.allowed(recognition)) return@launch
                             l.taken.add(interaction)
                             l.fresh.add(interaction)
                             say("Heard \"$text\" myself: the glasses left this question to the server")
@@ -259,10 +277,12 @@ class Assistant(
         // The interaction the microphone is open for, and each request's session when the two differ.
         @Volatile var listening: String? = null
         val sessionOf = java.util.concurrent.ConcurrentHashMap<String, String>()
+        val fallback = MicrophoneFallback()
         @Volatile var m0: Int? = null
         @Volatile var s0: Int? = null
         // The assistant protocol version from their init answer; 0 takes no segmented messages.
         @Volatile var protocol = 0
+        @Volatile var registration: Job? = null
         val m0Answered = CompletableDeferred<Unit>()
         val s0Answered = CompletableDeferred<Unit>()
         // The stream id the glasses allocate per interaction, from their own 5002.
@@ -315,6 +335,7 @@ class Assistant(
     private var awaitingReply: AwaitingReply? = null
 
     init {
+        scope.launch { liveAiSettingChanges.collect { liveAi.refreshCameraSetting() } }
         // The assistant's photo comes over airship, in a namespace the media import refuses.
         airship.extra = object : ExtraFiles {
             override fun wants(namespace: String, size: Long): Boolean {
@@ -342,32 +363,26 @@ class Assistant(
                 connection.state.map { it.link == LinkState.READY }.distinctUntilChanged(),
                 store.config.map { it.enabled }.distinctUntilChanged(),
             ) { ready, enabled -> ready to enabled }.collectLatest { (ready, enabled) ->
-                link = null
+                val owner = link
+                // Bluetooth may pause while the owned assistant runs over Live Wi-Fi.
+                if (!enabled || !ready && owner?.mux !== liveMux) revokeLiveLink(owner, "assistant disabled or transport lost")
+                if (enabled && owner != null && owner.mux === liveMux) return@collectLatest
                 _phase.value = when {
                     !enabled -> AssistantPhase.OFF
                     !ready -> AssistantPhase.WAITING
                     else -> AssistantPhase.REGISTERING
                 }
-                if (ready && enabled) connection.submit { mux -> scope.launch { bringUp(mux) } }
+                if (ready && enabled) {
+                    val generation = store.generation.get()
+                    connection.submit { mux -> scope.launch {
+                        if (store.config.value.enabled && store.generation.get() == generation && link == null) bringUp(mux)
+                    } }
+                }
             }
         }
         scope.launch { camera?.frames?.collect { if (it) liveAi.onFirstFrame() } }
         // A language switch restarts the glasses' assistant, which closes our channels: register again once it settles.
-        scope.launch {
-            var again: Job? = null
-            connection.warnings.collect { warning ->
-                val channel = CHANNEL_CLOSED.find(warning)?.groupValues?.get(1)?.toIntOrNull(16) ?: return@collect
-                val l = link ?: return@collect
-                if (channel != (l.m0 ?: -1) and 0x7FFF && channel != (l.s0 ?: -1) and 0x7FFF) return@collect
-                again?.cancel()
-                again = scope.launch {
-                    delay(REGISTER_AGAIN_MS)
-                    if (link !== l || connection.state.value.link != LinkState.READY) return@launch
-                    say("The glasses' assistant closed our channels; registering again")
-                    connection.submit { mux -> scope.launch { bringUp(mux) } }
-                }
-            }
-        }
+        watchProtocolErrors(connection.protocolErrors)
         // At launch: the speech model for the glasses' language, as last heard.
         Locale.forLanguageTag(speechPrefs.getString("language", null) ?: "en-US").let {
             lastSpeech = speechTag(it)
@@ -392,12 +407,40 @@ class Assistant(
         // While the Live runs over Wi-Fi the Bluetooth session is paused; the assistant registers on the Wi-Fi one.
         scope.launch {
             liveSession.collectLatest { mux ->
+                val previous = liveMux
+                liveMux = mux
+                if (previous != null && previous !== mux) {
+                    link?.takeIf { it.mux === previous }?.let { revokeLiveLink(it, "Live transport lost") }
+                }
                 if (mux != null && store.config.value.enabled) {
                     say("Moving the assistant onto the Live view's Wi-Fi session")
                     bringUp(mux)
                 }
             }
         }
+    }
+
+    /** Shared production event boundary for owned assistant channel failures. */
+    internal fun watchProtocolErrors(errors: Flow<com.macedonga.visor.core.session.ProtocolError>): Job = scope.launch {
+            var again: Job? = null
+            errors.collect { error ->
+                val channel = CHANNEL_CLOSED.find(error.detail)?.groupValues?.get(1)?.toIntOrNull(16) ?: return@collect
+                val l = link ?: return@collect
+                if (error.origin !== l.mux) return@collect
+                if (channel != (l.m0 ?: -1) and 0x7FFF && channel != (l.s0 ?: -1) and 0x7FFF) return@collect
+                progressTurn.incrementAndGet() // Channel closure revokes queued audio immediately.
+                revokeLiveLink(l, "assistant channel closed")
+                again?.cancel()
+                again = scope.launch {
+                    delay(REGISTER_AGAIN_MS)
+                    if (link != null || !store.config.value.enabled || connection.state.value.link != LinkState.READY) return@launch
+                    say("The glasses' assistant closed our channels; registering again")
+                    val generation = store.generation.get()
+                    connection.submit { mux -> scope.launch {
+                        if (mux === l.mux && link == null && store.config.value.enabled && store.generation.get() == generation) bringUp(mux)
+                    } }
+                }
+            }
     }
 
     private fun say(text: String) {
@@ -407,19 +450,44 @@ class Assistant(
     // --- bring-up ------------------------------------------------------------
 
     /** Register m0 and s0, declare the companion's resources, announce a session. */
-    private suspend fun bringUp(mux: DataXConnection) {
+    /** Synchronous generation/job revocation; stale callbacks cannot end a replacement link. */
+    private fun revokeLiveLink(owner: Link?, why: String) {
+        if (owner == null || link !== owner) return
+        link = null
+        owner.registration?.cancel()
+        liveAi.end(why)
+    }
+
+    @Volatile private var liveMux: DataXConnection? = null
+
+    private suspend fun bringUp(mux: DataXConnection): Unit = kotlinx.coroutines.coroutineScope {
+        if (!store.config.value.enabled) return@coroutineScope
+        revokeLiveLink(link, "assistant transport replaced")
         val l = Link(mux)
+        val generation = store.generation.get()
+        val registrationContext = kotlin.coroutines.coroutineContext
+        l.registration = registrationContext[Job]
         link = l
+        fun validate() {
+            registrationContext.ensureActive()
+            if (link !== l || !store.config.value.enabled || store.generation.get() != generation) {
+                throw kotlinx.coroutines.CancellationException("Assistant registration revoked")
+            }
+        }
         try {
             val client = UUID.randomUUID().toString()
             val session = "${System.currentTimeMillis()}-${UUID.randomUUID()}"
             fun registration(endpoint: String) = Wire.fieldBytes(1, session.toByteArray()) +
                 Wire.fieldBytes(2, client.toByteArray()) + Wire.fieldBytes(3, endpoint.toByteArray()) + Wire.fieldVarint(4, 2)
 
+            validate()
             val m0 = mux.openChannel(SVC_ASSISTANT).also { l.m0 = it }
+            validate()
             mux.send(m0, registration("$client-m0"), messageType = MT_INIT_MESSAGE_REQUEST, serviceId = SVC_ASSISTANT)
             withTimeoutOrNull(4_000) { l.m0Answered.await() } ?: say("The glasses did not answer the assistant's message registration")
+            validate()
             val s0 = mux.openChannel(SVC_ASSISTANT).also { l.s0 = it }
+            validate()
             mux.send(s0, registration("$client-s0"), messageType = MT_INIT_STREAM_REQUEST, serviceId = SVC_ASSISTANT)
             withTimeoutOrNull(4_000) { l.s0Answered.await() } ?: say("The glasses did not answer the assistant's stream registration")
 
@@ -435,22 +503,27 @@ class Assistant(
                 MT_AIR_RESOURCES_AVAILABLE to id(),
             )
             for ((type, payload) in resources) {
+                validate()
                 mux.send(m0, payload, messageType = type)
                 delay(30)
             }
-            announceSession(mux, m0)
-            if (link === l) _phase.value = AssistantPhase.LISTENING
+            validate()
+            announceSession(mux, m0, ::validate)
+            validate()
+            _phase.value = AssistantPhase.LISTENING
             say("Registered as the glasses' assistant (protocol ${l.protocol}): \"Hey Meta\" now comes to Visor")
-        } catch (cancelled: kotlinx.coroutines.CancellationException) {
-            // The session went away while registering, such as a Wi-Fi one ending: not a failure.
-            throw cancelled
+        } catch (error: kotlinx.coroutines.CancellationException) {
+            revokeLiveLink(l, "assistant registration revoked")
+            throw error
         } catch (error: Exception) {
             if (link === l) say("Could not register as the assistant: ${error.message}")
+        } finally {
+            l.registration = null
         }
     }
 
     /** Four events that tell the glasses a working assistant backend is behind this client. */
-    private suspend fun announceSession(mux: DataXConnection, m0: Int) {
+    private suspend fun announceSession(mux: DataXConnection, m0: Int, validate: () -> Unit) {
         val sid = UUID.randomUUID().toString()
         val sessionString = "${System.currentTimeMillis()}-${UUID.randomUUID()}"
         val open = ThriftWriter().str(1, sid).bool(2, true).bool(3, false)
@@ -460,6 +533,7 @@ class Assistant(
         val stepB = ThriftWriter().str(1, sid).bool(2, true).bool(3, false).i32(4, 2).done()
         val close = ThriftWriter().str(1, sid).i32(2, 1).i32(3, 0).done()
         for ((event, body) in listOf(EV_MWA_INTERACTION_CREATION_SUCCESS to open, EV_SERVER_CONNECTION_STATUS to stepA, EV_SERVER_CONNECTION_STATUS to stepB, EV_LIVE_AI_CLIENT_RECEIVED_FIRST_FRAME to close)) {
+            validate()
             mux.send(m0, netEvent(event, body), messageType = MT_NET_EVENT)
             delay(20)
         }
@@ -494,6 +568,7 @@ class Assistant(
                 }
             }
             MT_STREAM_HEADER -> {
+                if (liveAi.active) liveAi.onMicHeader()
                 val header = Wire.parse(payload)
                 val stream = header.bytes(1).decodeToString()
                 val interaction = header.bytes(2).decodeToString()
@@ -501,10 +576,10 @@ class Assistant(
                     l.streamIds[interaction] = stream
                     l.latestStream = stream
                 }
-                if (liveAi.active) liveAi.onMicHeader(hex(payload)) else listen(l, interaction)
+                if (!liveAi.active) listen(l, interaction)
             }
             // The microphone: Live AI's, or one turn's, which the server may have to recognise itself.
-            MT_STREAM_AUDIO, 0 -> if (liveAi.active) liveAi.onMic(payload) else ears?.hear(payload)
+            MT_STREAM_AUDIO, 0 -> if (liveAi.active) liveAi.onMic(payload, type, message.info.channelId, message.info.flags.hasExtension) else ears?.hear(payload)
             MT_STREAM_END -> {
                 micEnded?.complete(Unit)
                 ears?.finish()
@@ -512,27 +587,30 @@ class Assistant(
             MT_STREAM_STATUS -> streamStatus(payload.decodeToString())
             // A custom wake word sample, recorded on the glasses for an enrolment.
             CustomWakeWord.MT_ENROLLMENT_HEADER, CustomWakeWord.MT_STREAMER_DATA, CustomWakeWord.MT_STREAMER_END -> wakeWord.onStream(type, payload)
-            MT_ENVELOPE -> envelope(l, payload)
+            MT_ENVELOPE -> envelope(l, payload, message.info.channelId)
             // Some glasses send the same messages bare, without the envelope.
-            MT_NET_EVENT, MT_START_INTERACTION, MT_SEGMENTED_HEADER, MT_SEGMENTED_BUFFER -> inner(l, type, payload)
+            MT_NET_EVENT, MT_START_INTERACTION, MT_SEGMENTED_HEADER, MT_SEGMENTED_BUFFER ->
+                inner(l, type, payload, message.info.channelId)
             // Init answers, time stretch, TTS buffer config, MMAI enabled, assistant ready, stream consumed.
             1028, 1033, 1036, 1037, 6001 -> Unit
             else -> say("Assistant: message type $type, ${payload.size} bytes ${hex(payload)}")
         }
     }
 
-    private suspend fun envelope(l: Link, payload: ByteArray) {
+    private suspend fun envelope(l: Link, payload: ByteArray, channel: Int) {
         val m0 = l.m0 ?: return
         val env = Wire.parse(payload)
         // Unacked, the glasses resend the same envelope for minutes.
         if (env.has(1)) l.mux.send(m0, Wire.fieldVarint(1, env.varint(1)), messageType = MT_ENVELOPE_ACK)
-        inner(l, env.varint(2).toInt(), env.bytes(3))
+        inner(l, env.varint(2).toInt(), env.bytes(3), channel)
     }
 
     /** A start of interaction or a NetEvent, from an envelope or sent bare. */
-    private suspend fun inner(l: Link, type: Int, blob: ByteArray) {
+    private suspend fun inner(l: Link, type: Int, blob: ByteArray, channel: Int) {
+        // Bare frames use the same initialized-control-channel gate as enveloped frames.
         val m0 = l.m0 ?: return
         if (type == MT_START_INTERACTION) {
+            progressTurn.incrementAndGet() // New interaction revokes previous delayed audio.
             val fields = runCatching { Thrift.loads(blob) }.getOrDefault(emptyMap())
             // Use case 3 is LIVE_AI_INTERACTION; after a switch to LIVE_AI the next interaction is the session's.
             if (fields[5] == 3L || liveAi.phase.value == LiveAiPhase.STARTING) liveAi.onStartInteraction(fields, spoken(l))
@@ -543,7 +621,9 @@ class Assistant(
             }
             return
         }
-        if (type == MT_SEGMENTED_HEADER || type == MT_SEGMENTED_BUFFER) return segment(l, type, blob)
+        if (type == MT_SEGMENTED_HEADER || type == MT_SEGMENTED_BUFFER) {
+            return segment(l, type, blob, channel)
+        }
         if (type != MT_NET_EVENT) {
             say("Assistant: an envelope carrying type $type, ${blob.size} bytes ${hex(blob)}")
             return
@@ -587,7 +667,9 @@ class Assistant(
             }
             EV_MWA_VOICE_INTERACTION_CLOSE_REQUEST -> closed(l, event.body)
             EV_FULFILLMENT_REQUEST -> fulfillmentRequest(l, event.body)
-            EV_MMAI_INTERACTION_REQUEST -> mmaiRequest(l, event.body)
+            EV_MMAI_INTERACTION_REQUEST -> {
+                if (!mmaiRequest(l, event.body)) unsupportedVisualRequest(l, event.body)
+            }
             EV_DEVICE_VOICE_STATE -> voiceState(event.body)
             EV_REMOTE_IMAGE_CAPTURE_RESPONSE -> {
                 pending?.answered = true
@@ -613,7 +695,7 @@ class Assistant(
     }
 
     /** 1002 opens a segmented message, 1003 carries its pieces; the whole one goes on as its own type. */
-    private suspend fun segment(l: Link, type: Int, blob: ByteArray) {
+    private suspend fun segment(l: Link, type: Int, blob: ByteArray, channel: Int) {
         val f = Wire.parse(blob)
         val id = f.bytes(if (type == MT_SEGMENTED_HEADER) 3 else 2).decodeToString()
         if (type == MT_SEGMENTED_HEADER) {
@@ -625,7 +707,7 @@ class Assistant(
         if (f.varint(3) == 0L) return
         l.segments.remove(id)
         if (bytes.size() != size) return say("Assistant: segmented message $id came to ${bytes.size()} bytes of $size")
-        inner(l, kind, bytes.toByteArray())
+        inner(l, kind, bytes.toByteArray(), channel)
     }
 
     /**
@@ -633,8 +715,9 @@ class Assistant(
      * the photo for a visual question. ocrResult is base64 of a gzipped struct: {1 lines, each {1 box, 2 word indices},
      * 2 words, each {2 text}}, lines top to bottom.
      */
-    private fun mmaiRequest(l: Link, body: ByteArray) {
-        val f = runCatching { Thrift.loads(body) }.getOrNull() ?: return say("Assistant: an unreadable MmaiInteractionRequest")
+    private fun mmaiRequest(l: Link, body: ByteArray): Boolean {
+        val f = runCatching { Thrift.loads(body) }.getOrNull() ?: return false
+        if (f[2].asText().isBlank()) return false
         val interaction = f[1].asText()
         val text = runCatching {
             val ocr = Thrift.loads(java.util.zip.GZIPInputStream(java.util.Base64.getDecoder().decode(f[2].asText()).inputStream()).readBytes())
@@ -642,9 +725,10 @@ class Assistant(
             (ocr[1] as? List<*>).orEmpty().map { line ->
                 (line.asStruct()[2] as? List<*>).orEmpty().mapNotNull { words.getOrNull((it as? Long)?.toInt() ?: -1) }.joinToString(" ")
             }.filter { it.isNotBlank() }.joinToString("\n")
-        }.getOrElse { return say("Assistant: unreadable OCR from the glasses (${it.message})") }
+        }.getOrElse { say("Assistant: unreadable OCR from the glasses (${it.message})"); return false }
         say("The glasses read ${text.lines().size} lines of text in the photo")
         l.ocrOf(interaction).complete(text)
+        return true
     }
 
     /** ev339 echoed straight back as ev333, field for field. */
@@ -665,6 +749,21 @@ class Assistant(
         say("Glasses: \"$words\"")
     }
 
+    private fun unsupportedVisualRequest(l: Link, body: ByteArray) {
+        val problem = context.getString(R.string.visual_request_unsupported)
+        val interaction = MmaiVisualRequest.interactionId(body)
+        // Unsupported metadata must not become a synthetic question through Again.
+        // An unknown ev65 UUID cannot safely be assigned to the current microphone.
+        if (interaction != null) {
+            l.taken.add(interaction)
+            if (l.fallback.suppress(interaction)) {
+                l.listening?.let { l.taken.add(it) }
+                ears?.stop()
+            }
+        }
+        say(problem)
+    }
+
     private fun fulfillmentRequest(l: Link, body: ByteArray) {
         if (l.m0 == null || l.s0 == null) return say("A question came before the assistant channels were up; dropped")
         val m = runCatching { Thrift.loads(body) }.getOrNull() ?: return say("An unreadable question, ${body.size} bytes ${hex(body)}")
@@ -675,6 +774,7 @@ class Assistant(
         // In a session the request has its own id; the microphone's is the session's, and it is the same turn.
         l.listening?.takeIf { it != interaction }?.let {
             l.sessionOf[interaction] = it
+            l.fallback.associate(interaction, it)
             l.taken.add(it)
         }
         m[8].asText().takeIf { it.length > 8 && !l.streamIds.containsKey(interaction) }?.let { l.streamIds[interaction] = it }
@@ -797,16 +897,39 @@ class Assistant(
 
     // --- answering -----------------------------------------------------------
 
+    private val progressTurn = java.util.concurrent.atomic.AtomicLong()
+
     private suspend fun answer(l: Link, interaction: String, transcript: String, visual: Visual) {
+        val turn = progressTurn.incrementAndGet()
+        val startedMono = android.os.SystemClock.elapsedRealtime()
+        // Bind opt-in ownership before image/OCR suspension. A revoked opt-in turn must never
+        // fall through to baseline when settings change while its input is being prepared.
+        val configGeneration = store.generation.get()
+        val config = store.config.value
+        val voiceId = glassesVoice()
+        val session = l.sessionOf[interaction]
+        val progressOwned: (() -> Boolean)? = if (SpokenProgressPolicy.eligible(config, liveAi.active, l.sessionTurn)) {
+            { link === l && progressTurn.get() == turn && store.generation.get() == configGeneration && store.config.value == config &&
+                glassesVoice() == voiceId && interaction !in l.closed && (session == null || session !in l.closed) &&
+                !liveAi.active && !l.sessionTurn && connection.state.value.link == LinkState.READY }
+        } else null
+        fun preparationRevoked(): Boolean {
+            if (progressOwned == null || progressOwned()) return false
+            update(interaction) { it.copy(problem = "Spoken progress turn stopped: ownership lost during preparation; limit ${SPOKEN_PROGRESS_TURN_MS / 1000} s") }
+            if (link === l) _phase.value = AssistantPhase.LISTENING
+            return true
+        }
         val started = System.currentTimeMillis()
         record(TurnRecord(interaction, started, transcript))
         _phase.value = AssistantPhase.THINKING
         var problem = ""
         // During the Live every question comes with the picture: the wearer is showing it.
         val live = if (store.config.value.vision) runCatching { liveFrame() }.getOrNull()?.let { toModelJpeg(it) } else null
+        if (preparationRevoked()) return
         if (live != null) say("Answering with the Live view's picture")
         val visualQuestion = live != null || (store.config.value.vision && (visual.glassesCaptured || visual.glassesWantImage || soundsVisual(transcript)))
         val image = live ?: if (visualQuestion) photo(l, interaction, visual) else null
+        if (preparationRevoked()) return
         if (image != null) {
             val file = File(photos, "$interaction.jpg")
             runCatching {
@@ -822,12 +945,17 @@ class Assistant(
                 .takeIf { visualQuestion && image == null && read.isNullOrBlank() },
             read?.takeIf { it.isNotBlank() }?.let { "The glasses' OCR read this text in what the wearer sees, line by line, with errors: ${it.take(MAX_OCR)}" },
         ).joinToString(" ")
+        if (preparationRevoked()) return
+        if (progressOwned != null) {
+            answerWithProgress(l, interaction, transcript, image, note, startedMono, config, progressOwned)
+            return
+        }
         val waiting = scope.launch { holdOn(l) }
         val reply = try {
             // The glasses give up after their processing timeout; speech and streaming need the last seconds of it.
             val budget = (processingTimeoutS() ?: FACTORY_PROCESSING_S) * 1000 - DELIVERY_MS
             val left = (budget - (System.currentTimeMillis() - started)).coerceAtLeast(MIN_MODEL_MS)
-            withTimeout(left) { brain.answer(transcript, spoken(l), pastOf(interaction), image, note, canEnd = true) }
+            withTimeout(left) { inConversation(interaction) { brain.answer(transcript, spoken(l), pastOf(interaction), image, note, canEnd = true) } }
         } catch (error: Exception) {
             problem = error.message ?: error::class.simpleName.orEmpty()
             Reply(fallback(spoken(l), store.config.value.apiKey.isBlank() && store.config.value.provider == Provider.CLAUDE))
@@ -863,25 +991,150 @@ class Assistant(
         }
     }
 
+    private suspend fun answerWithProgress(
+        l: Link, interaction: String, transcript: String, image: ByteArray?, note: String,
+        started: Long, config: AssistantConfig, owned: () -> Boolean,
+    ) {
+        val streamId = l.streamIds[interaction] ?: l.sessionOf[interaction]?.let { l.streamIds[it] }
+        val session = l.sessionOf[interaction]
+        val nativeFinal = config.glassesVoice && !l.sessionTurn && config.speechLanguage.isEmpty()
+        val m0 = checkNotNull(l.m0)
+        val s0 = checkNotNull(l.s0)
+        suspend fun send(channel: Int, bytes: ByteArray, type: Int? = null) {
+            val sending = kotlinx.coroutines.currentCoroutineContext()
+            sending.ensureActive()
+            check(owned()) { "Spoken progress: turn ownership lost" }
+            if (type == MT_NET_EVENT || type == 0) sendNetEvent(l, channel, bytes, type) {
+                sending.ensureActive()
+                check(owned()) { "Spoken progress: segmented event ownership lost" }
+            } else if (type == null) l.mux.send(channel, bytes) else l.mux.send(channel, bytes, messageType = type)
+        }
+        var first = true
+        var streamOpened = false
+        var mono = 0L
+        var reply = Reply("")
+        val waiting = scope.launch {
+            try { holdOn(l) { check(owned()) { "Spoken progress: keepalive ownership lost" } } }
+            catch (_: Exception) { /* Turn controller owns the visible cancellation result. */ }
+        }
+        val sink = object : ProgressSink {
+            override suspend fun open() {
+                check(!streamId.isNullOrEmpty()) { "Spoken progress: no interaction-owned stream id" }
+                // Same proven preamble, but each write validates this turn's ownership.
+                val events = listOf(
+                    Triple(MT_NET_EVENT, EV_START_OF_USER_SPEECH, ThriftWriter().str(1, interaction).done()),
+                    Triple(0, EV_FINAL_TRANSCRIPTION, ThriftWriter().str(1, transcript).i32(2, 0).str(4, "").bool(7, false).str(8, interaction).done()),
+                    Triple(0, EV_ON_PHONE_UNDERSTANDING, ThriftWriter().str(1, interaction).bool(2, false).str(3, REPLY_INTENT).bool(4, false).done()),
+                )
+                for ((type, event, body) in events) { send(m0, netEvent(event, body), type); delay(20) }
+                mono = android.os.SystemClock.elapsedRealtime()
+                send(m0, netEvent(EV_TTS_START_INFO, ThriftWriter().i64(1, System.currentTimeMillis()).i64(2, mono).str(3, interaction).done()), MT_NET_EVENT)
+                delay(20)
+                val header = Wire.fieldBytes(1, streamId.toByteArray()) + Wire.fieldBytes(2, interaction.toByteArray()) +
+                    Wire.fieldVarint(4, 1) + Wire.fieldVarint(7, 1) + Wire.fieldVarint(19, 1)
+                send(s0, header, MT_STREAM_HEADER)
+                streamOpened = true
+                _phase.value = AssistantPhase.SPEAKING
+            }
+            override suspend fun audio(packet: OpusPacket) {
+                val frame = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(packet.data.size).array() + packet.data
+                send(s0, frame, if (first) MT_STREAM_AUDIO else null)
+                if (first && l.simplified) {
+                    send(m0, netEvent(EV_VOICE_ACTION_RESPONSE, varm(interaction, transcript, "")), MT_NET_EVENT)
+                    waiting.cancel()
+                }
+                first = false
+            }
+            override suspend fun finish(text: String) {
+                if (nativeFinal) {
+                    say("Spoken progress: native handoff begin (experimental)")
+                    waiting.cancel()
+                }
+                send(s0, ByteArray(0), MT_STREAM_END)
+                if (!nativeFinal && !l.simplified) send(m0, netEvent(EV_VOICE_ACTION_RESPONSE, varm(interaction, transcript, text)), MT_NET_EVENT)
+                if (!nativeFinal) send(m0, netEvent(EV_MWA_VOICE_INTERACTION_COMPLETE, interactionComplete(
+                    interaction, text, expectsAnswer = !reply.ends && ASKS.containsMatchIn(text),
+                    followUp = !reply.ends && text.isNotEmpty(), streamed = true,
+                )), MT_NET_EVENT)
+                send(m0, netEvent(EV_TTS_END_INFO, ThriftWriter().i64(1, System.currentTimeMillis()).i64(2, mono).i64(3, 7000).str(4, interaction).done()), MT_NET_EVENT)
+                if (!nativeFinal) send(m0, netEvent(EV_KEEP_AIR_SESSION_ALIVE, ThriftWriter().str(1, "VoiceActionResponseMessage").i32(2, (mono and 0xFFFF).toInt()).i32(3, 1).done()), MT_NET_EVENT)
+            }
+        }
+        try {
+            val result = SpokenProgress(
+                nowMs = { android.os.SystemClock.elapsedRealtime() }, owned = owned,
+                synthesize = { voice.progressPcm(it, spoken(l)) }, encoder = { voice.progressEncoder() }, sink = sink, note = ::say,
+                canStream = !streamId.isNullOrEmpty(),
+                nativeFinal = if (nativeFinal) { text ->
+                    val context = kotlinx.coroutines.currentCoroutineContext()
+                    speakOnGlasses(l, interaction, transcript, text, listen = !reply.ends) {
+                        context.ensureActive() // Check cancellation and ownership before every native wire write.
+                        check(owned()) { "Spoken progress: native final ownership lost" }
+                    }
+                    say("Spoken progress: native completion sent (not playback confirmation)")
+                } else null,
+                normalFinal = { text ->
+                    val validate = { check(owned()) { "Spoken progress: final ownership lost" } }
+                    if (text.isEmpty()) { speakOnGlasses(l, interaction, transcript, "", listen = false, validate = validate); 0L }
+                    else deliver(l, interaction, transcript, text, listen = !reply.ends, validate = validate)
+                },
+            ).run(started, minOf(config.answerWaitSeconds.toLong(), processingTimeoutS() ?: config.answerWaitSeconds.toLong()), progressPhrase(spoken(l))) {
+                reply = try { inConversation(interaction, ProgressNetworkBudget()) { brain.answer(transcript, spoken(l), pastOf(interaction), image, note, canEnd = true) } }
+                catch (cancel: kotlinx.coroutines.CancellationException) { throw cancel }
+                catch (error: Exception) {
+                    say("Spoken progress: model failed: ${error.message}")
+                    Reply(fallback(spoken(l), config.apiKey.isBlank() && config.provider == Provider.CLAUDE))
+                }
+                if (config.quietAfterActions && reply.actions.isNotEmpty() && reply.actions.all { it.ok } && !ASKS.containsMatchIn(reply.text)) "" else reply.text
+            }
+            check(owned()) { "Spoken progress: ownership lost before final" }
+            val sent = result.durationMs
+            check(owned()) { "Spoken progress: ownership lost after delivery" }
+            l.answered.add(interaction)
+            session?.let { l.answered.add(it) }
+            update(interaction) { it.copy(answer = reply.text, sentMs = sent, modelMs = android.os.SystemClock.elapsedRealtime() - started, remembered = reply.remembered, actions = reply.actions) }
+        } catch (error: Exception) {
+            val reason = "Spoken progress ${if (streamOpened) "stream" else "turn"} stopped: ${error.message ?: error::class.simpleName}; limit ${SPOKEN_PROGRESS_TURN_MS / 1000} s"
+            say(reason)
+            update(interaction) { it.copy(answer = reply.text, problem = reason) }
+        } finally {
+            waiting.cancel()
+            if (owned()) _phase.value = AssistantPhase.LISTENING
+        }
+    }
+
+    private fun progressPhrase(locale: Locale): String = when (locale.language) {
+        "it" -> "Sto ancora preparando la risposta."
+        else -> "Still working on your answer."
+    }
+
     /**
      * While the model thinks: KeepWearableAirSessionAlive every few seconds, which the server sends to keep the
      * glasses waiting for an answer that is on its way.
      */
-    private suspend fun holdOn(l: Link) {
+    private suspend fun holdOn(l: Link, validate: () -> Unit = {}) {
         var seq = 1
         while (true) {
             delay(HOLD_ON_MS)
             val m0 = l.m0 ?: return
+            validate()
             l.mux.send(m0, netEvent(EV_KEEP_AIR_SESSION_ALIVE, ThriftWriter().str(1, "AwaitingResponse").i32(2, 20_000).i32(3, seq++).done()), messageType = MT_NET_EVENT)
         }
     }
 
     /** One Live AI turn: the camera's picture now, the model, and the answer spoken as [sub]. */
     private suspend fun liveAnswer(l: Link, sub: String, question: String) {
+        val token = liveAi.turnGeneration
+        val configGeneration = store.generation.get()
+        fun owned() = liveAi.turnIsCurrent(token) && link === l && store.config.value.enabled && store.generation.get() == configGeneration
         val started = System.currentTimeMillis()
         val session = liveAi.sessionId.ifEmpty { liveAi.interaction }
-        record(TurnRecord(sub, started, question, source = TurnSource.LIVE_AI, session = session, conversation = "live-$session"))
-        val image = runCatching { liveFrame() }.getOrNull()?.let { toModelJpeg(it) }
+        record(TurnRecord(sub, started, question, source = TurnSource.LIVE_AI, session = session, conversation = diary.liveConversationAt(started, windowMs(), session, question.trim().matches(Regex("new conversation[.!?]*", RegexOption.IGNORE_CASE)))))
+        val frame = if (liveAi.imageAllowed) runCatching { liveFrame() }.getOrNull() else null
+        kotlin.coroutines.coroutineContext.ensureActive()
+        if (!owned()) return
+        val image = if (liveAi.imageAllowed) frame?.let { toModelJpeg(it) } else null
+        say("Live AI camera: frameAvailable=${frame != null} modelAttachment=${image != null}")
         if (image != null) {
             val file = File(photos, "$sub.jpg")
             runCatching {
@@ -892,15 +1145,24 @@ class Assistant(
         }
         var problem = ""
         val reply = try {
-            brain.answer(question, spoken(l), pastOf(sub), image, liveAiNote())
+            inConversation(sub, LiveImageLease {
+                check(owned() && (image == null || liveAi.imageAllowed))
+            }) { brain.answer(question, spoken(l), pastOf(sub), image, liveAiNote()) }
         } catch (error: Exception) {
             problem = error.message ?: error::class.simpleName.orEmpty()
             Reply(fallback(spoken(l), store.config.value.apiKey.isBlank() && store.config.value.provider == Provider.CLAUDE))
         }
+        kotlin.coroutines.coroutineContext.ensureActive()
+        if (!owned()) return
         val text = reply.text
         update(sub) { it.copy(answer = text, problem = problem, modelMs = System.currentTimeMillis() - started, remembered = reply.remembered, actions = reply.actions) }
+        val deliveryContext = kotlin.coroutines.coroutineContext
         try {
-            deliver(l, sub, question, text, live = true)
+            // Temporary Live AI workaround: reuse phone TTS streaming; never change saved ordinary voice.
+            deliver(l, sub, question, text, live = true, speechAnnounced = true, forcePhoneVoice = true) {
+                deliveryContext.ensureActive()
+                check(owned()) { "Live AI: turn ownership lost" }
+            }
         } catch (error: Exception) {
             say("Live AI: the answer did not reach the glasses: ${error.message}")
         }
@@ -963,24 +1225,23 @@ class Assistant(
         if (offerImage(got.bytes, got.from) && early === got) early = null
     }
 
-    /**
-     * Speak [text] as [interaction]'s answer in the voice chosen; with [listen] false the glasses stop listening after
-     * it. The milliseconds of audio sent, 0 in the glasses' voice.
-     */
-    private suspend fun deliver(l: Link, interaction: String, transcript: String, text: String, listen: Boolean = true, live: Boolean = false): Long {
-        // The glasses' own voice speaks only their own language.
-        if (store.config.value.glassesVoice && !l.sessionTurn && store.config.value.speechLanguage.isEmpty()) {
-            speakOnGlasses(l, interaction, transcript, text, listen)
+    /** Speak the answer in the selected language/voice, preserving turn completion and ownership. */
+    private suspend fun deliver(
+        l: Link, interaction: String, transcript: String, text: String, listen: Boolean = true, live: Boolean = false,
+        speechAnnounced: Boolean = false, forcePhoneVoice: Boolean = false, validate: () -> Unit = {},
+    ): Long {
+        validate()
+        if (!forcePhoneVoice && store.config.value.glassesVoice && !l.sessionTurn && store.config.value.speechLanguage.isEmpty()) {
+            speakOnGlasses(l, interaction, transcript, text, listen = listen, speechAnnounced = speechAnnounced, validate = validate)
             return 0
         }
         val packets = voice.speak(text, spoken(l))
-        // A session turn ends on the VARM; there, and in Live AI, ev60 would end the whole session.
-        stream(l, interaction, transcript, text, packets, complete = !l.sessionTurn && !live, listen = listen)
+        stream(l, interaction, transcript, text, packets, complete = !l.sessionTurn && !live, listen = listen, speechAnnounced = speechAnnounced, validate = validate)
         return packets.sumOf { it.durationUs } / 1000
     }
 
     /** ev71, ev52 and ev342, which open every answer. ev52 and ev342 go at a tagged type 0, as the app sends them. */
-    private suspend fun preamble(l: Link, interaction: String, transcript: String, text: String) {
+    private suspend fun preamble(l: Link, interaction: String, transcript: String, text: String, speechAnnounced: Boolean = false, validate: () -> Unit = {}) {
         val m0 = checkNotNull(l.m0)
         val e71 = ThriftWriter().str(1, interaction).done()
         val e52 = ThriftWriter().str(1, transcript.ifEmpty { text }).i32(2, 0).str(4, "").bool(7, false).str(8, interaction).done()
@@ -990,7 +1251,9 @@ class Assistant(
             Triple(0, EV_FINAL_TRANSCRIPTION, e52),
             Triple(0, EV_ON_PHONE_UNDERSTANDING, e342),
         )) {
-            sendNetEvent(l, m0, netEvent(event, body), type)
+            validate()
+            if (speechAnnounced && event != EV_ON_PHONE_UNDERSTANDING) continue
+            sendNetEvent(l, m0, netEvent(event, body), type, validate)
             delay(20)
         }
     }
@@ -999,9 +1262,9 @@ class Assistant(
      * The answer in the glasses' own voice: a VARM that streams nothing, then ev60 with the text, which is what makes
      * them speak it with their own TTS.
      */
-    private suspend fun speakOnGlasses(l: Link, interaction: String, transcript: String, text: String, listen: Boolean = true) {
+    private suspend fun speakOnGlasses(l: Link, interaction: String, transcript: String, text: String, listen: Boolean = true, speechAnnounced: Boolean = false, validate: () -> Unit = {}) {
         val m0 = checkNotNull(l.m0)
-        preamble(l, interaction, transcript, text)
+        preamble(l, interaction, transcript, text, speechAnnounced, validate)
         _phase.value = AssistantPhase.SPEAKING
         val voiceId = glassesVoice()
         val answer = netEvent(EV_VOICE_ACTION_RESPONSE, varm(interaction, transcript, text, onGlasses = true, voiceId = voiceId))
@@ -1013,11 +1276,12 @@ class Assistant(
         )
         // Without simplified forwarding the VARM is acted on as it lands, so the text must be there before it.
         for (event in if (l.simplified) listOf(answer, complete) else listOf(complete, answer)) {
-            sendNetEvent(l, m0, event)
+            sendNetEvent(l, m0, event, validate = validate)
             delay(20)
         }
         val mono = System.nanoTime() / 1_000_000
         val e392 = ThriftWriter().str(1, "VoiceActionResponseMessage").i32(2, (mono and 0xFFFF).toInt()).i32(3, 1).done()
+        validate()
         l.mux.send(m0, netEvent(EV_KEEP_AIR_SESSION_ALIVE, e392), messageType = MT_NET_EVENT)
         say(if (text.isEmpty()) "Ended the turn without a word: every tool did what was asked" else "Answered in the glasses' voice${voiceId?.let { " ($it)" }.orEmpty()}: \"$text\"")
     }
@@ -1027,15 +1291,20 @@ class Assistant(
      * audio message; the VARM; the rest of the audio as bare frames in real time; 6000; ev389, ev392.
      */
     private suspend fun stream(
-        l: Link, interaction: String, transcript: String, text: String, packets: List<OpusPacket>, complete: Boolean, listen: Boolean,
+        l: Link, interaction: String, transcript: String, text: String, packets: List<OpusPacket>,
+        complete: Boolean, listen: Boolean, speechAnnounced: Boolean = false, validate: () -> Unit = {},
     ) {
         val mux = l.mux
+        suspend fun checkedSend(channel: Int, payload: ByteArray, messageType: Int? = null) {
+            validate()
+            if (messageType == null) mux.send(channel, payload) else mux.send(channel, payload, messageType = messageType)
+        }
         val m0 = checkNotNull(l.m0)
         val s0 = checkNotNull(l.s0)
-        preamble(l, interaction, transcript, text)
+        preamble(l, interaction, transcript, text, speechAnnounced, validate)
         val mono = System.nanoTime() / 1_000_000
         val e388 = ThriftWriter().i64(1, System.currentTimeMillis()).i64(2, mono).str(3, interaction).done()
-        mux.send(m0, netEvent(EV_TTS_START_INFO, e388), messageType = MT_NET_EVENT)
+        checkedSend(m0, netEvent(EV_TTS_START_INFO, e388), messageType = MT_NET_EVENT)
         delay(20)
 
         // Field 1 is the stream the glasses allocated. Without it they drop the stream silently.
@@ -1043,7 +1312,7 @@ class Assistant(
         val header = (if (streamId.isNotEmpty()) Wire.fieldBytes(1, streamId.toByteArray()) else ByteArray(0)) +
             Wire.fieldBytes(2, interaction.toByteArray()) + Wire.fieldVarint(4, 1) + Wire.fieldVarint(7, 1) + Wire.fieldVarint(19, 1)
         if (streamId.isEmpty()) say("No stream id from the glasses for this answer; it may not play")
-        mux.send(s0, header, messageType = MT_STREAM_HEADER)
+        checkedSend(s0, header, messageType = MT_STREAM_HEADER)
 
         _phase.value = AssistantPhase.SPEAKING
         val answer = netEvent(EV_VOICE_ACTION_RESPONSE, varm(interaction, transcript, text))
@@ -1054,32 +1323,32 @@ class Assistant(
                 acc + ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(p.data.size).array() + p.data
             }
             if (i == 0) {
-                mux.send(s0, frame, messageType = MT_STREAM_AUDIO)
+                checkedSend(s0, frame, messageType = MT_STREAM_AUDIO)
                 // The VARM goes after the first audio message, never before; without simplified forwarding it would
                 // end the turn on arrival, so it waits for the end of the audio.
-                if (l.simplified) sendNetEvent(l, m0, answer)
+                if (l.simplified) sendNetEvent(l, m0, answer, validate = validate)
             } else {
                 // A bare header: tagged with type 0, only the first 40 ms would ever play.
-                mux.send(s0, frame)
+                checkedSend(s0, frame)
             }
             dueUs += chunk.sumOf { it.durationUs }
             val wait = dueUs / 1000 - (System.nanoTime() - start) / 1_000_000
             if (wait > 0) delay(wait)
         }
-        mux.send(s0, ByteArray(0), messageType = MT_STREAM_END)
-        if (!l.simplified) sendNetEvent(l, m0, answer)
+        checkedSend(s0, ByteArray(0), messageType = MT_STREAM_END)
+        if (!l.simplified) sendNetEvent(l, m0, answer, validate = validate)
         // Without it the glasses stay in their answering state with the mic on, and never offer a follow-up.
         if (complete) {
             val done = interactionComplete(
                 interaction, text, expectsAnswer = listen && ASKS.containsMatchIn(text), followUp = listen && text.isNotEmpty(), streamed = true,
             )
-            sendNetEvent(l, m0, netEvent(EV_MWA_VOICE_INTERACTION_COMPLETE, done))
+            sendNetEvent(l, m0, netEvent(EV_MWA_VOICE_INTERACTION_COMPLETE, done), validate = validate)
         }
 
         val e389 = ThriftWriter().i64(1, System.currentTimeMillis()).i64(2, mono).i64(3, 7000).str(4, interaction).done()
         val e392 = ThriftWriter().str(1, "VoiceActionResponseMessage").i32(2, (mono and 0xFFFF).toInt()).i32(3, 1).done()
         for ((event, body) in listOf(EV_TTS_END_INFO to e389, EV_KEEP_AIR_SESSION_ALIVE to e392)) {
-            mux.send(m0, netEvent(event, body), messageType = MT_NET_EVENT)
+            checkedSend(m0, netEvent(event, body), messageType = MT_NET_EVENT)
             delay(20)
         }
         say("Answered: \"$text\"")
@@ -1120,8 +1389,7 @@ class Assistant(
     /** [id]'s question again, with the model and settings as they are now; the new answer replaces the old one. */
     fun askAgain(id: String) {
         if (diary.turn(id) == null) return
-        diary.update(id) { it.copy(answer = "", problem = "", remembered = emptyList(), actions = emptyList(), modelMs = 0) }
-        scope.launch { answerHere(id) }
+        scope.launch { answerHere(id, replay = true) }
     }
 
     /** The conversation a question asked now from the app would continue, or null when it would start a new one. */
@@ -1130,19 +1398,20 @@ class Assistant(
         return last.conversation.takeIf { System.currentTimeMillis() - last.at <= windowMs() }
     }
 
-    private suspend fun answerHere(id: String) {
+    private suspend fun answerHere(id: String, replay: Boolean = false) {
         val turn = diary.turn(id) ?: return
         val started = System.currentTimeMillis()
         val image = turn.image.takeIf { it.isNotEmpty() }?.let { runCatching { File(it).readBytes() }.getOrNull() }
         val phone = turn.source == TurnSource.PHONE
         try {
-            val reply = withTimeout(PHONE_BUDGET_MS) {
+            withTimeout(PHONE_BUDGET_MS) { inConversation(id, replay = replay) {
+            val reply =
                 brain.answer(
                     turn.question, if (phone) phoneLocale() else locale, pastOf(id), image,
                     if (turn.source == TurnSource.LIVE_AI) liveAiNote() else "", if (phone) Audience.PHONE else Audience.GLASSES,
                 )
-            }
             diary.update(id) { it.copy(answer = reply.text, problem = "", remembered = reply.remembered, actions = reply.actions, modelMs = System.currentTimeMillis() - started) }
+            } }
         } catch (error: Exception) {
             val why = if (error is kotlinx.coroutines.TimeoutCancellationException) "no answer in ${PHONE_BUDGET_MS / 1000} s" else error.message ?: error::class.simpleName.orEmpty()
             say("The model did not answer in the app: $why")
@@ -1187,18 +1456,51 @@ class Assistant(
     /** The app's language: what the phone's own words are in. */
     private fun phoneLocale(): Locale = context.resources.configuration.locales[0]
 
+    private suspend fun <T> inConversation(
+        id: String, extra: kotlin.coroutines.CoroutineContext = kotlin.coroutines.EmptyCoroutineContext,
+        replay: Boolean = false,
+        block: suspend () -> T,
+    ): T {
+        val context = contextOf(id, replay)
+        return withContext(context + extra) {
+            if (context is ConversationContext) context.serialized {
+                block().also { result ->
+                    // Publish completed history before the next queued turn selects its context.
+                    if (result is Reply) diary.update(id) {
+                        it.copy(answer = result.text, problem = "", remembered = result.remembered, actions = result.actions)
+                    }
+                }
+            } else block()
+        }
+    }
+
+    private fun contextOf(id: String, replay: Boolean = false): kotlin.coroutines.CoroutineContext {
+        val turn = diary.turn(id) ?: return kotlin.coroutines.EmptyCoroutineContext
+        if (turn.conversation.isBlank()) return kotlin.coroutines.EmptyCoroutineContext
+        // Voice-only Live AI must not resume a server transcript holding camera images.
+        val privacyScope = if (turn.source == TurnSource.LIVE_AI && !liveAi.imageAllowed) ":live-voice-only" else ""
+        return ConversationContext(diary, turn.conversation + privacyScope, replay)
+    }
+
     /** What the model has heard of [id]'s conversation before it. */
     private fun pastOf(id: String): List<Exchange> {
         val conversation = diary.turn(id)?.conversation ?: return emptyList()
-        return diary.past(conversation, before = id).map { Exchange(it.question, it.answer, it.actions) }
+        val turns = diary.past(conversation, before = id)
+        val allowed = store.config.value.vision && (diary.turn(id)?.source != TurnSource.LIVE_AI || liveAi.imageAllowed)
+        val reference = if (allowed) turns.lastOrNull { it.image.isNotEmpty() } else null
+        return turns.map { t ->
+            val image = if (t === reference) runCatching {
+                File(t.image).takeIf { it.isFile && it.length() <= 2 * 1024 * 1024 }?.readBytes()
+            }.getOrNull() else null
+            Exchange(t.question, t.answer, t.actions, image)
+        }
     }
 
     /** Into the diary, in the open conversation unless it names its own. */
     private fun record(turn: TurnRecord) {
         if (turn.conversation.isNotEmpty()) return diary.record(turn)
-        // A follow-up continues the open conversation; a new "Hey Meta" only if it comes right after the last turn.
-        val window = if (link?.fresh?.contains(turn.interactionId) == true) minOf(windowMs(), FRESH_WINDOW_MS) else windowMs()
-        diary.record(turn.copy(conversation = diary.conversationAt(turn.at, window)))
+        // Both fresh wakes and follow-ups honor the configured conversation window.
+        diary.record(turn.copy(conversation = diary.conversationAt(turn.at, windowMs())))
     }
 
     private fun update(interaction: String, change: (TurnRecord) -> TurnRecord) = diary.update(interaction, change)
@@ -1234,7 +1536,6 @@ class Assistant(
         // ev57 field 11, invocationMethod: 1 for the wake word, 3 for the reply to an answer that asked something, 5 for
         // a question after any other answer.
         val FOLLOW_UP_INVOCATIONS = setOf(3L, 5L)
-        const val FRESH_WINDOW_MS = 2 * 60_000L
         val WAKE_WORD_ONLY = Regex("^(hey|hi|ehi|ei|ok|okay)?[ ,]*(meta|mata|metta|matta|meda)[.!?]*$", RegexOption.IGNORE_CASE)
         const val MIN_MODEL_MS = 6_000L
         const val PHOTO_WAIT_MS = 8_000L

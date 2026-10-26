@@ -25,6 +25,8 @@ data class AssistantConfig(
     // The language the wearer speaks, as a BCP 47 tag, when the glasses have no pack for it; empty, the glasses' own.
     // The phone then hears every question, the model answers in it, and the phone's voice speaks.
     val speechLanguage: String = "",
+    // Opt-in phone speech for progress; final uses saved voice (native handoff experimental).
+    val spokenProgress: Boolean = false,
     val instructions: String = "",
     // How long a conversation is remembered after its last question.
     val memoryMinutes: Int = 10,
@@ -59,6 +61,8 @@ class AssistantConfigStore(context: Context) : FieldBook {
         prefs.edit().putString(FIELDS, all.toString()).apply()
     }
 
+    internal val generation = java.util.concurrent.atomic.AtomicLong()
+
     fun update(change: (AssistantConfig) -> AssistantConfig) {
         val before = _config.value
         val next = change(before)
@@ -78,10 +82,12 @@ class AssistantConfigStore(context: Context) : FieldBook {
             .putBoolean("glasses_voice", next.glassesVoice)
             .putBoolean("quiet_after_actions", next.quietAfterActions)
             .putString("speech_language", next.speechLanguage)
+            .putBoolean("spoken_progress", next.spokenProgress)
             .putString("instructions", next.instructions)
             .putInt("memory_minutes", next.memoryMinutes)
             .putInt("answer_wait_s", next.answerWaitSeconds)
             .apply()
+        generation.incrementAndGet()
         _config.value = next
     }
 
@@ -99,6 +105,7 @@ class AssistantConfigStore(context: Context) : FieldBook {
             glassesVoice = prefs.getBoolean("glasses_voice", d.glassesVoice),
             quietAfterActions = prefs.getBoolean("quiet_after_actions", d.quietAfterActions),
             speechLanguage = prefs.getString("speech_language", d.speechLanguage).orEmpty(),
+            spokenProgress = prefs.getBoolean("spoken_progress", d.spokenProgress),
             instructions = prefs.getString("instructions", d.instructions).orEmpty(),
             memoryMinutes = prefs.getInt("memory_minutes", d.memoryMinutes),
             answerWaitSeconds = prefs.getInt("answer_wait_s", d.answerWaitSeconds),

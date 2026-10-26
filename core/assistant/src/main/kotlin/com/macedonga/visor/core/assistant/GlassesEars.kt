@@ -34,6 +34,7 @@ class GlassesEars(
     private val onUtterance: (text: String, startMs: Long, endMs: Long) -> Unit,
     private val onProblem: (String) -> Unit,
     private val onDone: () -> Unit = {},
+    private val onDiagnostic: (String) -> Unit = {},
 ) {
     private val main = Handler(Looper.getMainLooper())
 
@@ -58,8 +59,17 @@ class GlassesEars(
     @Volatile
     private var speechFrom = 0L
 
-    // A chunk that did not parse, for the log.
-    private var odd: ByteArray? = null
+    // Closed-vocabulary stages and counts only. No audio bytes or recognised text.
+    private val diagnosticStages = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    @Volatile private var receivedChunks = 0L
+    @Volatile private var decodedPackets = 0L
+    @Volatile private var pcmFrames = 0L
+    @Volatile private var unsupportedChunks = 0L
+    internal fun diagnosticSnapshot() = "framed=$decodedPackets pcm=$pcmFrames unsupported=$unsupportedChunks"
+
+    private fun stage(name: String) {
+        if (diagnosticStages.size < 24 && diagnosticStages.add(name)) onDiagnostic(name)
+    }
 
     /** From now on audio is taken; the recogniser starts on the main thread and reads what was queued meanwhile. */
     fun start() {
@@ -73,6 +83,7 @@ class GlassesEars(
             onProblem("no Opus decoder: ${it.message}")
             return
         }
+        stage("decoder-started")
         accepting = true
         main.post { listen() }
     }
@@ -84,35 +95,18 @@ class GlassesEars(
      */
     fun hear(chunk: ByteArray) {
         if (!accepting) return
-        val b = ByteBuffer.wrap(chunk)
-        // A little-endian length read big-endian is far larger than the chunk, so this tells the two apart.
-        if (b.remaining() >= 5 && b.getInt(0) in 1..b.remaining() - 4) {
-            while (b.remaining() >= 5) {
-                val n = b.int
-                if (n <= 0 || n > b.remaining()) {
-                    if (odd == null) odd = chunk
-                    return
-                }
-                val packet = ByteArray(n).also { b.get(it) }
-                decode(packet, clockMs)
-                clockMs += opusMs(packet)
-            }
-            return
+        receivedChunks++
+        stage("input-received")
+        val parsed = readMicrophoneFrames(chunk) { packet, ms ->
+            if (ms != null) clockMs = ms
+            decodedPackets++
+            stage("packet-framed")
+            decode(packet, clockMs)
+            if (ms == null) clockMs += opusMs(packet)
         }
-        while (b.remaining() >= 16) {
-            b.order(ByteOrder.LITTLE_ENDIAN)
-            b.int
-            val ms = b.int.toLong() and 0xFFFFFFFFL
-            b.order(ByteOrder.BIG_ENDIAN)
-            val opusLen = b.int
-            b.int
-            if (opusLen <= 0 || opusLen > b.remaining()) {
-                if (odd == null) odd = chunk
-                return
-            }
-            val packet = ByteArray(opusLen).also { b.get(it) }
-            clockMs = ms
-            decode(packet, ms)
+        if (!parsed) {
+            unsupportedChunks++
+            stage("unsupported-framing")
         }
     }
 
@@ -120,7 +114,6 @@ class GlassesEars(
     fun finish() {
         if (!accepting) return
         accepting = false
-        odd?.let { c -> onProblem("a microphone chunk did not parse: " + c.take(32).joinToString("") { "%02x".format(it) }) }
         queue.offer(END)
     }
 
@@ -146,6 +139,8 @@ class GlassesEars(
                 if (out != null && info.size > 0) {
                     out.position(info.offset)
                     out.limit(info.offset + info.size)
+                    pcmFrames++
+                    stage("pcm-decoded")
                     val pcm = ShortArray(info.size / 2)
                     out.order(ByteOrder.nativeOrder()).asShortBuffer().get(pcm)
                     // The decoder gives 48 kHz mono; the recogniser takes 16 kHz.
@@ -153,7 +148,7 @@ class GlassesEars(
                 }
                 codec.releaseOutputBuffer(o, false)
             }
-        }
+        }.onFailure { stage("decode-failed") }
     }
 
     /** How long an Opus packet plays, from its TOC byte (RFC 6716, 3.1). */
@@ -202,6 +197,7 @@ class GlassesEars(
             // One session for as long as the pipe is open; each utterance comes back as a segment.
             putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION, RecognizerIntent.EXTRA_AUDIO_SOURCE)
         }
+        stage("recognizer-start-requested")
         r.startListening(intent)
         val out = FileOutputStream(write.fileDescriptor)
         thread(name = "glasses-ears") {
@@ -215,8 +211,10 @@ class GlassesEars(
                         bytes[i * 2 + 1] = (chunk[i].toInt() shr 8).toByte()
                     }
                     out.write(bytes)
+                    stage("pcm-written")
                 }
             } catch (_: IOException) {
+                stage("pipe-write-failed")
             } catch (_: InterruptedException) {
             } finally {
                 // The end of the pipe is the end of the session to the recogniser.
@@ -228,6 +226,7 @@ class GlassesEars(
     private fun close() {
         if (closed) return
         closed = true
+        onDiagnostic("closed chunks=$receivedChunks packets=$decodedPackets pcm=$pcmFrames unsupported=$unsupportedChunks")
         accepting = false
         queue.clear()
         queue.offer(END)
@@ -265,8 +264,9 @@ class GlassesEars(
     }
 
     private inner class Listener : RecognitionListener {
-        override fun onReadyForSpeech(params: Bundle?) = Unit
+        override fun onReadyForSpeech(params: Bundle?) { stage("recognizer-ready") }
         override fun onBeginningOfSpeech() {
+            stage("speech-started")
             speechFrom = clockMs
         }
         override fun onRmsChanged(rmsdB: Float) = Unit
@@ -276,6 +276,7 @@ class GlassesEars(
         override fun onEvent(eventType: Int, params: Bundle?) = Unit
 
         override fun onError(error: Int) {
+            stage("recognizer-error-$error")
             // The phone has no model for this language yet: ask it to fetch one, and hear on its usual recogniser.
             if (usingOnDevice && (error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED || error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE)) {
                 onDeviceLanguages[tag] = false
@@ -322,6 +323,7 @@ class GlassesEars(
     }
 
     private fun heard(bundle: Bundle?) {
+        stage("recognition-result")
         val text = bundle?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim()
         if (!text.isNullOrEmpty()) onUtterance(text, speechFrom.takeIf { it > 0 } ?: clockMs, clockMs)
         speechFrom = 0

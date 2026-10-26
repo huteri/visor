@@ -200,6 +200,15 @@ fun AssistantSettingsScreen(open: (NavKey) -> Unit, model: AssistantViewModel = 
                             onClick = { sheet = "speech" },
                         )
                     },
+                    {
+                        PillsRow(
+                            stringResource(R.string.ai_spoken_progress),
+                            listOf(false to stringResource(R.string.ai_spoken_progress_off), true to stringResource(R.string.ai_spoken_progress_on)),
+                            config.spokenProgress,
+                            onPick = { on -> model.store.update { it.copy(spokenProgress = on) } },
+                            sub = stringResource(R.string.ai_spoken_progress_sub),
+                        )
+                    },
                     { VisorToggleRow(model.toggles.byId("vision")!!, sub = stringResource(R.string.ai_vision_sub)) },
                     if (claude) row { VisorToggleRow(model.toggles.byId("web")!!, sub = stringResource(R.string.ai_web_sub)) } else null,
                     { VisorToggleRow(model.toggles.byId("quiet_actions")!!, sub = stringResource(R.string.ai_quiet_actions_sub)) },

@@ -8,6 +8,24 @@ name: Release
 on:
   push:
     tags: ["v*.*.*"]
+  workflow_call:
+    inputs:
+      automatic:
+        type: boolean
+        default: false
+    secrets:
+      VISOR_KEYSTORE_BASE64:
+        required: true
+      VISOR_KEYSTORE_PASSWORD:
+        required: true
+      VISOR_KEY_ALIAS:
+        required: true
+      VISOR_META_HW_TOKEN:
+        required: true
+      VISOR_META_AR_TOKEN:
+        required: true
+      VISOR_META_FRL_TOKEN:
+        required: true
   workflow_dispatch:
     inputs:
       version:
@@ -18,11 +36,40 @@ permissions:
   contents: write
 
 concurrency:
-  group: release
+  # Per-SHA groups preserve every merge (global concurrency drops pending runs).
+  # Atomic tag reservations in auto_release.py serialize version allocation.
+  group: ${{ inputs.automatic && format('auto-release-{0}', github.sha) || 'release' }}
   cancel-in-progress: false
 
 jobs:
+  prepare:
+    if: inputs.automatic
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    outputs:
+      eligible: ${{ steps.prepare.outputs.eligible }}
+      name: ${{ steps.prepare.outputs.name }}
+      code: ${{ steps.prepare.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+      - name: Reserve version for exact merged main SHA
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          MERGED_SHA: ${{ github.sha }}
+        run: |
+          test "$GITHUB_EVENT_NAME" = push
+          test "$GITHUB_REF" = refs/heads/main
+          python3 scripts/auto_release.py
+
   release:
+    needs: prepare
+    if: always() && ((!inputs.automatic && needs.prepare.result == 'skipped') || (needs.prepare.result == 'success' && needs.prepare.outputs.eligible == 'true'))
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -32,8 +79,13 @@ jobs:
         id: version
         env:
           INPUT_VERSION: ${{ inputs.version }}
+          AUTOMATIC: ${{ inputs.automatic }}
+          AUTO_NAME: ${{ needs.prepare.outputs.name }}
         run: |
-          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+          if [ "$AUTOMATIC" = true ]; then
+            name="$AUTO_NAME"
+            draft=true
+          elif [ "$GITHUB_EVENT_NAME" = "push" ]; then
             name="${GITHUB_REF_NAME#v}"
             draft=false
           else
@@ -70,17 +122,25 @@ jobs:
       - name: Check the secrets and restore the release key
         env:
           KEYSTORE_BASE64: ${{ secrets.VISOR_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.VISOR_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.VISOR_KEY_ALIAS }}
           META_HW_TOKEN: ${{ secrets.VISOR_META_HW_TOKEN }}
           META_AR_TOKEN: ${{ secrets.VISOR_META_AR_TOKEN }}
           META_FRL_TOKEN: ${{ secrets.VISOR_META_FRL_TOKEN }}
         run: |
-          for secret in KEYSTORE_BASE64 META_HW_TOKEN META_AR_TOKEN META_FRL_TOKEN; do
+          for secret in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS META_HW_TOKEN META_AR_TOKEN META_FRL_TOKEN; do
             if [ -z "${!secret}" ]; then
               echo "error: the VISOR_$secret secret is not set" >&2
               exit 1
             fi
           done
-          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/visor-release.p12"
+          umask 077
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/visor-release.p12"
+
+      - name: Verify streaming responses
+        run: |
+          python3 -m unittest discover -s scripts/tests -v
+          ./gradlew :core:assistant:testDebugUnitTest
 
       - name: Build the release APK
         env:
@@ -97,9 +157,18 @@ jobs:
       - name: Check the signature and name the APK
         env:
           NAME: ${{ steps.version.outputs.name }}
+          VISOR_KEYSTORE_PASSWORD: ${{ secrets.VISOR_KEYSTORE_PASSWORD }}
+          VISOR_KEY_ALIAS: ${{ secrets.VISOR_KEY_ALIAS }}
         run: |
           apk=app/build/outputs/apk/release/app-release.apk
-          "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --print-certs "$apk" | grep "certificate SHA-256"
+          "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --print-certs "$apk" > "$RUNNER_TEMP/visor-apk-certs.txt"
+          keytool -exportcert -keystore "$RUNNER_TEMP/visor-release.p12" -storetype PKCS12 -storepass:env VISOR_KEYSTORE_PASSWORD -alias "$VISOR_KEY_ALIAS" -file "$RUNNER_TEMP/visor-release-cert.der"
+          expected=$(sha256sum "$RUNNER_TEMP/visor-release-cert.der" | cut -d ' ' -f 1)
+          actual=$(sed -n 's/.*certificate SHA-256 digest: //p' "$RUNNER_TEMP/visor-apk-certs.txt")
+          test "$actual" = "$expected"
+          metadata=$("$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$apk")
+          grep -F "versionCode='${{ steps.version.outputs.code }}'" <<< "$metadata"
+          grep -F "versionName='$NAME'" <<< "$metadata"
           mkdir -p dist
           cp "$apk" "dist/visor-$NAME.apk"
           (cd dist && sha256sum "visor-$NAME.apk" > "visor-$NAME.apk.sha256")
@@ -110,12 +179,19 @@ jobs:
           NAME: ${{ steps.version.outputs.name }}
           DRAFT: ${{ steps.version.outputs.draft }}
           PRERELEASE: ${{ steps.version.outputs.prerelease }}
+          AUTOMATIC: ${{ inputs.automatic }}
+          GH_REPO: ${{ github.repository }}
         run: |
           flags=(--title "Visor $NAME" --generate-notes)
           if [ "$DRAFT" = "true" ]; then flags+=(--draft --target "$GITHUB_SHA"); fi
           if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
-          gh release create "v$NAME" "dist/visor-$NAME.apk" "dist/visor-$NAME.apk.sha256" "${flags[@]}"
+          if [ "$AUTOMATIC" = true ] && gh release view "v$NAME" --json isDraft,targetCommitish > "$RUNNER_TEMP/visor-release.json"; then
+            python3 -c 'import json,os; r=json.load(open(os.environ["RUNNER_TEMP"]+"/visor-release.json")); assert r["isDraft"] and r["targetCommitish"] == os.environ["GITHUB_SHA"], "Refusing changed/public release"'
+            gh release upload "v$NAME" "dist/visor-$NAME.apk" "dist/visor-$NAME.apk.sha256" --clobber
+          else
+            gh release create "v$NAME" "dist/visor-$NAME.apk" "dist/visor-$NAME.apk.sha256" "${flags[@]}"
+          fi
 
       - name: Remove the release key
         if: always()
-        run: rm -f "$RUNNER_TEMP/visor-release.p12"
+        run: rm -f "$RUNNER_TEMP/visor-release.p12" "$RUNNER_TEMP/visor-release-cert.der" "$RUNNER_TEMP/visor-apk-certs.txt" "$RUNNER_TEMP/visor-release.json"
