@@ -367,7 +367,7 @@ class Brain(
             // Current models think before they answer, and the thinking counts toward max_tokens.
             val body = JSONObject().put("model", model).put("max_tokens", tokens + THINKING_TOKENS).put("system", system).put("messages", messages)
             if (tools.length() > 0) body.put("tools", tools)
-            val answer = post("$ANTHROPIC_API/messages", anthropicHeaders(c.apiKey), body)
+            val answer = post("$ANTHROPIC_API/messages", anthropicHeaders(c.apiKey), body, ModelProtocol.ANTHROPIC)
             val blocks = answer.getJSONArray("content")
             val list = blocks.objects()
             // With web search the answer is split into several text blocks around the citations.
@@ -672,7 +672,7 @@ class Brain(
         var f = known ?: Fields(reasoningOff = true, completionTokens = "api.openai.com" in url)
         while (true) {
             try {
-                val answer = post(url, headers, shaped(body, f))
+                val answer = post(url, headers, shaped(body, f), ModelProtocol.CHAT_COMPLETIONS)
                 // A model that cannot stop thinking (Gemini's Pro models) spends a spoken answer's tokens on it.
                 if (known == null && !f.reasoningOff && !f.thinks && thoughtOnly(answer) &&
                     !headers.containsKey("X-Hermes-Session-Id") && coroutineContext[SessionCapture]?.known() != true) {
@@ -711,7 +711,13 @@ class Brain(
         if (f.completionTokens) put("max_completion_tokens", remove("max_tokens"))
     }
 
+    private enum class ModelProtocol { JSON, CHAT_COMPLETIONS, ANTHROPIC }
+
+    // Responses and Gemini generateContent use JSON; their SSE formats are not Chat Completions.
     private suspend fun post(url: String, headers: Map<String, String>, body: JSONObject): JSONObject =
+        post(url, headers, body, ModelProtocol.JSON)
+
+    private suspend fun post(url: String, headers: Map<String, String>, body: JSONObject, protocol: ModelProtocol): JSONObject =
         suspendCancellableCoroutine { pending ->
             val http = URL(url).openConnection() as HttpURLConnection
             val capture = pending.context[SessionCapture]
@@ -724,7 +730,7 @@ class Brain(
             Dispatchers.IO.dispatch(pending.context, Runnable {
                 try {
                     pending.context.ensureActive()
-                    val answer = request(http, headers, body, progressReadTimeout(pending.context), { id ->
+                    val answer = request(http, headers, body, protocol, progressReadTimeout(pending.context), { id ->
                         capture?.keep(request, id)
                     }) {
                         pending.context.ensureActive()
@@ -742,7 +748,7 @@ class Brain(
             })
         }
 
-    private fun request(http: HttpURLConnection, headers: Map<String, String>, body: JSONObject, readTimeoutMs: Int, captureSession: (String) -> Unit, checkCancelled: () -> Unit): JSONObject {
+    private fun request(http: HttpURLConnection, headers: Map<String, String>, body: JSONObject, protocol: ModelProtocol, readTimeoutMs: Int, captureSession: (String) -> Unit, checkCancelled: () -> Unit): JSONObject {
         checkCancelled()
         http.requestMethod = "POST"
         http.connectTimeout = 5_000
@@ -751,8 +757,10 @@ class Brain(
         http.doOutput = true
         http.setRequestProperty("content-type", "application/json")
         headers.forEach(http::setRequestProperty)
-        http.setRequestProperty("accept", "text/event-stream, application/json")
-        val payload = JSONObject(body.toString()).put("stream", true).toString().toByteArray(Charsets.UTF_8)
+        val streaming = protocol != ModelProtocol.JSON
+        http.setRequestProperty("accept", if (streaming) "text/event-stream, application/json" else "application/json")
+        val payload = JSONObject(body.toString()).apply { if (streaming) put("stream", true) else remove("stream") }
+            .toString().toByteArray(Charsets.UTF_8)
         checkCancelled()
         http.outputStream.use {
             checkCancelled()
@@ -768,7 +776,8 @@ class Brain(
         }
         http.getHeaderField("X-Hermes-Session-Id")?.trim()?.takeIf { it.isNotEmpty() }?.let(captureSession)
         return http.inputStream.reader(Charsets.UTF_8).use {
-            ModelResponse.read(it, headers.containsKey("anthropic-version"), checkCancelled)
+            if (streaming) ModelResponse.read(it, protocol == ModelProtocol.ANTHROPIC, checkCancelled)
+            else JSONObject(it.readText()).also { checkCancelled() }
         }
     }
 
