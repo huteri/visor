@@ -7,18 +7,24 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class CameraServiceDestructionTest {
-    private class Link : PlaintextLink {
+    private class Link {
         val sent = mutableListOf<ByteArray>()
-        override suspend fun send(plaintext: ByteArray) { sent += plaintext }
-        override suspend fun receive(): ByteArray = error("No close frame expected")
+        val secure = org.mockito.Mockito.mock(SecureLink::class.java) { call ->
+            when (call.method.name) {
+                "send" -> { sent += call.getArgument<ByteArray>(0); Unit }
+                "nextSdu" -> error("No close frame expected")
+                "open" -> call.getArgument<ByteArray>(0)
+                else -> org.mockito.Mockito.RETURNS_DEFAULTS.answer(call)
+            }
+        }
     }
 
     @Test fun staleMuxAndPeerOriginAndOtherStopReasonsCannotRetireReplacement() = runBlocking {
         val receiver = StreamReceiver()
         val oldLink = Link()
         val currentLink = Link()
-        val oldMux = DataXConnection(oldLink, ChannelRegistry())
-        val current = DataXConnection(currentLink, ChannelRegistry())
+        val oldMux = DataXConnection(oldLink.secure, ChannelRegistry())
+        val current = DataXConnection(currentLink.secure, ChannelRegistry())
         suspend fun stopped(mux: DataXConnection, channel: Int, reason: Int) {
             val payload = byteArrayOf(0x10, reason.toByte())
             receiver.respond(DataXMessage(Header.parse(Header.build(channel, payload.size, messageType = StreamType.CONTROL_STREAM_STOPPED)), payload), mux)
@@ -44,7 +50,7 @@ class CameraServiceDestructionTest {
 
     @Test fun threeCapturesAfterServiceDestructionWithoutCloseUseFreshChannels() = runBlocking {
         val link = Link()
-        val mux = DataXConnection(link, ChannelRegistry())
+        val mux = DataXConnection(link.secure, ChannelRegistry())
         val receiver = StreamReceiver()
         val channels = mutableSetOf<Int>()
         repeat(3) {
@@ -54,7 +60,7 @@ class CameraServiceDestructionTest {
             assertEquals(51350, opened.serviceId)
             mux.sendOnService(51350, 2, byteArrayOf(7))
             assertEquals(opened.channelId, Header.parse(link.sent.last()).channelId)
-            assertFalse(Header.parse(link.sent.last()).flags.setService)
+            assertEquals(0, Header.parse(link.sent.last()).serviceId)
             val payload = byteArrayOf(0x10, 23)
             receiver.respond(DataXMessage(Header.parse(Header.build(DataXConnection.mirror(opened.channelId), payload.size, messageType = StreamType.CONTROL_STREAM_STOPPED)), payload), mux)
         }
