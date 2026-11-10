@@ -6,25 +6,20 @@ import android.media.MediaCodec
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.net.Uri
+import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 
-/** An encoded audio packet, AAC-LC, on the glasses' clock like the video. */
-class AudioPacket(val ptsUs: Long, val data: ByteArray)
-
-/** AAC-LC as the recorder and RTMP take it: [asc] is the AudioSpecificConfig. */
-class AacFormat(val sampleRate: Int, val channels: Int, val asc: ByteArray)
-
 /**
- * One MP4 in Movies/Visor, written as the frames come: the glasses' HEVC as it is, the audio as AAC. The file
+ * One MP4 in the videos album, written as the frames come: the glasses' video as it is (HEVC or H.264), the audio as AAC. The file
  * stays pending, so the gallery does not list it, until [finish]. Audio before the first video frame is dropped,
  * and everything is timed from that frame.
  */
-class Mp4Recording(private val context: Context, config: ByteArray, audio: AacFormat?, name: String, takenAt: Long) {
-    val uri: Uri
+class Mp4Recording(private val context: Context, config: ByteArray, audio: AacFormat?, name: String, takenAt: Long, val album: String) {
+    private val uri: Uri
     private val muxer: MediaMuxer
-    private val fd: android.os.ParcelFileDescriptor
+    private val fd: ParcelFileDescriptor
     private val videoTrack: Int
     private val audioTrack: Int
     private var firstPts = -1L
@@ -33,30 +28,39 @@ class Mp4Recording(private val context: Context, config: ByteArray, audio: AacFo
     private val info = MediaCodec.BufferInfo()
 
     init {
-        val sps = hevcParameterSets(config)[33]?.firstOrNull()?.let(::parseHevcSps)
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
             put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
-            put(MediaStore.MediaColumns.RELATIVE_PATH, "Movies/Visor")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, album)
             put(MediaStore.MediaColumns.DATE_TAKEN, takenAt)
             put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
         uri = checkNotNull(context.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)) { "MediaStore refused the file" }
-        fd = checkNotNull(context.contentResolver.openFileDescriptor(uri, "rw")) { "no file to write" }
-        muxer = MediaMuxer(fd.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-        val video = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_HEVC, sps?.width ?: 1080, sps?.height ?: 1920)
-        video.setByteBuffer("csd-0", ByteBuffer.wrap(onlyParameterSets(config)))
-        videoTrack = muxer.addTrack(video)
-        audioTrack = if (audio != null) {
-            val a = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, audio.sampleRate, audio.channels)
-            a.setByteBuffer("csd-0", ByteBuffer.wrap(audio.asc))
-            muxer.addTrack(a)
-        } else -1
-        muxer.start()
+        var f: ParcelFileDescriptor? = null
+        var m: MediaMuxer? = null
+        try {
+            f = checkNotNull(context.contentResolver.openFileDescriptor(uri, "rw")) { "no file to write" }
+            m = MediaMuxer(f.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            val codec = configCodec(config)
+            val (width, height) = videoSize(config) ?: (1080 to 1920)
+            val video = MediaFormat.createVideoFormat(codec.mime, width, height)
+            video.setByteBuffer("csd-0", ByteBuffer.wrap(onlyParameterSets(codec, config)))
+            videoTrack = m.addTrack(video)
+            audioTrack = if (audio != null) {
+                val a = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, audio.sampleRate, audio.channels)
+                a.setByteBuffer("csd-0", ByteBuffer.wrap(audio.asc))
+                m.addTrack(a)
+            } else -1
+            m.start()
+            fd = f
+            muxer = m
+        } catch (e: Throwable) {
+            m?.let { runCatching { it.release() } }
+            f?.let { runCatching { it.close() } }
+            runCatching { context.contentResolver.delete(uri, null, null) }
+            throw e
+        }
     }
-
-    /** How long it runs so far. */
-    val durationUs: Long get() = if (firstPts < 0) 0 else lastPts - firstPts
 
     fun video(frame: VideoFrame) {
         if (firstPts < 0) {
@@ -64,7 +68,7 @@ class Mp4Recording(private val context: Context, config: ByteArray, audio: AacFo
             firstPts = frame.ptsUs
         }
         if (frame.ptsUs < lastPts) return
-        val data = withoutParameterSets(frame.data)
+        val data = withoutParameterSets(frame.codec, frame.data)
         info.set(0, data.size, frame.ptsUs - firstPts, if (frame.isKey) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0)
         muxer.writeSampleData(videoTrack, ByteBuffer.wrap(data), info)
         lastPts = frame.ptsUs
@@ -80,14 +84,14 @@ class Mp4Recording(private val context: Context, config: ByteArray, audio: AacFo
     /** Closes the file and shows it in the gallery; a recording with no frame in it is deleted instead. */
     fun finish(): Uri? {
         val any = firstPts >= 0
-        runCatching { muxer.stop() }
+        val stopped = runCatching { muxer.stop() }.isSuccess
         runCatching { muxer.release() }
         runCatching { fd.close() }
-        if (!any) {
-            context.contentResolver.delete(uri, null, null)
+        if (!any || !stopped) {
+            runCatching { context.contentResolver.delete(uri, null, null) }
             return null
         }
-        context.contentResolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+        runCatching { context.contentResolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null) }
         return uri
     }
 }
@@ -103,7 +107,7 @@ class ReplayRing(@Volatile var windowUs: Long) {
 
     @Synchronized
     fun config(next: ByteArray) {
-        val size = { c: ByteArray? -> c?.let { hevcParameterSets(it)[33]?.firstOrNull()?.let(::parseHevcSps) }?.let { it.width to it.height } }
+        val size = { c: ByteArray? -> c?.let(::videoSize) }
         if (size(config) != size(next)) {
             video.clear()
             audio.clear()
@@ -155,14 +159,14 @@ class ReplayRing(@Volatile var windowUs: Long) {
 
 class Replay(val config: ByteArray, val video: List<VideoFrame>, val audio: List<AudioPacket>)
 
-/** Only the VPS, SPS and PPS of [config], Annex-B, as csd-0 wants them. */
-private fun onlyParameterSets(config: ByteArray): ByteArray = annexB(annexBUnits(config).filter { hevcNalType(it) in 32..34 })
+/** Only the parameter sets of [config], Annex-B, as csd-0 wants them. */
+private fun onlyParameterSets(codec: VideoCodec, config: ByteArray): ByteArray = annexB(annexBUnits(config).filter { codec.isParameterSet(it) })
 
-/** A frame with any parameter sets in it taken out: MP4's hvc1 keeps them in the sample entry only. */
-private fun withoutParameterSets(data: ByteArray): ByteArray {
+/** A frame with any parameter sets in it taken out: MP4 keeps them in the sample entry only. */
+private fun withoutParameterSets(codec: VideoCodec, data: ByteArray): ByteArray {
     val units = annexBUnits(data)
-    if (units.none { hevcNalType(it) in 32..34 }) return data
-    return annexB(units.filter { hevcNalType(it) !in 32..34 })
+    if (units.none { codec.isParameterSet(it) }) return data
+    return annexB(units.filter { !codec.isParameterSet(it) })
 }
 
 private fun annexB(units: List<ByteArray>): ByteArray {

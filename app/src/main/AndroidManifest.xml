@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <uses-permission android:name="android.permission.VIBRATE" />
     <!-- INTERNET: the Meta login during setup, the glasses' socket on Wi-Fi Direct, and the model, which may be a
          plain-HTTP server on the local network (hence cleartext allowed). -->
-    <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
@@ -21,20 +21,42 @@
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- The companion device's presence wakes Visor from the background, as the Meta app's does. -->
+    <uses-permission android:name="android.permission.REQUEST_COMPANION_RUN_IN_BACKGROUND" />
+    <uses-permission android:name="android.permission.REQUEST_COMPANION_USE_DATA_IN_BACKGROUND" />
+    <uses-permission android:name="android.permission.REQUEST_COMPANION_START_FOREGROUND_SERVICES_FROM_BACKGROUND" />
+    <uses-permission android:name="android.permission.REQUEST_OBSERVE_COMPANION_DEVICE_PRESENCE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- The live view's notification as a Live Update on Android 16. -->
     <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.READ_CONTACTS" />
-    <!-- The phone's speech recogniser requires it, though Visor hands it the glasses' microphone, never the phone's. -->
+    <!-- The glasses' Messages app and "send a text" read and send the phone's SMS. -->
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+    <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <!-- The glasses' microphone for the assistant and the custom wake word; the phone's while the Meta AI mic is held. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
     <uses-feature android:name="android.hardware.bluetooth" android:required="true" />
     <uses-feature android:name="android.software.companion_device_setup" android:required="false" />
+    <uses-feature android:name="android.hardware.telephony" android:required="false" />
 
-    <!-- The settings the phone app fills in: the default SMS app and the media apps on this phone. Also the map and
-         music apps the assistant opens. -->
+    <!-- Speech recognisers and voices, and the SMS, media, map and music apps the glasses use. -->
     <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+        <!-- VDK apps that a voice phrase starts. -->
+        <intent>
+            <action android:name="com.macedonga.visor.kit.action.VOICE" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
         <intent>
             <action android:name="android.intent.action.SENDTO" />
             <data android:scheme="smsto" />
@@ -67,16 +89,14 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.Visor"
-        android:usesCleartextTraffic="true"
-        android:windowSoftInputMode="adjustResize">
+        android:usesCleartextTraffic="true">
 
         <activity
             android:name=".MainActivity"
             android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation|uiMode|locale|layoutDirection|density|fontScale|keyboard|keyboardHidden|navigation"
             android:exported="true"
-            android:resizeableActivity="true"
             android:supportsPictureInPicture="true"
-            android:theme="@style/Theme.Visor">
+            android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -137,6 +157,44 @@
             </intent-filter>
         </receiver>
 
+        <!-- The VDK, the Visor Development Kit: apps bind this, and get what the person grants them. -->
+        <service
+            android:name=".outside.KitService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.macedonga.visor.kit.action.BIND" />
+            </intent-filter>
+        </service>
+
+        <!-- The VDK's consent screen, over the app that asks. -->
+        <activity
+            android:name=".dat.ToolkitActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <activity
+            android:name=".outside.KitConsentActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="com.macedonga.visor.kit.action.REQUEST_SCOPES" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <!-- The Live view's frames for an app holding developer mode's token. -->
+        <service
+            android:name=".outside.FrameService"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.macedonga.visor.action.LIVE_FRAMES" />
+            </intent-filter>
+        </service>
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.files"
@@ -151,6 +209,25 @@
             android:name=".connection.GlassesService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
+
+        <!-- An update kills the service; this starts the connection again, as the presence does. -->
+        <receiver
+            android:name=".connection.AfterUpdate"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Bound by the system when the associated glasses appear, and starts the connection from the background. -->
+        <service
+            android:name=".connection.GlassesPresence"
+            android:exported="false"
+            android:permission="android.permission.BIND_COMPANION_DEVICE_SERVICE">
+            <intent-filter>
+                <action android:name="android.companion.CompanionDeviceService" />
+            </intent-filter>
+        </service>
 
         <!-- Mirrors the phone's notifications to the glasses, and tells them which app is playing. -->
         <service

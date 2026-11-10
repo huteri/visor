@@ -16,13 +16,15 @@ import kotlinx.coroutines.withContext
  * The picture at the end of [picture] as a JPEG, decoded on a decoder of its own from the keyframe before it, so
  * it works with no screen showing the stream. Null if the decoder gave nothing.
  */
-suspend fun grabJpeg(picture: Replay, quality: Int = 92): ByteArray? = withContext(Dispatchers.Default) {
-    val sps = hevcParameterSets(picture.config)[33]?.firstOrNull()?.let(::parseHevcSps) ?: return@withContext null
-    val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_HEVC, sps.width, sps.height).apply {
+suspend fun grabJpeg(picture: Replay, quality: Int): ByteArray? = withContext(Dispatchers.Default) {
+    val (width, height) = videoSize(picture.config) ?: return@withContext null
+    val lastPts = picture.video.maxOfOrNull { it.ptsUs } ?: return@withContext null
+    val videoCodec = picture.video.firstOrNull()?.codec ?: configCodec(picture.config)
+    val format = MediaFormat.createVideoFormat(videoCodec.mime, width, height).apply {
         setByteBuffer("csd-0", ByteBuffer.wrap(picture.config))
         setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
     }
-    val codec = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_HEVC)
+    val codec = MediaCodec.createDecoderByType(videoCodec.mime)
     try {
         codec.configure(format, null, null, 0)
         codec.start()
@@ -49,9 +51,9 @@ suspend fun grabJpeg(picture: Replay, quality: Int = 92): ByteArray? = withConte
             }
             val o = codec.dequeueOutputBuffer(info, 5_000)
             if (o >= 0) {
-                if (info.size > 0) codec.getOutputImage(o)?.use { last = jpegOf(it, sps.width, sps.height, quality) }
+                if (info.size > 0 && info.presentationTimeUs >= lastPts) codec.getOutputImage(o)?.use { last = jpegOf(it, width, height, quality) }
                 codec.releaseOutputBuffer(o, false)
-                if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) ended = true
+                if (last != null || info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) ended = true
             }
         }
         last

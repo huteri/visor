@@ -9,6 +9,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -33,6 +34,15 @@ internal interface LiveAiHost {
     fun note(text: String)
 }
 
+/** The camera stream Live AI sees through, on 51350 as the glasses' MMAI_LIVE app. */
+interface LiveAiCamera {
+    fun on()
+    fun off()
+
+    /** True once frames come. */
+    val frames: Flow<Boolean>
+}
+
 /** Where a Live AI session has got to. */
 enum class LiveAiPhase { OFF, STARTING, LISTENING, THINKING }
 
@@ -42,7 +52,7 @@ enum class LiveAiPhase { OFF, STARTING, LISTENING, THINKING }
  * the microphone on s0 with their own speech recognition unloaded. The server acknowledges the interaction,
  * listens, and answers each utterance as a sub-interaction of it, with the camera's picture.
  */
-internal class LiveAi(private val context: Context, private val scope: CoroutineScope, private val host: LiveAiHost) {
+internal class LiveAi(private val context: Context, private val scope: CoroutineScope, private val host: LiveAiHost, private val display: () -> Boolean = { false }) {
     private var cameraRequested = false
     private val turns = java.util.concurrent.ConcurrentHashMap.newKeySet<Job>()
     private val generation = AtomicInteger()
@@ -149,7 +159,7 @@ internal class LiveAi(private val context: Context, private val scope: Coroutine
         host.event(EV_KEEP_AIR_SESSION_ALIVE, ThriftWriter().str(1, "AsrStartListening").i32(2, 20_000).i32(3, nonce.getAndIncrement()).done())
         if (!startupCurrent()) return
         ears?.stop()
-        ears = GlassesEars(context, locale, continuous = true, onUtterance = ::heard, onProblem = { host.note("Live AI: $it") }, onDiagnostic = { host.note("Live AI stages: $it") }).also { it.start() }
+        ears = GlassesEars(context, locale, onUtterance = ::heard, onProblem = { host.note("Live AI: $it") }, onDiagnostic = { host.note("Live AI stages: $it") }).also { it.start() }
         if (!startupCurrent()) return
         keepalive?.cancel()
         keepalive = scope.launch { keepAlive() }
@@ -216,11 +226,14 @@ internal class LiveAi(private val context: Context, private val scope: Coroutine
         }
         val sub = UUID.randomUUID().toString()
         host.note("Live AI: heard \"$text\" ($startMs to $endMs ms)")
+        val id = interaction
         val token = turnGeneration
         val turn = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             if (!turnIsCurrent(token)) return@launch
             host.event(EV_START_OF_USER_SPEECH, ThriftWriter().str(1, sub).i64(2, startMs).done())
             host.event(EV_FINAL_TRANSCRIPTION, ThriftWriter().str(1, text).i32(2, 0).str(4, "").bool(7, false).str(8, sub).i64(13, endMs).done())
+            // Ended while those went out: the session stays off.
+            if (!active || interaction != id) return@launch
             _phase.value = LiveAiPhase.THINKING
             try {
                 host.answer(sub, text)
@@ -240,8 +253,15 @@ internal class LiveAi(private val context: Context, private val scope: Coroutine
             delay(KEEPALIVE_MS)
             if (!turnIsCurrent(token)) continue
             host.event(EV_FRAME_KEEP_ALIVE, ThriftWriter().i64(1, System.currentTimeMillis()).i32(2, nonce.getAndIncrement()).done())
-            host.event(EV_KEEP_AIR_SESSION_ALIVE, ThriftWriter().str(1, "LiveAiSession").i32(2, 20_000).i32(3, nonce.getAndIncrement()).done())
+            keepAirSession("LiveAiSession", interaction)
         }
+    }
+
+    /** KeepWearableAirSessionAlive; a Display also gets the interaction it belongs to. */
+    private suspend fun keepAirSession(reason: String, id: String) {
+        val keep = ThriftWriter().str(1, reason).i32(2, AIR_SESSION_MS).i32(3, nonce.getAndIncrement())
+        if (display()) keep.str(4, id)
+        host.event(EV_KEEP_AIR_SESSION_ALIVE, keep.done())
     }
 
     /** The glasses ended it, or the link went: stop listening and close the camera. */
@@ -265,9 +285,9 @@ internal class LiveAi(private val context: Context, private val scope: Coroutine
     }
 
     private companion object {
-        const val SERVER_HOST = "prod.facebookvirtualassistant.com"
         const val PAYLOAD_AUDIO = 1
         const val PAYLOAD_VIDEO = 2
         const val KEEPALIVE_MS = 5_000L
+        const val AIR_SESSION_MS = 20_000
     }
 }

@@ -6,6 +6,8 @@ import android.net.Uri
 import android.provider.MediaStore
 import java.io.File
 import java.io.OutputStream
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -24,12 +26,15 @@ import org.json.JSONObject
  */
 class Assembly(
     private val context: Context,
+    private val albums: Albums,
     private val index: GalleryIndex,
     private val places: PlaceLog,
     private val say: (String) -> Unit,
     private val onSaved: (String) -> Unit,
     /** A capture that could not be saved, and why. Its pieces stay for the next try. */
     private val onFailed: (String, String) -> Unit,
+    /** Whether videos the glasses did not steady are steadied on the phone. */
+    private val steadyOnPhone: () -> Boolean,
     /** Whether a video this size came out of the glasses' own stabilization. */
     private val steadiedOnGlasses: (Int, Int) -> Boolean,
 ) {
@@ -47,7 +52,7 @@ class Assembly(
     fun take(capture: Capture, assetId: String, file: File) {
         val name = partName(capture, assetId) ?: return
         val dir = File(staging, capture.handle).apply { mkdirs() }
-        file.copyTo(File(dir, name), overwrite = true)
+        Files.move(file.toPath(), File(dir, name).toPath(), StandardCopyOption.REPLACE_EXISTING)
         File(dir, META).writeText(
             JSONObject().put("type", capture.type.name).put("takenAt", capture.takenAtMillis ?: System.currentTimeMillis())
                 .put("landscape", capture.landscape).put("steadiness", capture.steadiness).toString(),
@@ -56,14 +61,15 @@ class Assembly(
         queue.trySend { safely(dir) }
     }
 
-    /** Whether [handle]'s photo or video is here: it is saved when the rest come, or by [finish] without them. */
-    fun waiting(handle: String): Boolean = File(File(staging, handle), MAIN).exists()
+    /** Saves a photo or video the capture list does not know, as it came; returns where it is. */
+    fun saveLoose(file: File, video: Boolean): String =
+        insert(if (video) Format.MP4 else Format.HEIC, System.currentTimeMillis()) { out -> file.inputStream().use { it.copyTo(out) } }.second
 
-    /**
-     * Whatever has its photo or video and has had nothing new for [olderThanMs] is saved with what came; a capture
-     * still missing that waits.
-     */
-    fun finish(olderThanMs: Long) {
+    /** Whether [handle]'s photo or video is here: it is saved when the rest come, or by [saveStragglers] without them. */
+    fun hasMain(handle: String): Boolean = File(File(staging, handle), MAIN).exists()
+
+    /** Saves whatever has its photo or video and nothing new for [olderThanMs]; one still missing it waits, up to [STALE_MS]. */
+    fun saveStragglers(olderThanMs: Long) {
         queue.trySend {
             val now = System.currentTimeMillis()
             for (dir in staging.listFiles().orEmpty()) {
@@ -72,6 +78,7 @@ class Assembly(
                     File(dir, MAIN).exists() -> safely(dir)
                     // A piece that came after its capture was already saved.
                     index.entries.value.containsKey(dir.name) -> dir.deleteRecursively()
+                    now - dir.lastModified() > STALE_MS -> dir.deleteRecursively()
                 }
             }
         }
@@ -98,7 +105,7 @@ class Assembly(
         val kept = when (type) {
             CaptureType.VIDEO -> {
                 val made = File(scratch, "$handle.mp4").apply { parentFile?.mkdirs() }
-                val finished = finished(dir, main, made, handle, landscape, meta.optInt("steadiness"))
+                val finished = steadyOrCrop(dir, main, made, handle, landscape, meta.optInt("steadiness"))
                 val (uri, where) = try {
                     insert(format, takenAt) { out -> (if (finished != null) made else main).inputStream().use { it.copyTo(out) } }
                 } finally {
@@ -114,6 +121,7 @@ class Assembly(
                     // A photo this phone cannot develop still goes to the gallery, as the glasses' own HEIC.
                     say("Could not develop ${handle.take(8)} (${error.message}): saving the HEIC as it came")
                     format = Format.HEIC
+                    File(dir, MOTION).takeIf { it.exists() }?.copyTo(File(keep, MOTION), overwrite = true)
                     val (uri, where) = insert(format, takenAt) { out -> main.inputStream().use { it.copyTo(out) } }
                     say("Saved a photo: $where")
                     Kept(handle, uri.toString(), CaptureType.PHOTO, takenAt, lat = place?.lat, lon = place?.lon)
@@ -142,7 +150,7 @@ class Assembly(
         val frames = readFrames(File(dir, FRAMES)).orEmpty()
         // The clip is matched against the whole frame, which it shows.
         val key = motion?.let { matchFrame(it, whole) }
-        val bitmap = if (landscape) Landscape.crop(whole).also { if (it !== whole) whole.recycle() } else whole
+        val bitmap = if (landscape) landscapeCrop(whole).also { if (it !== whole) whole.recycle() } else whole
         val jpeg = try {
             jpegWithExif(bitmap, main, takenAt, place, File(scratch, "$handle.jpg"))
         } finally {
@@ -166,8 +174,8 @@ class Assembly(
     }
 
     /** The video steadied or cut to landscape into [made], or null to keep it as it came: nothing to do, or this phone could not. */
-    private fun finished(dir: File, main: File, made: File, handle: String, landscape: Boolean, steadiness: Int): Finished? =
-        runCatching { finishVideo(context, main, made, File(dir, IMU), File(dir, FRAMES), steadiness, landscape, steadiedOnGlasses) }.getOrElse {
+    private fun steadyOrCrop(dir: File, main: File, made: File, handle: String, landscape: Boolean, steadiness: Int): Finished? =
+        runCatching { finishVideo(context, main, made, File(dir, IMU), File(dir, FRAMES), steadiness, landscape, steadyOnPhone, steadiedOnGlasses) }.getOrElse {
             say("Could not steady or crop ${handle.take(8)} (${it.message}): saving it as it came")
             null
         }
@@ -181,10 +189,11 @@ class Assembly(
     /** The new row, and where it is as MediaStore has it. */
     private fun insert(format: Format, takenAt: Long, write: (OutputStream) -> Unit): Pair<Uri, String> {
         val video = format.video
+        val album = albums.path(video)
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, fileName(format, takenAt))
             put(MediaStore.MediaColumns.MIME_TYPE, format.mime)
-            put(MediaStore.MediaColumns.RELATIVE_PATH, if (video) "Movies/Visor" else "Pictures/Visor")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, album)
             put(MediaStore.MediaColumns.DATE_TAKEN, takenAt)
             put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
@@ -194,7 +203,9 @@ class Assembly(
         val uri = resolver.insert(collection, values) ?: error("the gallery would not take it")
         try {
             checkNotNull(resolver.openOutputStream(uri)).use(write)
-            return uri to publish(resolver, uri)
+            val where = publish(resolver, uri)
+            albums.follow(uri, album, video)
+            return uri to where
         } catch (error: Exception) {
             resolver.delete(uri, null, null)
             throw error
@@ -208,10 +219,12 @@ class Assembly(
         private const val MAIN = "main"
         private const val MOTION = "motion"
         private const val META = "meta.json"
+        private const val STALE_MS = 7 * 24 * 3_600_000L
 
-        private val NAME: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss").withZone(ZoneId.systemDefault())
+        private val NAME: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss")
 
-        private fun fileName(format: Format, takenAt: Long) = "Visor_" + NAME.format(Instant.ofEpochMilli(takenAt)) + "." + format.ext
+        private fun fileName(format: Format, takenAt: Long) =
+            "Visor_" + NAME.format(Instant.ofEpochMilli(takenAt).atZone(ZoneId.systemDefault())) + "." + format.ext
 
         private fun partName(capture: Capture, assetId: String): String? = when (assetId) {
             capture.main?.id -> MAIN

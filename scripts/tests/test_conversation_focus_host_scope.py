@@ -45,7 +45,7 @@ class ConversationFocusHostScopeTest(unittest.TestCase):
                 page = next((i for i, header in enumerate(headers) if header.startswith("SettingsPage(")), None)
                 self.assertIsNotNone(page, "host consumer executes before SettingsPage installs LocalHost")
                 assert page is not None
-                self.assertTrue(any(header.startswith("item(") for header in headers[page + 1:]),
+                self.assertTrue(any(re.match(r"(?:if \(allowed\) )?item\(", header) for header in headers[page + 1:]),
                                 "LazyListScope itself is not a composed item")
 
     def test_readiness_check_retains_existing_guards_and_key(self):

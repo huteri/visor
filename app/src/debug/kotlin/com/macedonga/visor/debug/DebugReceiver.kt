@@ -1,48 +1,138 @@
 package com.macedonga.visor.debug
 
+import android.annotation.SuppressLint
+import android.bluetooth.BluetoothManager
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.provider.MediaStore
+import android.speech.RecognitionSupport
+import android.speech.RecognitionSupportCallback
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.util.Base64
 import android.util.Log
+import com.macedonga.visor.band.BandLink
+import com.macedonga.visor.band.BandPair
+import com.macedonga.visor.connection.ClassicBond
 import com.macedonga.visor.connection.GlassesService
+import com.macedonga.visor.connection.InternetSwitch
+import com.macedonga.visor.connection.PhoneMessages
+import com.macedonga.visor.connection.RequestLog
+import com.macedonga.visor.connection.WifiLink
 import com.macedonga.visor.core.assistant.Assistant
+import com.macedonga.visor.core.assistant.Hearing
+import com.macedonga.visor.core.assistant.HearingMode
+import com.macedonga.visor.core.assistant.MediaControl
+import com.macedonga.visor.core.assistant.mcp.AuthKind
+import com.macedonga.visor.core.assistant.mcp.McpHub
+import com.macedonga.visor.core.assistant.mcp.McpServer
+import com.macedonga.visor.core.assistant.mcp.SignIn
+import com.macedonga.visor.core.connection.Captions
+import com.macedonga.visor.core.connection.CaptionsMode
+import com.macedonga.visor.core.connection.CaptionsPhase
+import com.macedonga.visor.core.connection.DISPLAY_STATUS_TYPES
 import com.macedonga.visor.core.connection.GlassesConnection
+import com.macedonga.visor.core.connection.GlassesLink
+import com.macedonga.visor.core.connection.PrompterLook
+import com.macedonga.visor.core.connection.PrompterPhase
+import com.macedonga.visor.core.connection.SVC_STATUS
+import com.macedonga.visor.core.connection.Teleprompter
+import com.macedonga.visor.core.connection.isDisplayBuild
+import com.macedonga.visor.core.identity.IdentityStore
+import com.macedonga.visor.core.identity.look.GlassesLook
 import com.macedonga.visor.core.media.AirshipReceiver
+import com.macedonga.visor.core.media.Albums
+import com.macedonga.visor.core.media.AppInstall
 import com.macedonga.visor.core.media.GlassesApp
+import com.macedonga.visor.core.media.GlassesConfig
+import com.macedonga.visor.core.media.LiveSettingsStore
 import com.macedonga.visor.core.media.LiveStream
 import com.macedonga.visor.core.media.MediaImport
+import com.macedonga.visor.core.media.RecordStart
+import com.macedonga.visor.core.media.Screencast
+import com.macedonga.visor.core.media.ScreencastPhase
 import com.macedonga.visor.core.media.SessionApp
 import com.macedonga.visor.core.media.StreamQuality
 import com.macedonga.visor.core.media.StreamReceiver
+import com.macedonga.visor.core.media.requestAsset
+import com.macedonga.visor.core.protocol.Dat
+import com.macedonga.visor.core.settings.GlassesContact
 import com.macedonga.visor.core.settings.GlassesSettings
+import com.macedonga.visor.core.settings.PERMISSIONS_NAMESPACE
+import com.macedonga.visor.core.settings.contactObject
+import com.macedonga.visor.core.settings.contactsNamespace
+import com.macedonga.visor.core.settings.permissionObject
+import com.macedonga.visor.dat.BriefingCards
+import com.macedonga.visor.dat.DatLayout
+import com.macedonga.visor.dat.ToolkitStore
+import com.macedonga.visor.display.CaptionPacks
+import com.macedonga.visor.gallery.PhoneLibrary
+import com.macedonga.visor.home.PairSeen
+import com.macedonga.visor.kit.protocol.Layout
+import com.macedonga.visor.kit.protocol.BriefingCard
+import com.macedonga.visor.kit.protocol.LayoutAlign
+import com.macedonga.visor.kit.protocol.LayoutColor
+import com.macedonga.visor.kit.protocol.LayoutCorners
+import com.macedonga.visor.kit.protocol.LayoutIconName
+import com.macedonga.visor.kit.protocol.LayoutStyle
+import com.macedonga.visor.kit.protocol.Scope
+import com.macedonga.visor.kit.protocol.change
+import com.macedonga.visor.kit.protocol.field
+import com.macedonga.visor.kit.protocol.header
+import com.macedonga.visor.kit.protocol.progress
+import com.macedonga.visor.kit.protocol.stat
+import com.macedonga.visor.language.LanguageInstaller
+import com.macedonga.visor.language.restartGlassesAssistant
 import com.macedonga.visor.log.EventLog
+import com.macedonga.visor.login.MetaLogin
+import com.macedonga.visor.notify.GlassesNotification
+import com.macedonga.visor.notify.PhoneContacts
+import com.macedonga.visor.outside.DeveloperMode
+import com.macedonga.visor.outside.GlassesMotion
+import com.macedonga.visor.outside.NetworkClients
+import com.macedonga.visor.pairs.KnownPair
+import com.macedonga.visor.pairs.Looks
+import com.macedonga.visor.pairs.Pairs
+import com.macedonga.visor.phone.PhoneActions
+import com.macedonga.visor.setup.Provisioner
+import com.macedonga.visor.stage.Mood
+import com.macedonga.visor.stage.StageDebug
 import dagger.hilt.android.AndroidEntryPoint
+import java.io.File
+import java.util.Collections
+import java.util.Locale
 import javax.inject.Inject
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * Debug builds only: the app over adb, with the phone locked. The answer is the broadcast's result
  * data; everything else also lands in `logcat -s Visor`.
  *
  *     adb shell am broadcast -n com.macedonga.visor/.debug.DebugReceiver -a com.macedonga.visor.debug.STATUS
- *
- * Actions: STATUS, CONNECT, DISCONNECT, LOG (--ei n), LIVE_START (--ez wifi --ei band 2|5|0 --es quality
- * --ei bitrate --ei fps --ei band; --ez auto true for the Live view's own start), LIVE_STOP, LIVE_REC (starts or stops a
- * recording), LIVE_REPLAY, LIVE_FRAME, BUGREPORT, SETTINGS (--es key), SET (--es key --es value),
- * READ_SETTINGS, MEDIA, IMPORT (--es handle a,b: by handle prefix), ASK (--es q), ONBOARD (--es page --ef t),
- * MCP_PROBE / MCP_ADD (--es url --es name --es auth NONE|TOKEN|HEADER --es secret --es header), MCP_STATUS,
- * MCP_TOOLS (what the model would get), MCP_CALL (--es tool exposed-name --es args json), MCP_REMOVE (--es id),
- * PHONE (--es do directions --es to --es mode | play --es q --es app | media --es c pause|resume|next|... | now).
  */
 @AndroidEntryPoint
 class DebugReceiver : BroadcastReceiver() {
 
     @Inject lateinit var connection: GlassesConnection
+    @Inject lateinit var provisioner: Provisioner
+    @Inject lateinit var identities: IdentityStore
     @Inject lateinit var live: LiveStream
     @Inject lateinit var stream: StreamReceiver
     @Inject lateinit var media: MediaImport
@@ -50,24 +140,122 @@ class DebugReceiver : BroadcastReceiver() {
     @Inject lateinit var assistant: Assistant
     @Inject lateinit var log: EventLog
     @Inject lateinit var airship: AirshipReceiver
-    @Inject lateinit var contacts: com.macedonga.visor.notify.PhoneContacts
-    @Inject lateinit var config: com.macedonga.visor.core.media.GlassesConfig
-    @Inject lateinit var liveSettings: com.macedonga.visor.core.media.LiveSettingsStore
-    @Inject lateinit var mcp: com.macedonga.visor.core.assistant.mcp.McpHub
-    @Inject lateinit var phone: com.macedonga.visor.phone.PhoneActions
-    @Inject lateinit var developer: com.macedonga.visor.outside.DeveloperMode
+    @Inject lateinit var contacts: PhoneContacts
+    @Inject lateinit var config: GlassesConfig
+    @Inject lateinit var liveSettings: LiveSettingsStore
+    @Inject lateinit var mcp: McpHub
+    @Inject lateinit var pairs: Pairs
+    @Inject lateinit var looks: Looks
+    @Inject lateinit var phone: PhoneActions
+    @Inject lateinit var prompter: Teleprompter
+    @Inject lateinit var captions: Captions
+    @Inject lateinit var languages: LanguageInstaller
+    @Inject lateinit var captionPacks: CaptionPacks
+    @Inject lateinit var screencast: Screencast
+    @Inject lateinit var requests: RequestLog
+    @Inject lateinit var login: MetaLogin
+    @Inject lateinit var internet: InternetSwitch
+    @Inject lateinit var developer: DeveloperMode
+    @Inject lateinit var texts: PhoneMessages
+    @Inject lateinit var wifiLink: WifiLink
+    @Inject lateinit var hearing: Hearing
+    @Inject lateinit var bandPair: BandPair
+    @Inject lateinit var bandLink: BandLink
+    @Inject lateinit var classicBond: ClassicBond
+    @Inject lateinit var albums: Albums
+    @Inject lateinit var library: PhoneLibrary
+    @Inject lateinit var toolkit: ToolkitStore
+    @Inject lateinit var networkClients: NetworkClients
+    @Inject lateinit var glassesMotion: GlassesMotion
+    @Inject lateinit var briefing: BriefingCards
 
     override fun onReceive(context: Context, intent: Intent) {
         val action = intent.action?.substringAfterLast('.').orEmpty()
         Log.i("Visor", "API: $action")
+        // A bad extra answers instead of killing the app; no branch throws after its goAsync().
+        try {
+            handle(context, intent, action)
+        } catch (e: Exception) {
+            resultData = "failed: ${e.message}"
+        }
+    }
+
+    private fun handle(context: Context, intent: Intent, action: String) {
         when (action) {
             "STATUS" -> resultData = status()
+            // The phone's thread list as Visor reads it for the glasses' Messages: --ei count.
+            "THREADS" -> resultData = texts.describeThreads(intent.getIntExtra("count", 15))
+            // A second pair on the home, a black Skyler, never connected; --ez on false takes it away.
+            "DEMO_PAIR" -> resultData = demoPair(intent.getBooleanExtra("on", true))
+            // Changes the owner of the connected pair again, reusing the owner key, as setup does; the steps go to the log.
+            "PROVISION" -> resultData = (connection.state.value.target?.link as? GlassesLink.Bluetooth)?.address
+                ?.let { provisioner.start(it); "started on $it; follow LOG" } ?: "no pair over Bluetooth"
+            "PROVISION_STATUS" -> resultData = provisioner.status.value.toString()
+            // Visor's own app link to the Display (AppLinkProbe): --es pem <base64 PEM of the app key> --ei version N
+            // --es salt <hex>; then APP_MOTION [--ei rate], APP_LAYOUT, APP_STOP. Steps go to LOG as "AppLink:".
+            // Without a pem: Visor's toolkit key and the manifest it installed on this pair.
+            "APP_LINK" -> resultData = if (!intent.hasExtra("pem")) {
+                val address = (connection.state.value.target?.link as? GlassesLink.Bluetooth)?.address
+                val pair = connection.state.value.info?.serial?.let(toolkit::pair)
+                if (address == null || pair == null) "no pair over Bluetooth, or no toolkit setup on it" else {
+                    val (key, public) = toolkit.appKey()
+                    AppLinkProbe.start(context, address, key, public, pair.version, pair.salt, 0, 0, intent.getBooleanExtra("dam", true), log)
+                }
+            } else (connection.state.value.target?.link as? GlassesLink.Bluetooth)?.address?.let { address ->
+                AppLinkProbe.start(
+                    context, address, Base64.decode(intent.getStringExtra("pem").orEmpty(), Base64.DEFAULT),
+                    intent.getIntExtra("version", 0).toLong(), intent.getStringExtra("salt").orEmpty().hexToByteArray(),
+                    intent.getIntExtra("tag", 0), intent.getIntExtra("sign", 0), intent.getBooleanExtra("dam", true), log,
+                )
+            } ?: "no pair over Bluetooth"
+            "APP_MOTION" -> resultData = AppLinkProbe.capability(Dat.IMU, Dat.motionStart(intent.getIntExtra("rate", 10)))
+            "APP_LAYOUT" -> resultData = AppLinkProbe.capability(
+                Dat.DISPLAY,
+                Dat.displayContent(
+                    DatLayout.payload(
+                        Layout {
+                            padding = 24
+                            gap = 16
+                            row {
+                                gap = 12
+                                crossAlign = LayoutAlign.CENTER
+                                icon(LayoutIconName.SMART_GLASSES)
+                                text("Visor") { style = LayoutStyle.HEADING }
+                            }
+                            text("This layout came from Visor, through Meta's toolkit app.")
+                            buttons { button("ok", "OK") { icon = LayoutIconName.CHECKMARK; primary = true } }
+                        },
+                    ),
+                ),
+            )
+            "APP_STOP" -> resultData = AppLinkProbe.stop()
+            // The glasses' motion from their data collection daemon (svc1027), no toolkit app: --ei rate, --es channels a,b.
+            "MIRANDA" -> resultData = MirandaProbe.start(
+                connection, intent.getIntExtra("rate", 10),
+                intent.getStringExtra("channels")?.split(',')?.filter { it.isNotBlank() } ?: MirandaProbe.CANDIDATES, log,
+                intent.getStringExtra("sensors").orEmpty(),
+            )
+            "MIRANDA_STOP" -> resultData = MirandaProbe.stop(connection, log)
+            // The glasses say --es text in their own voice, through the data collection daemon's speech.
+            "SAY" -> answerLater { runCatching { glassesMotion.say(intent.getStringExtra("text") ?: "Hello from Visor."); "said" }.getOrElse { "failed: ${it.message}" } }
+            // Grants a phone app the glasses' permissions over RLDrive, as the Meta app does: --es pkg (Visor by default)
+            // --es perms DEV_MODE,IMU (short names); then lists what the namespace holds.
+            "GRANT" -> answerLater {
+                val app = intent.getStringExtra("pkg") ?: context.packageName
+                val grants = intent.getStringExtra("perms").orEmpty().split(',').filter { it.isNotBlank() }
+                    .map { permissionObject(app, "android.permission.${it.trim()}", "ALWAYS") }
+                settings.readNamespace(PERMISSIONS_NAMESPACE, grants)?.joinToString("\n") { "${it.uri} ${it.type} ${it.data}" } ?: "the glasses did not answer"
+            }
+            // Each pair's receipt key, the key its constellation manifest names it by: public, so it may be printed.
+            "DEVICE_KEYS" -> resultData = identities.all().joinToString("\n") { "${it.serial} ${it.devicePublicKey?.toHexString() ?: "none"}" }
             "CONNECT" -> resultData = runCatching { GlassesService.start(context); "connecting" }.getOrElse { "could not start the service: $it" }
             "DISCONNECT" -> {
-                GlassesService.stop(context)
+                GlassesService.disconnect(context)
                 resultData = "disconnecting"
             }
+            // --ei n
             "LOG" -> resultData = log.lines.value.takeLast(intent.getIntExtra("n", 40)).joinToString("\n")
+            // --ez wifi --ei band 2|5|0 --es quality --ei bitrate --ei fps; --ez auto true for the Live view's own start.
             "LIVE_START" -> if (intent.getBooleanExtra("auto", false)) {
                 live.start(liveSettings.settings.value)
                 resultData = "starting, automatic quality"
@@ -78,7 +266,6 @@ class DebugReceiver : BroadcastReceiver() {
                     quality = StreamQuality.valueOf(intent.getStringExtra("quality") ?: "FULL_HD"),
                     bitrate = intent.getIntExtra("bitrate", 4_000_000),
                     frameRate = intent.getIntExtra("fps", 24),
-                    bypassDonCheck = true,
                     overWifi = intent.getBooleanExtra("wifi", true),
                     groupBand = intent.getIntExtra("band", 2),
                 )
@@ -94,7 +281,11 @@ class DebugReceiver : BroadcastReceiver() {
             }
             "LIVE_REC" -> answerLater {
                 if (live.outputs.recording.value != null) "saved ${live.outputs.stopRecording()}"
-                else if (live.outputs.startRecording()) "recording" else "no stream to record"
+                else when (live.outputs.startRecording()) {
+                    RecordStart.STARTED -> "recording"
+                    RecordStart.NOT_READY -> "no stream to record"
+                    RecordStart.FAILED -> "the phone would not create the file"
+                }
             }
             "LIVE_REPLAY" -> answerLater { "replay ${live.outputs.replay.heldUs / 1000} ms: ${live.outputs.saveReplay()}" }
             "LIVE_FRAME" -> answerLater { "frame: ${live.outputs.saveFrame()}" }
@@ -102,7 +293,7 @@ class DebugReceiver : BroadcastReceiver() {
             // into steady_out.mp4 beside the pushed file.
             "STEADY" -> answerLater {
                 val input = pushed(context, intent.getStringExtra("file")) ?: return@answerLater "no such pushed file"
-                val out = java.io.File(input.parentFile, "steady_out.mp4")
+                val out = File(input.parentFile, "steady_out.mp4")
                 media.finishAgain(input, intent.getStringExtra("handle").orEmpty(), out, intent.getBooleanExtra("landscape", false), intent.getIntExtra("strength", 0))
             }
             "BUGREPORT" -> {
@@ -117,9 +308,11 @@ class DebugReceiver : BroadcastReceiver() {
                     "refused: unknown namespace or not connected"
                 }
             }
-            // A notification built by hand: --ei type --ei provider --es title --es text --es sender --es pkg.
+            // A notification built by hand: --ei type --ei provider --es title --es text --es sender --es pkg --es thread
+            // (a text's thread in the SMS store, whose number becomes the sender's id).
             "NOTIFY" -> {
-                val n = com.macedonga.visor.notify.GlassesNotification(
+                val thread = intent.getStringExtra("thread").orEmpty()
+                val n = GlassesNotification(
                     key = "visor|" + System.currentTimeMillis(),
                     pkg = intent.getStringExtra("pkg") ?: "org.telegram.messenger",
                     appName = intent.getStringExtra("app") ?: "Telegram",
@@ -129,48 +322,52 @@ class DebugReceiver : BroadcastReceiver() {
                     type = intent.getIntExtra("type", 1),
                     provider = intent.getIntExtra("provider", 3),
                     sender = intent.getStringExtra("sender").orEmpty(),
-                    senderId = intent.getStringExtra("sid").orEmpty(),
+                    senderId = intent.getStringExtra("sid") ?: texts.addressesOf(thread).firstOrNull().orEmpty(),
+                    threadId = thread,
                 )
-                connection.submit { it.sendOnService(com.macedonga.visor.notify.GlassesNotification.SVC, 1, n.envelope()) }
+                connection.submit { it.sendOnService(GlassesNotification.SVC, 1, n.envelope()) }
                 resultData = "sent type ${n.type} provider ${n.provider}"
             }
             // A test contact in the glasses' contacts: --es ns native|whats_app --es id --es name --es number +39...
             "CONTACT" -> answerLater {
                 val number = intent.getStringExtra("number").orEmpty()
-                val c = com.macedonga.visor.core.settings.GlassesContact(
+                val c = GlassesContact(
                     id = intent.getStringExtra("id").orEmpty(),
                     name = intent.getStringExtra("name").orEmpty(),
-                    numbers = if (number.isEmpty()) emptyList() else listOf(com.macedonga.visor.core.settings.GlassesContact.Number(2, "39", "", number)),
+                    numbers = if (number.isEmpty()) emptyList() else listOf(GlassesContact.Number(2, "39", "", number)),
                 )
-                val ns = com.macedonga.visor.core.settings.contactsNamespace(intent.getStringExtra("ns") ?: "native")
-                val after = settings.readNamespace(ns, listOf(com.macedonga.visor.core.settings.contactObject(c)))
+                val ns = contactsNamespace(intent.getStringExtra("ns") ?: "native")
+                val after = settings.readNamespace(ns, listOf(contactObject(c))) ?: return@answerLater "no answer from the glasses; ${c.name} may not be in $ns"
                 "pushed ${c.name} to $ns; the glasses had ${after.size} objects before"
             }
             "CONTACTS_SYNC" -> answerLater { contacts.sync() }
             // The home's light without the glasses: --es mood SEARCHING|...|auto, --es variant shiny_green|...|auto.
             "STAGE" -> {
                 intent.getStringExtra("mood")?.let { m ->
-                    com.macedonga.visor.stage.StageDebug.mood.value = com.macedonga.visor.stage.Mood.entries.firstOrNull { it.name == m.uppercase() }
+                    StageDebug.mood.value = Mood.entries.firstOrNull { it.name == m.uppercase() }
                 }
-                intent.getStringExtra("variant")?.let { v -> com.macedonga.visor.stage.StageDebug.variant.value = v.takeIf { it != "auto" } }
-                resultData = "mood=${com.macedonga.visor.stage.StageDebug.mood.value ?: "auto"} variant=${com.macedonga.visor.stage.StageDebug.variant.value ?: "auto"}"
+                intent.getStringExtra("variant")?.let { v -> StageDebug.variant.value = v.takeIf { it != "auto" } }
+                resultData = "mood=${StageDebug.mood.value ?: "auto"} variant=${StageDebug.variant.value ?: "auto"}"
             }
             // The setup held for a look: --es page WELCOME|ACCESS|LOGIN|PAIRING|LINKING, --ef t seconds into the pairing story (-1 runs it).
             "ONBOARD" -> {
-                intent.getStringExtra("page")?.let { com.macedonga.visor.stage.StageDebug.onboardingPage.value = it.uppercase() }
-                if (intent.hasExtra("t")) com.macedonga.visor.stage.StageDebug.demoAt.value = intent.getFloatExtra("t", -1f).takeIf { it >= 0f }
-                resultData = "page=${com.macedonga.visor.stage.StageDebug.onboardingPage.value} t=${com.macedonga.visor.stage.StageDebug.demoAt.value}"
+                intent.getStringExtra("page")?.let { StageDebug.onboardingPage.value = it.uppercase() }
+                if (intent.hasExtra("t")) StageDebug.demoAt.value = intent.getFloatExtra("t", -1f).takeIf { it >= 0f }
+                resultData = "page=${StageDebug.onboardingPage.value} t=${StageDebug.demoAt.value}"
             }
-            // The MobileConfig zip for --es on "a.b,c.d" set true: MC_BUILD writes it to the external files dir, MC_APPLY sends it.
             // The on-device recogniser's languages for --es lang (default en-US); ASR_DOWNLOAD asks for that one.
             "ASR_CHECK", "ASR_DOWNLOAD" -> {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                    resultData = "needs Android 13"
+                    return
+                }
                 val lang = intent.getStringExtra("lang") ?: "en-US"
-                val ask = android.content.Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-                    .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                    .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, lang)
+                val ask = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                    .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                    .putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang)
                 val pending = goAsync()
-                android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    val r = android.speech.SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
+                Handler(Looper.getMainLooper()).post {
+                    val r = SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
                     if (action == "ASR_DOWNLOAD") {
                         r.triggerModelDownload(ask)
                         pending.resultData = "asked for $lang"
@@ -178,8 +375,8 @@ class DebugReceiver : BroadcastReceiver() {
                         r.destroy()
                         return@post
                     }
-                    r.checkRecognitionSupport(ask, context.mainExecutor, object : android.speech.RecognitionSupportCallback {
-                        override fun onSupportResult(s: android.speech.RecognitionSupport) {
+                    r.checkRecognitionSupport(ask, context.mainExecutor, object : RecognitionSupportCallback {
+                        override fun onSupportResult(s: RecognitionSupport) {
                             pending.resultData = "installed=${s.installedOnDeviceLanguages} pending=${s.pendingOnDeviceLanguages} " +
                                 "supported=${s.supportedOnDeviceLanguages.take(30)} online=${s.onlineLanguages.take(10)}"
                             pending.finish()
@@ -194,8 +391,22 @@ class DebugReceiver : BroadcastReceiver() {
                     })
                 }
             }
+            // Delete the enrolled custom wake word from the glasses.
+            "CWW_CLEAR" -> answerLater { if (assistant.wakeWord.clear()) "sent; the glasses answer with a result in the log" else "not sent" }
+            // Hearing correction: --es do correction (start, waited for) | stop | state.
+            "HEARING" -> answerLater {
+                when (intent.getStringExtra("do") ?: "state") {
+                    "correction" -> {
+                        hearing.startCorrection()
+                        val on = hearing.awaitRunning(HearingMode.CORRECTION, 10_000)
+                        "running=$on ${hearing.state.value}"
+                    }
+                    "stop" -> { hearing.stop(); hearing.awaitStopped(); "${hearing.state.value}" }
+                    else -> "${hearing.state.value}"
+                }
+            }
             // Restart only the glasses' assistant (it re-reads MobileConfig): live_caption_voice_id away and back.
-            "ASSISTANT_RESTART" -> answerLater { if (com.macedonga.visor.language.restartGlassesAssistant(settings)) "restarting the glasses' assistant" else "not connected" }
+            "ASSISTANT_RESTART" -> answerLater { if (restartGlassesAssistant(settings)) "restarting the glasses' assistant" else "not connected" }
             // Developer mode on or off: --ez on false.
             "DEVELOPER" -> {
                 developer.set(intent.getBooleanExtra("on", true))
@@ -225,54 +436,78 @@ class DebugReceiver : BroadcastReceiver() {
                     resultData = "sending; ${config.state.value.note}"
                 } else {
                     val (name, zip) = config.preview(on)
-                    java.io.File(context.getExternalFilesDir(null), name).writeBytes(zip)
+                    File(context.getExternalFilesDir(null), name).writeBytes(zip)
                     resultData = "$name ${zip.size} bytes"
                 }
             }
             // Every object in one RLDrive namespace: --es ns contacts_native
             "DRIVE_READ" -> answerLater {
-                val objects = settings.readNamespace(intent.getStringExtra("ns").orEmpty())
+                val objects = settings.readNamespace(intent.getStringExtra("ns").orEmpty()) ?: return@answerLater "no answer from the glasses"
                 "${objects.size} objects\n" + objects.take(intent.getIntExtra("n", 5)).joinToString("\n") { o ->
-                    "${o.type} ${o.uri} deleted=${o.deleted} raw=" + o.raw.joinToString("") { "%02x".format(it) }
+                    "${o.type} ${o.uri} deleted=${o.deleted} raw=" + o.raw.toHexString()
                 }
             }
             "READ_SETTINGS" -> {
                 settings.read()
                 resultData = "reading"
             }
+            // --es key
             "SETTINGS" -> resultData = intent.getStringExtra("key")?.let { "$it=${settings.value(it)}" }
                 ?: settings.state.value.stored.entries.joinToString("\n") { "${it.key}=${it.value}" }
+            // --es key --es value
             "SET" -> {
                 val key = intent.getStringExtra("key").orEmpty()
                 resultData = if (settings.write(key, intent.getStringExtra("value").orEmpty())) "written; READ_SETTINGS to check" else "refused: unknown key or value"
             }
+            // The albums, and how many of Visor's own files each top folder holds.
+            "ALBUMS" -> resultData = buildString {
+                appendLine("photos=${albums.photosPath()} videos=${albums.videosPath()} together=${albums.together.value} moving=${albums.moving.value} gallery=${library.items.value.size}")
+                val store = MediaStore.VOLUME_EXTERNAL_PRIMARY
+                for ((kind, uri) in listOf(
+                    "images" to MediaStore.Images.Media.getContentUri(store),
+                    "videos" to MediaStore.Video.Media.getContentUri(store),
+                )) {
+                    val counts = sortedMapOf<String, Int>()
+                    context.contentResolver.query(uri, arrayOf(MediaStore.MediaColumns.RELATIVE_PATH), null, null, null)?.use { c ->
+                        while (c.moveToNext()) c.getString(0).orEmpty().let { counts[it] = (counts[it] ?: 0) + 1 }
+                    }
+                    counts.forEach { (path, n) -> appendLine("$kind $path $n") }
+                }
+            }
+            // --es photos --es videos --ez together: as Settings does, moves included.
+            "ALBUM_SET" -> {
+                intent.getStringExtra("photos")?.let(albums::setPhotos)
+                intent.getStringExtra("videos")?.let(albums::setVideos)
+                if (intent.hasExtra("together")) albums.setTogether(intent.getBooleanExtra("together", false))
+                resultData = "set; ALBUMS to watch the move"
+            }
             "RAW" -> resultData = intent.getStringExtra("key")?.let { key ->
-                settings.rawObject(key)?.let { (ns, b) -> "$ns ${b.joinToString("") { "%02x".format(it) }}" } ?: "not read"
+                settings.rawObject(key)?.let { (ns, b) -> "$ns ${b.toHexString()}" } ?: "not read"
             }
             // An APK adb pushed into the external files dir, installed by the glasses' app manager: --es file --es pkg --el version.
             "APP_INSTALL" -> {
                 val file = pushed(context, intent.getStringExtra("file"))
                 val pkg = intent.getStringExtra("pkg").orEmpty()
-                resultData = if (file == null || pkg.isEmpty()) "need --es file (in ${context.getExternalFilesDir(null)}) and --es pkg" else "installing; see logcat -s Visor"
+                resultData = if (file == null || pkg.isEmpty()) "need --es file (in ${context.getExternalFilesDir(null)}) and --es pkg" else "installing; LOG for the result"
                 if (file != null && pkg.isNotEmpty()) scope.launch {
                     val done = runCatching {
-                        com.macedonga.visor.core.media.AppInstall(connection, airship).install(file, pkg, intent.getLongExtra("version", 1)) { log.add(it) }
+                        AppInstall(connection, airship).install(file, pkg, intent.getLongExtra("version", 1)) { log.add(it) }
                     }.getOrElse { it.toString() }
                     log.add("App install: $done")
                 }
             }
             // What the glasses' app manager says about a package: --es pkg.
-            "APP_QUERY" -> answerLater { com.macedonga.visor.core.media.AppInstall(connection, airship).query(intent.getStringExtra("pkg").orEmpty()) { log.add(it) } }
-            // A file adb pushed into this app's external files dir, offered to the glasses over airship.
+            "APP_QUERY" -> answerLater { AppInstall(connection, airship).query(intent.getStringExtra("pkg").orEmpty()) { log.add(it) } }
+            // A file adb pushed into this app's external files dir, offered to the glasses over airship: --es file --es ns.
             "PUSH_FILE" -> {
                 val file = pushed(context, intent.getStringExtra("file"))
                 val namespace = intent.getStringExtra("ns").orEmpty()
-                answerLater {
-                    if (file == null) return@answerLater "no file ${intent.getStringExtra("file")} in ${context.getExternalFilesDir(null)}"
-                    val done = kotlinx.coroutines.CompletableDeferred<String?>()
+                resultData = if (file == null) "no file ${intent.getStringExtra("file")} in ${context.getExternalFilesDir(null)}" else "sending ${file.length()} bytes; LOG for the result"
+                if (file != null) scope.launch {
+                    val done = CompletableDeferred<String?>()
                     connection.submit { mux -> done.complete(airship.send(mux, namespace, file.name, file.readBytes())) }
                     val why = withTimeoutOrNull(60_000) { done.await() }
-                    if (done.isCompleted && why == null) "sent ${file.length()} bytes as ${file.name} in $namespace" else "failed: ${why ?: "no link or no answer"}"
+                    log.add("Push file: " + if (done.isCompleted && why == null) "sent ${file.length()} bytes as ${file.name} in $namespace" else "failed: ${why ?: "no link or no answer"}")
                 }
             }
             // A file adb pushed into the external files dir, offered over Wi-Fi Direct for its size: --es file --es ns.
@@ -280,17 +515,18 @@ class DebugReceiver : BroadcastReceiver() {
                 val file = pushed(context, intent.getStringExtra("file"))
                 val namespace = intent.getStringExtra("ns").orEmpty()
                 val name = intent.getStringExtra("name") ?: file?.name.orEmpty()
-                // Minutes long, so it runs on its own and reports to logcat -s Visor, not to the broadcast.
-                resultData = if (file == null) "no file ${intent.getStringExtra("file")} in ${context.getExternalFilesDir(null)}" else "sending ${file.length()} bytes; see logcat -s Visor"
+                // Minutes long, so it runs on its own and reports to LOG, not to the broadcast.
+                resultData = if (file == null) "no file ${intent.getStringExtra("file")} in ${context.getExternalFilesDir(null)}" else "sending ${file.length()} bytes; LOG for the result"
                 if (file != null) scope.launch {
                     val started = System.currentTimeMillis()
                     val why = runCatching { live.overWifi { mux -> airship.send(mux, namespace, name, file) } }.getOrElse { it.toString() }
-                    Log.i("Visor", "PUSH_WIFI: " + if (why == null) "sent $name in $namespace in ${(System.currentTimeMillis() - started) / 1000} s" else "failed: $why")
+                    log.add("Push Wi-Fi: " + if (why == null) "sent $name in $namespace in ${(System.currentTimeMillis() - started) / 1000} s" else "failed: $why")
                 }
             }
             "MEDIA" -> resultData = media.captures.value.joinToString("\n") { c ->
                 "${c.handle} kind=${c.kindCode} ${c.takenAtMillis}${if (c.landscape) " landscape" else ""} " + c.assets.joinToString(" ") { "${it.id}:0x${it.typeCode.toString(16)}:${it.size}" }
             }.ifEmpty { "no captures listed; open Media once or wait for the list" }
+            // --es handle a,b: by handle prefix.
             "IMPORT" -> {
                 val handles = intent.getStringExtra("handle")?.split(",").orEmpty()
                 if (handles.isEmpty()) {
@@ -309,28 +545,178 @@ class DebugReceiver : BroadcastReceiver() {
                 val id = capture?.assets?.firstOrNull { it.id.startsWith(asset) }?.id
                 if (capture == null || id == null) resultData = "no such capture or asset"
                 else {
-                    connection.submit { com.macedonga.visor.core.media.requestAsset(it, capture.handle, id) }
+                    connection.submit { requestAsset(it, capture.handle, id) }
                     resultData = "asked for $id"
                 }
             }
+            "PROMPTER" -> answerLater {
+                if (intent.getBooleanExtra("close", false)) prompter.close()
+                else prompter.show(
+                    intent.getStringExtra("text") ?: "Testing the teleprompter from Visor.",
+                    PrompterLook(paged = intent.getBooleanExtra("paged", false), followVoice = intent.getBooleanExtra("voice", false)),
+                )
+                delay(300)
+                withTimeoutOrNull(8_000) {
+                    prompter.state.first { it.phase != PrompterPhase.STARTING && it.phase != PrompterPhase.CLOSING }
+                }
+                prompter.state.value.let { "${it.phase} refusal=${it.refusal}" }
+            }
+            // --es features a,b: what Meta has for these constellation features on this pair.
+            "PACKS" -> answerLater {
+                val features = intent.getStringExtra("features").orEmpty().split(',').map { it.trim() }.filter { it.isNotEmpty() }
+                runCatching { languages.offersFor(features) }.fold(
+                    { offers -> offers.joinToString("\n") { "${it.feature} ${it.resource} ${it.version} ${it.type} app ${it.appId} ${it.size} ${it.url}" }.ifEmpty { "none" } },
+                    { "failed: ${it.message}" },
+                )
+            }
+            // --ei svc --ei type --es hex: one message on a service; the answer is what the glasses said within 5 s.
+            "SEND" -> answerLater {
+                val svc = intent.getIntExtra("svc", 0)
+                // A svc28 type the Display does not know kills its system process; a model not known yet may be one.
+                val display = connection.state.value.info.let { it == null || isDisplayBuild(it.build) }
+                val type = intent.getIntExtra("type", 0)
+                if (svc == SVC_STATUS && display && type !in DISPLAY_STATUS_TYPES) {
+                    return@answerLater "refused: the Display has no svc28 type $type"
+                }
+                val body = intent.getStringExtra("hex").orEmpty().chunked(2).filter { it.length == 2 }.map { it.toInt(16).toByte() }.toByteArray()
+                val heard = Collections.synchronizedList(mutableListOf<String>())
+                // Subscribed before the send, so a fast reply is not missed.
+                val watch = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                    launch(start = CoroutineStart.UNDISPATCHED) { connection.serviceData.collect { if (it.serviceId == svc) heard += "type ${it.messageType}: " + it.payload.toHexString() } }
+                    launch(start = CoroutineStart.UNDISPATCHED) {
+                        connection.errors.collect { if (it.serviceId == svc) heard += "status 0x%04x".format(Locale.ROOT, it.errorId) }
+                    }
+                }
+                connection.submit { it.sendOnService(svc, type, body) }
+                delay(5_000)
+                watch.cancel()
+                heard.joinToString("\n").ifEmpty { "nothing" }
+            }
+            // --es doc <client_doc_id> --es name <friendly name> --es vars <json>: one query on Meta's ar GraphQL, as the
+            // user; the answer's first 4000 characters, or with --es save <file> all of it in files/debug/<file>.
+            "GRAPHQL" -> answerLater {
+                val text = login.graphql(
+                    intent.getStringExtra("name").orEmpty(),
+                    intent.getStringExtra("doc").orEmpty(),
+                    intent.getStringExtra("vars64")?.let { String(Base64.decode(it, 0)) } ?: intent.getStringExtra("vars") ?: "{}",
+                )
+                val save = intent.getStringExtra("save")?.takeIf { it.matches(Regex("[A-Za-z0-9_.-]+")) }
+                if (save != null) {
+                    File(context.filesDir, "debug").apply { mkdirs() }.resolve(save).writeText(text)
+                    "saved ${text.length} characters to files/debug/$save"
+                } else if (!intent.getBooleanExtra("shape", false)) text.take(4000) else {
+                    // Every path with its type, a string's length and start: the structure without the bulk.
+                    val out = StringBuilder()
+                    fun walk(path: String, v: Any?) {
+                        when (v) {
+                            is JSONObject -> v.keys().forEach { walk("$path.$it", v.opt(it)) }
+                            is JSONArray -> { out.append("$path [${v.length()}]\n"); if (v.length() > 0) walk("$path[0]", v.opt(0)) }
+                            is String -> out.append("$path str(${v.length}) ${v.take(60).replace('\n', ' ')}\n")
+                            else -> out.append("$path = $v\n")
+                        }
+                    }
+                    walk("", JSONObject(text))
+                    out.toString().take(4000)
+                }
+            }
+            // --ez on false: tell the Display the phone is offline, so it keeps its apps off the phone's internet.
+            "INTERNET" -> {
+                internet.sharing = intent.getBooleanExtra("on", true)
+                resultData = "sharing=${internet.sharing}"
+            }
+            // The request log's newest entries, links cut at their query.
+            "REQUESTS" -> resultData = requests.items.value.takeLast(intent.getIntExtra("n", 30)).joinToString("\n") {
+                "${it.source} ${it.outcome ?: "running"} ${it.bytes}B ${it.millis}ms [${it.options}] ${it.url.substringBefore('?').take(160)}"
+            }.ifEmpty { "none" }
+            // --es key <MobileConfig param> --ez value true|false: one bool written to the glasses.
+            "MC_SET" -> answerLater {
+                config.send(mapOf(intent.getStringExtra("key").orEmpty() to intent.getBooleanExtra("value", false))) ?: "sent"
+            }
+            // --ez stop true to stop; the answer is the state once it settles.
+            "MIRROR" -> answerLater {
+                if (intent.getBooleanExtra("stop", false)) screencast.stop() else screencast.start()
+                delay(500)
+                withTimeoutOrNull(40_000) { screencast.state.first { it.phase != ScreencastPhase.STARTING } }
+                screencast.state.value.toString()
+            }
+            // --es feature live_captions_en: Meta's pack installed through the glasses' OTA service.
+            "CAPTION_PACK" -> {
+                captionPacks.install(intent.getStringExtra("feature") ?: "live_captions_en")
+                resultData = "installing; LOG for the result"
+            }
+            "CAPTIONS" -> answerLater {
+                val self = intent.getStringExtra("lang") ?: "en"
+                when {
+                    intent.getBooleanExtra("stop", false) -> captions.stop()
+                    intent.getBooleanExtra("show", false) -> Unit
+                    else -> captions.start(
+                        if (intent.hasExtra("other")) CaptionsMode.TRANSLATION else CaptionsMode.CAPTIONS,
+                        self, intent.getStringExtra("other") ?: self,
+                    )
+                }
+                delay(300)
+                withTimeoutOrNull(8_000) {
+                    captions.state.first { it.phase == CaptionsPhase.LIVE || it.phase == CaptionsPhase.IDLE }
+                }
+                captions.state.value.let { s -> "${s.phase} ${s.mode} refusal=${s.refusal}\n" + s.lines.joinToString("\n") { "${if (it.done) "" else "… "}${it.text}${it.source?.let { src -> " ($src)" }.orEmpty()}" } }
+            }
+            // The Neural Band paired with the Display over svc41109, set up here first when it has no record. It outlasts a
+            // broadcast, so it answers at once; BAND_PAIR_STATUS says how it ended.
+            "BAND_PAIR" -> {
+                bandPair.start()
+                resultData = "started; BAND_PAIR_STATUS for how it ended, LOG for the steps"
+            }
+            "BAND_PAIR_STATUS" -> resultData = bandPair.status.value.toString()
+            // Shares the band with the Display through the phone's relay (--ez on false stops); LOG has the relay's steps.
+            "BAND_SHARE" -> {
+                bandLink.share(intent.getBooleanExtra("on", true))
+                resultData = "shared=${bandLink.shared.value} band=${bandLink.state.value.link}"
+            }
+            // The strongest BLE advertisers heard in --ei ms (10 s by default), each with its manufacturer data by company id.
+            "BLE_SCAN" -> answerLater { bleScan(context, intent.getIntExtra("ms", 10_000).toLong()) }
+            // A Display's classic bond for calls: CLASSIC_PROBE only reads. CLASSIC_REBOND and CLASSIC_UNDO unpair the glasses
+            // and pair them again, so they need --ez confirm true; they answer at once and log each step (LOG).
+            "CLASSIC_PROBE" -> answerLater { classicBond.perform(ClassicBond.Action.PROBE).toString() }
+            "CLASSIC_REBOND", "CLASSIC_UNDO" -> resultData = if (!intent.getBooleanExtra("confirm", false)) {
+                "this unpairs the glasses and pairs them again: add --ez confirm true"
+            } else {
+                classicBond.start(if (action == "CLASSIC_REBOND") ClassicBond.Action.REBOND else ClassicBond.Action.UNDO)
+                "started; LOG for the steps"
+            }
+            // --es do directions --es to --es mode | play --es q --es app | media --es c pause|resume|next|... | now.
             "PHONE" -> answerLater {
                 when (intent.getStringExtra("do")) {
                     "directions" -> phone.directions(intent.getStringExtra("to").orEmpty(), intent.getStringExtra("mode").orEmpty()).toString()
                     "play" -> phone.play(intent.getStringExtra("q").orEmpty(), intent.getStringExtra("app").orEmpty()).toString()
-                    "media" -> phone.control(com.macedonga.visor.core.assistant.MediaControl.valueOf(intent.getStringExtra("c").orEmpty().uppercase())).toString()
+                    "media" -> phone.control(MediaControl.valueOf(intent.getStringExtra("c").orEmpty().uppercase())).toString()
                     else -> phone.nowPlaying().toString()
                 }
             }
+            // --es q
             "ASK" -> answerLater { withTimeoutOrNull(25_000) { assistant.ask(intent.getStringExtra("q") ?: "Say hello.") } ?: "no answer in 25 s" }
+            // --es q: a question typed for the Display, as the Meta AI page asks it; the answer is its turn's, the log says who gave it.
+            "ASK_DISPLAY" -> answerLater {
+                val id = assistant.askOnDisplay(intent.getStringExtra("q") ?: "What is the tallest mountain?")
+                    ?: return@answerLater "not sent: not a Display, or its assistant is not registered"
+                withTimeoutOrNull(25_000) {
+                    var turn = assistant.diary.turn(id)
+                    while (turn != null && turn.answer.isEmpty() && turn.problem.isEmpty()) {
+                        delay(250)
+                        turn = assistant.diary.turn(id)
+                    }
+                    turn?.let { it.answer.ifEmpty { it.problem } }
+                } ?: "no answer in 25 s"
+            }
+            // MCP_PROBE, MCP_ADD: --es url --es name --es auth NONE|TOKEN|HEADER --es secret --es header.
             "MCP_PROBE" -> answerLater {
-                val auth = com.macedonga.visor.core.assistant.mcp.AuthKind.valueOf(intent.getStringExtra("auth") ?: "NONE")
+                val auth = AuthKind.valueOf(intent.getStringExtra("auth") ?: "NONE")
                 mcp.probe(intent.getStringExtra("url").orEmpty(), auth, intent.getStringExtra("secret").orEmpty(), intent.getStringExtra("header").orEmpty()).toString()
             }
             "MCP_ADD" -> {
-                val server = com.macedonga.visor.core.assistant.mcp.McpServer(
+                val server = McpServer(
                     name = intent.getStringExtra("name") ?: "Test",
                     url = intent.getStringExtra("url").orEmpty(),
-                    auth = com.macedonga.visor.core.assistant.mcp.AuthKind.valueOf(intent.getStringExtra("auth") ?: "NONE"),
+                    auth = AuthKind.valueOf(intent.getStringExtra("auth") ?: "NONE"),
                     secret = intent.getStringExtra("secret").orEmpty(),
                     header = intent.getStringExtra("header").orEmpty(),
                 )
@@ -342,29 +728,83 @@ class DebugReceiver : BroadcastReceiver() {
                 "${s.id} ${s.name} ${s.url} auth=${s.auth} enabled=${s.enabled} transport=${s.transport} phase=${st?.phase} busy=${st?.busy} " +
                     "icon=${st?.icon?.size} error=${st?.error} info=${st?.info} tools=${st?.tools?.joinToString(",") { it.name }}"
             }
+            // What the model would get.
             "MCP_TOOLS" -> answerLater {
                 val box = mcp.toolbox()
                 box.tools.joinToString("\n") { "${it.name} (${it.tool.name}) readOnly=${it.tool.readOnly}" } + "\nPROMPT:" + box.prompt
             }
+            // --es tool exposed-name --es args json
             "MCP_CALL" -> answerLater {
                 val box = mcp.toolbox()
                 val tool = box.find(intent.getStringExtra("tool").orEmpty()) ?: return@answerLater "no such tool; have ${box.tools.joinToString { it.name }}"
-                val (result, action) = mcp.call(tool, org.json.JSONObject(intent.getStringExtra("args") ?: "{}"))
+                val (result, action) = mcp.call(tool, JSONObject(intent.getStringExtra("args") ?: "{}"))
                 "error=${result.isError} action=$action\n${result.text}"
             }
             "MCP_SIGNIN" -> answerLater {
                 val id = intent.getStringExtra("id").orEmpty()
                 mcp.signIn(id)
                 withTimeoutOrNull(20_000) {
-                    mcp.signIn.first { it.id == id && (it is com.macedonga.visor.core.assistant.mcp.SignIn.InBrowser || it is com.macedonga.visor.core.assistant.mcp.SignIn.Failed) }
+                    mcp.signIn.first { it.id == id && (it is SignIn.InBrowser || it is SignIn.Failed) }
                 }.toString()
             }
             "MCP_COMPLETE" -> answerLater {
                 val taken = mcp.complete(intent.getStringExtra("uri").orEmpty())
                 if (!taken) return@answerLater "not a sign-in's redirect"
                 withTimeoutOrNull(20_000) {
-                    mcp.signIn.first { it is com.macedonga.visor.core.assistant.mcp.SignIn.Done || it is com.macedonga.visor.core.assistant.mcp.SignIn.Failed }
+                    mcp.signIn.first { it is SignIn.Done || it is SignIn.Failed }
                 }.toString()
+            }
+            // A lease that needs Wi-Fi, held and let go as the Display's would be.
+            "WIFI_LINK" -> resultData = if (intent.getBooleanExtra("on", true)) {
+                wifiLink.refusal()?.let { "refused: $it" } ?: run { wifiLink.hold("debug"); "moving" }
+            } else {
+                wifiLink.release("debug")
+                "released"
+            }
+            // --es id
+            // A network client with a webhook, as Advanced > Network access adds one: --es name, --es scopes a,b,
+            // --es webhook URL, --es topics a,b. Answers its token. NET_CLIENT_REMOVE --es name takes it away.
+            "NET_CLIENT" -> resultData = networkClients.add(
+                intent.getStringExtra("name") ?: "debug",
+                intent.getStringExtra("scopes").orEmpty().split(',').filter { it.isNotBlank() }.map(::Scope).toSet(),
+                intent.getStringExtra("webhook"),
+                intent.getStringExtra("topics").orEmpty().split(',').filter { it.isNotBlank() },
+            )
+            // An app card on the Briefing: --es id, --es name, --es title, --es text, --es detail; CARD_REMOVE --es id.
+            "CARD" -> {
+                val title = intent.getStringExtra("title") ?: "Visor"
+                val text = intent.getStringExtra("text") ?: "A card of Visor's own."
+                val layout = Layout {
+                    gap = 8
+                    row {
+                        gap = 12
+                        crossAlign = LayoutAlign.CENTER
+                        icon(LayoutIconName.BELL)
+                        text(title) { style = LayoutStyle.HEADING }
+                    }
+                    text(text)
+                }
+                val detail = intent.getStringExtra("detail")?.let { more ->
+                    Layout {
+                        gap = 12
+                        text(title) { style = LayoutStyle.HEADING }
+                        text(text)
+                        more.split('|').forEach { text(it) { style = LayoutStyle.META } }
+                    }
+                }
+                briefing.set("com.macedonga.visor.debug", intent.getStringExtra("id") ?: "test", intent.getStringExtra("name") ?: "Visor test", "bell", layout, detail)
+                resultData = "set; the Briefing shows it when it asks again"
+            }
+            // A card that shows every card feature: CARD_SHOWCASE.
+            "CARD_SHOWCASE" -> {
+                val card = showcase()
+                briefing.set("com.macedonga.visor.debug", card.id, card.name, card.icon.id, card.layout, card.detail)
+                resultData = "set; the Briefing shows it when it asks again"
+            }
+            "CARD_REMOVE" -> resultData = briefing.remove("com.macedonga.visor.debug", intent.getStringExtra("id") ?: "test").toString()
+            "NET_CLIENT_REMOVE" -> {
+                networkClients.remove(intent.getStringExtra("name") ?: "debug")
+                resultData = "removed"
             }
             "MCP_REMOVE" -> {
                 mcp.store.remove(intent.getStringExtra("id").orEmpty())
@@ -372,6 +812,19 @@ class DebugReceiver : BroadcastReceiver() {
             }
             else -> resultData = "unknown action $action"
         }
+    }
+
+    private fun demoPair(on: Boolean): String {
+        if (!on) {
+            pairs.demo(null, null)
+            looks.demo(DEMO_SERIAL, null, null)
+            return "demo pair gone"
+        }
+        val look = GlassesLook("skyler", "Skyler", "shiny_black", "Shiny Black", "clear", "Clear", null)
+        looks.demo(DEMO_SERIAL, look, DEMO_PICTURE)
+        val seen = PairSeen(glasses = 64, case = 88, at = System.currentTimeMillis() - 2 * 3_600_000L, folded = true)
+        pairs.demo(KnownPair(DEMO_SERIAL, "00:00:00:00:00:00"), seen)
+        return "demo pair on: swipe the home's stage"
     }
 
     private fun status(): String {
@@ -392,6 +845,30 @@ class DebugReceiver : BroadcastReceiver() {
     }
 
     /** For an answer that takes seconds: the broadcast stays open until it is ready. */
+    @SuppressLint("MissingPermission")
+    private suspend fun bleScan(context: Context, ms: Long): String {
+        val scanner = context.getSystemService(BluetoothManager::class.java)?.adapter?.takeIf { it.isEnabled }?.bluetoothLeScanner
+            ?: return "Bluetooth is off"
+        val heard = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, String>>()
+        val callback = object : ScanCallback() {
+            override fun onScanResult(callbackType: Int, result: ScanResult) {
+                val record = result.scanRecord
+                val makers = record?.manufacturerSpecificData?.let { m ->
+                    (0 until m.size()).joinToString(" ") { i -> "%04x:".format(m.keyAt(i)) + m.valueAt(i).joinToString("") { "%02x".format(it) } }
+                }.orEmpty()
+                val name = record?.deviceName ?: runCatching { result.device.name }.getOrNull()
+                heard[result.device.address] = result.rssi to "${result.device.address} rssi=${result.rssi} name=$name maker=[$makers] services=${record?.serviceUuids.orEmpty()}"
+            }
+        }
+        scanner.startScan(null, ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(), callback)
+        try {
+            delay(ms)
+        } finally {
+            runCatching { scanner.stopScan(callback) }
+        }
+        return heard.values.sortedByDescending { it.first }.take(SCAN_SHOWN).joinToString("\n") { it.second }.ifEmpty { "nothing heard" }
+    }
+
     private fun answerLater(work: suspend () -> String) {
         val pending = goAsync()
         scope.launch {
@@ -403,13 +880,98 @@ class DebugReceiver : BroadcastReceiver() {
     }
 
     /** A file adb pushed into the external files dir, by [name]; a name that leads out of the dir finds nothing. */
-    private fun pushed(context: Context, name: String?): java.io.File? {
+    private fun pushed(context: Context, name: String?): File? {
         val dir = context.getExternalFilesDir(null)?.canonicalFile ?: return null
-        val file = java.io.File(dir, name ?: return null).canonicalFile
+        val file = File(dir, name ?: return null).canonicalFile
         return file.takeIf { it.toPath().startsWith(dir.toPath()) && it.isFile }
     }
 
     private companion object {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        const val DEMO_SERIAL = "DEMO00SKYLER00"
+        const val SCAN_SHOWN = 25
+        // Meta's own picture of a black Skyler, as its asset service hands it out.
+        const val DEMO_PICTURE = "https://scontent.xx.fbcdn.net/mci_ab/uap/asset_manager/name_revision/?ab_b=e&ab_page=AssetManagerNameAndRevision" +
+            "&ab_entry=RBM2-Skyler-ShinyBlack-Clear-Concord&set=mwa_device_image_assets&revision=1837680503843762&density=3&mode=dark"
+    }
+
+    // The card an app would write with the VDK's builder and blocks.
+    private fun showcase() = BriefingCard("showcase", "Lake weather", LayoutIconName.CLOUD) {
+        header(LayoutIconName.CLOUD, "Lake weather")
+        stat("18°", "Low 9°")
+        change("2° warmer than yesterday", rising = true)
+        text("Partly cloudy over the lake, clearing tonight with a light breeze from the north") { style = LayoutStyle.META; maxLines = 1 }
+        icon(LayoutIconName.WEATHER_PARTLY_CLOUDY) { size = 96; pinTop = 0; pinEnd = 0 }
+        pages {
+            page {
+                gap = 8
+                text("Brugnera") { style = LayoutStyle.META }
+                row {
+                    crossAlign = LayoutAlign.CENTER
+                    column {
+                        grow = 1.0
+                        stat("18°", "H 21°  L 9°")
+                        text("Partly cloudy")
+                    }
+                    icon(LayoutIconName.WEATHER_PARTLY_CLOUDY) { size = 112 }
+                }
+                image("https://picsum.photos/id/1036/560/240") { height = 140; corners = LayoutCorners.MEDIUM }
+            }
+            page {
+                gap = 16
+                header("Next hours")
+                row {
+                    align = LayoutAlign.SPACE_BETWEEN
+                    listOf(
+                        Triple("Now", LayoutIconName.WEATHER_PARTLY_CLOUDY, 18), Triple("15", LayoutIconName.WEATHER_SUNNY, 19),
+                        Triple("16", LayoutIconName.WEATHER_SUNNY, 18), Triple("17", LayoutIconName.WEATHER_CLOUDY, 16),
+                        Triple("18", LayoutIconName.WEATHER_NIGHT_CLEAR, 14),
+                    ).forEach { (hour, glyph, temp) ->
+                        column {
+                            gap = 8
+                            text(hour) { style = LayoutStyle.META; align = LayoutAlign.CENTER }
+                            icon(glyph) { size = 48; alignSelf = LayoutAlign.CENTER }
+                            text("$temp°") { align = LayoutAlign.CENTER }
+                        }
+                    }
+                }
+                chart(listOf(18.0, 19.0, 18.0, 16.0, 14.0, 13.0, 12.0, 12.0, 11.0, 10.0)) { height = 90 }
+            }
+            page {
+                gap = 14
+                header("This week")
+                listOf(Triple("Mon", 9, 21), Triple("Tue", 11, 23), Triple("Wed", 8, 17), Triple("Thu", 6, 14)).forEach { (day, low, high) ->
+                    row {
+                        gap = 12
+                        crossAlign = LayoutAlign.CENTER
+                        text(day) { style = LayoutStyle.META }
+                        text("$low°") { style = LayoutStyle.META }
+                        // The day's range on the week's, 5 to 25 degrees.
+                        row {
+                            grow = 1.0
+                            height = 8
+                            crossAlign = LayoutAlign.STRETCH
+                            background = LayoutColor.TRACK
+                            row { grow = (low - 5) / 20.0 }
+                            row { grow = (high - low) / 20.0; background = LayoutColor.BLUE }
+                            row { grow = (25 - high) / 20.0 }
+                        }
+                        text("$high°")
+                    }
+                }
+                chart(listOf(2.0, 0.0, 5.0, 8.0, 1.0, 0.0, 3.0)) { style = LayoutStyle.BARS; height = 60 }
+            }
+            page {
+                gap = 12
+                header(LayoutIconName.CHART_LINE, "Stocks")
+                stat("27,012.40")
+                change("+481.50 (+1.8%)", rising = true)
+                change("-12.10 (-0.4%)", rising = false)
+                field("Market cap", "$1.6T")
+                field("52W high", "$31,400.80")
+                progress(0.72)
+                buttons { button("refresh", "Refresh") { icon = LayoutIconName.TWO_ARROWS_CLOCKWISE; toast = "Refreshed" } }
+            }
+        }
     }
 }

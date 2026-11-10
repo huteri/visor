@@ -4,27 +4,40 @@ import java.security.MessageDigest
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
-/** AirShield key schedule, live-confirmed 2026-06-11 (notes/67, `hci/reproduce_kdf.py`). */
+/** AirShield key schedule. */
 object Kdf {
 
-    val AIRSHIELD_INFO: ByteArray = "AirShield".toByteArray(Charsets.US_ASCII)
-    val HMAC_DERIVE_LABEL: ByteArray = "hmac_derive".toByteArray(Charsets.US_ASCII)
+    private val AIRSHIELD_INFO: ByteArray = "AirShield".toByteArray(Charsets.US_ASCII)
+    private val HMAC_DERIVE_LABEL: ByteArray = "hmac_derive".toByteArray(Charsets.US_ASCII)
 
-    /** Derive ONE direction's key set, in the live-confirmed construction. */
+    // QCS7 info: "AirShield" in a 128-byte label, then u32 32 and u32 256 (libairshield HKDF::getQcs7HkdfInfo).
+    private val QCS7_INFO: ByteArray = AIRSHIELD_INFO.copyOf(128) + byteArrayOf(32, 0, 0, 0, 0, 1, 0, 0)
+
+    /** EncryptionParameters flag 0x04: a separate HMAC key. The Neural Band offers 27, without it. */
+    const val MULTIKEY: Int = 4
+
+    /** QuirksMode 1 (QCS7), sent by Ray-Ban Meta Burbank Audio: the HKDF expand takes [QCS7_INFO], the MAC word ends in 1. */
+    const val QUIRKS_QCS7: Int = 1
+
+    /** One direction's key set. */
     fun deriveDirectionKeys(
         ecdhSecret: ByteArray,
         nonce: ByteArray,
         seed: ByteArray,
         preambleIv: ByteArray,
-        info: ByteArray = AIRSHIELD_INFO,
+        // Without Multikey on both ends the AES key is the HMAC key too.
+        multikey: Boolean = true,
+        quirks: Int = 0,
     ): SessionKeys {
         require(ecdhSecret.size == 32) { "ECDH secret must be 32 bytes, got ${ecdhSecret.size}" }
         require(preambleIv.size == 16) { "preamble IV must be 16 bytes, got ${preambleIv.size}" }
 
+        val info = if (quirks == QUIRKS_QCS7) QCS7_INFO else AIRSHIELD_INFO
         val aesSalt = sha256(nonce, seed)
+        val aesKey = hkdfExpand(hkdfExtract(aesSalt, ecdhSecret), info)
+        if (!multikey) return SessionKeys(aesKey = aesKey, hmacKey = aesKey, iv = preambleIv)
         val hmacSalt = sha256(seed, nonce, HMAC_DERIVE_LABEL)
-        val aesKey = hkdfExpand(hkdfExtract(aesSalt, ecdhSecret), info, 32)
-        val hmacKey = hkdfExpand(hkdfExtract(hmacSalt, ecdhSecret), info, 32)
+        val hmacKey = hkdfExpand(hkdfExtract(hmacSalt, ecdhSecret), info)
         return SessionKeys(aesKey = aesKey, hmacKey = hmacKey, iv = preambleIv)
     }
 
@@ -36,27 +49,14 @@ object Kdf {
 
     private fun hmacSha256(key: ByteArray, data: ByteArray): ByteArray {
         val mac = Mac.getInstance("HmacSHA256")
-        // An all-zero key is legal here and Mac rejects an empty one, not a zero one.
         mac.init(SecretKeySpec(key, "HmacSHA256"))
         return mac.doFinal(data)
     }
 
     private fun hkdfExtract(salt: ByteArray, ikm: ByteArray): ByteArray = hmacSha256(salt, ikm)
 
-    private fun hkdfExpand(prk: ByteArray, info: ByteArray, length: Int = 32): ByteArray {
-        val out = ArrayList<Byte>(length + 32)
-        var t = ByteArray(0)
-        var counter = 1
-        while (out.size < length) {
-            t = hmacSha256(prk, t + info + byteArrayOf(counter.toByte()))
-            t.forEach(out::add)
-            counter += 1
-        }
-        return out.toByteArray().copyOf(length)
-    }
-
-    // `kdf.py` also binds the name `derive_session_keys` to `derive_direction_keys` for
-    // backward compatibility. It has no distinct behaviour, so it is not ported.
+    // RFC 5869 T(1): one HMAC-SHA256 block is the whole 32-byte key.
+    private fun hkdfExpand(prk: ByteArray, info: ByteArray): ByteArray = hmacSha256(prk, info + byteArrayOf(1))
 }
 
 /** One direction's key set: AES-256, HMAC-SHA256, and the initial CBC IV. */
@@ -67,22 +67,4 @@ class SessionKeys(
     val hmacKey: ByteArray,
     /** 16 bytes, the preamble nonce, which is this direction's initial CBC IV. */
     val iv: ByteArray,
-) {
-    override fun equals(other: Any?): Boolean {
-        if (this === other) return true
-        if (other !is SessionKeys) return false
-        return aesKey.contentEquals(other.aesKey) &&
-            hmacKey.contentEquals(other.hmacKey) &&
-            iv.contentEquals(other.iv)
-    }
-
-    override fun hashCode(): Int {
-        var result = aesKey.contentHashCode()
-        result = 31 * result + hmacKey.contentHashCode()
-        result = 31 * result + iv.contentHashCode()
-        return result
-    }
-
-    /** Deliberately says nothing about the key material. */
-    override fun toString(): String = "SessionKeys(aes=32B, hmac=32B, iv=${iv.size}B)"
-}
+)

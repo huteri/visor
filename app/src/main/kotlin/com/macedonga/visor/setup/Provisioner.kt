@@ -9,6 +9,7 @@ import com.macedonga.visor.core.connection.TransportFactory
 import com.macedonga.visor.core.identity.BundleState
 import com.macedonga.visor.core.identity.IdentityBundle
 import com.macedonga.visor.core.identity.IdentityStore
+import com.macedonga.visor.core.identity.devicePublicKey
 import com.macedonga.visor.core.identity.nowIso
 import com.macedonga.visor.core.identity.provision.ProvisionStep
 import com.macedonga.visor.core.identity.provision.WrongOwnerError
@@ -45,9 +46,9 @@ class Provisioner @Inject constructor(
 ) {
     sealed interface Status {
         data object Idle : Status
-        data class Running(val address: String, val reached: List<ProvisionStep>) : Status
-        data class Done(val target: GlassesTarget, val reusedKey: Boolean) : Status
-        data class Failed(val address: String, val reached: List<ProvisionStep>, val reason: String, val wrongOwner: Boolean = false) : Status
+        data class Running(val reached: List<ProvisionStep>) : Status
+        data class Done(val target: GlassesTarget) : Status
+        data class Failed(val reached: List<ProvisionStep>, val wrongOwner: Boolean = false) : Status
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -58,24 +59,29 @@ class Provisioner @Inject constructor(
     fun start(address: String) {
         if (_status.value is Status.Running) return
         val reached = mutableListOf<ProvisionStep>()
-        _status.value = Status.Running(address, emptyList())
+        _status.value = Status.Running(emptyList())
         log.add("Setup: starting on $address")
         scope.launch {
+            // A failure lets go of the LE hold only once this setup took it from the service.
+            var held = false
             try {
                 releaseTheLink()
                 // Over LE when it comes up: folded in pairing mode the glasses may not answer on RFCOMM.
                 keeper.hold(address)
+                held = true
                 val existing = withContext(Dispatchers.IO) { store.ownerKeyPem() }
                 log.add(if (existing != null) "Setup: reusing the owner key already on this phone" else "Setup: making a new owner key")
                 val result = provision(
                     transport = transports.create(GlassesLink.Bluetooth(address)),
                     source = login.source,
                     existingKeyPem = existing,
-                ) { step ->
-                    reached += step
-                    _status.value = Status.Running(address, reached.toList())
-                    log.add("Setup: ${step.words()}")
-                }
+                    onStep = { step ->
+                        reached += step
+                        _status.value = Status.Running(reached.toList())
+                        log.add("Setup: ${step.words()}")
+                    },
+                    onLink = { log.add("Setup: link $it") },
+                )
                 withContext(Dispatchers.IO) {
                     store.save(
                         IdentityBundle(
@@ -85,15 +91,17 @@ class Provisioner @Inject constructor(
                             createdAt = nowIso(),
                             provenance = "change-owner",
                             state = BundleState.UNVERIFIED,
+                            devicePublicKey = result.deviceEcPublicKey ?: devicePublicKey(result.deviceCert),
                         ),
                     )
                 }
                 log.add("Setup: owner changed. Serial ${result.serial}, key reused: ${result.reusedKey}")
-                _status.value = Status.Done(GlassesTarget(GlassesLink.Bluetooth(address), result.serial), result.reusedKey)
+                _status.value = Status.Done(GlassesTarget(GlassesLink.Bluetooth(address), result.serial))
             } catch (error: Exception) {
                 val reason = error.message ?: error.javaClass.simpleName
                 log.add("Setup failed: $reason")
-                _status.value = Status.Failed(address, reached.toList(), reason, wrongOwner = error is WrongOwnerError)
+                if (held) keeper.release()
+                _status.value = Status.Failed(reached.toList(), wrongOwner = error is WrongOwnerError)
             }
         }
     }
@@ -119,7 +127,7 @@ class Provisioner @Inject constructor(
     }
 }
 
-/** The setup steps in plain words, shared by the screen and the event log. */
+/** The setup steps in plain words, for the event log. */
 fun ProvisionStep.words(): String = when (this) {
     ProvisionStep.TOKEN -> "getting a pairing token from Meta"
     ProvisionStep.CONNECT -> "reaching the glasses over Bluetooth"
@@ -128,6 +136,7 @@ fun ProvisionStep.words(): String = when (this) {
     ProvisionStep.SKIP_CHALLENGE -> "asking the glasses to skip the button press"
     ProvisionStep.PAIR_REQUEST -> "asking Meta to start the pairing"
     ProvisionStep.START_CHANGE_OWNER -> "handing the glasses the pending pairing"
+    ProvisionStep.PRESS_BUTTON -> "waiting for a press of the glasses' button"
     ProvisionStep.PAIR -> "asking Meta to finish the pairing"
     ProvisionStep.FINISH_CHANGE_OWNER -> "the glasses saving this phone's key"
 }

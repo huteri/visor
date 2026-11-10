@@ -1,5 +1,5 @@
 # Builds the signed release APK for a version tag (v1.2.3) and publishes it as a GitHub release.
-# Run it by hand to get a draft release of the current main instead.
+# Run it by hand for a draft release of the branch it runs on.
 #
 # Secrets: VISOR_KEYSTORE_BASE64 (the PKCS12 keystore, base64), VISOR_KEYSTORE_PASSWORD, VISOR_KEY_ALIAS,
 # and Meta's app tokens VISOR_META_HW_TOKEN, VISOR_META_AR_TOKEN and VISOR_META_FRL_TOKEN (README, Build from source).
@@ -96,6 +96,10 @@ jobs:
             echo "error: '$name' is not a version like 1.2.3 or 1.2.3-beta.1" >&2
             exit 1
           fi
+          if (( BASH_REMATCH[2] > 99 || BASH_REMATCH[3] > 99 )); then
+            echo "error: minor and patch must be under 100" >&2
+            exit 1
+          fi
           # 1.2.3 -> 10203, so every later version installs over the one before.
           code=$(( BASH_REMATCH[1] * 10000 + BASH_REMATCH[2] * 100 + BASH_REMATCH[3] ))
           {
@@ -105,7 +109,7 @@ jobs:
             echo "prerelease=$([ -n "${BASH_REMATCH[4]}" ] && echo true || echo false)"
           } >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: 21

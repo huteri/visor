@@ -26,7 +26,7 @@ class SpokenProgressPolicyTest {
         val initial = AssistantConfig()
         assertFalse(initial.spokenProgress)
         val enabled = initial.copy(spokenProgress = true)
-        assertEquals(initial.glassesVoice, enabled.glassesVoice)
+        assertEquals((initial.tts == TtsPath.GLASSES), (enabled.tts == TtsPath.GLASSES))
         assertTrue(SpokenProgressPolicy.eligible(enabled, live = false, session = false))
         assertFalse(SpokenProgressPolicy.eligible(enabled, live = true, session = false))
         assertFalse(SpokenProgressPolicy.eligible(enabled, live = false, session = true))

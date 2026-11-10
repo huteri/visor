@@ -7,6 +7,10 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.addPathNodes
 import androidx.compose.ui.unit.dp
+import java.util.Locale
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.sin
 
 /** The app's icons: thin strokes on a 24 grid, drawn here rather than borrowed, tinted by whoever shows them. */
 object VisorIcons {
@@ -45,6 +49,9 @@ object VisorIcons {
 
     val Case = icon("M6 8h12a4 4 0 0 1 0 8H6a4 4 0 0 1 0-8z", "M2.5 12h19")
 
+    /** The Neural Band: the strap seen edge on, the pod on top. */
+    val Band = icon("M5 12.5a7 4.5 0 1 0 14 0a7 4.5 0 1 0-14 0", "M9.8 6.3h4.4a1 1 0 0 1 1 1v1.2H8.8V7.3a1 1 0 0 1 1-1z")
+
     /** A turn back round the clock: what just happened. */
     val Replay = icon("M5.2 13.5A7 7 0 1 0 7 7.1", "M6.6 3.6l.4 3.5 3.5-.4")
 
@@ -60,8 +67,6 @@ object VisorIcons {
     val Heat = icon("M10 14.4V5.5a2 2 0 0 1 4 0v8.9a3.6 3.6 0 1 1-4 0z", "M12 16.5v-6")
 
     val Battery = icon("M5 8h12a1.5 1.5 0 0 1 1.5 1.5v5A1.5 1.5 0 0 1 17 16H5a1.5 1.5 0 0 1-1.5-1.5v-5A1.5 1.5 0 0 1 5 8z", "M21 11v2")
-
-    val Grid = icon("M9 4.5v15", "M15 4.5v15", "M4.5 9h15", "M4.5 15h15")
 
     val Bolt = icon("M13 3.5L7 13h4.5l-1 7.5L17 11h-4.5z", filled = true)
 
@@ -123,10 +128,13 @@ object VisorIcons {
 
     val Play = icon("M8.5 6.2v11.6l9.2-5.8z", filled = true)
 
-    val Pause = icon("M9 6.5v11", "M15 6.5v11")
+    val Pause = icon("M7.5 6.5H10v11H7.5z", "M14 6.5h2.5v11H14z", filled = true)
 
     /** Crop and turn. */
-    val Edit = icon("M7 3.5V17h13.5", "M3.5 7H17v13.5")
+    val Crop = icon("M7 3.5V17h13.5", "M3.5 7H17v13.5")
+
+    /** A pencil. */
+    val Rename = icon("M14.5 5.5l4 4L9 19H5v-4z", "M12.5 7.5l4 4")
 
     val Pin = icon("M12 20.5s-6-5.4-6-10.2a6 6 0 0 1 12 0c0 4.8-6 10.2-6 10.2z", "M12 10.3m-2 0a2 2 0 1 0 4 0a2 2 0 1 0-4 0")
 
@@ -147,6 +155,8 @@ object VisorIcons {
         "M12 4c2.4 2.2 3.5 5 3.5 8s-1.1 5.8-3.5 8c-2.4-2.2-3.5-5-3.5-8s1.1-5.8 3.5-8z",
     )
 
+    val Wifi = icon("M3.5 9.5a12 12 0 0 1 17 0", "M6.5 12.8a7.7 7.7 0 0 1 11 0", "M9.4 16a3.6 3.6 0 0 1 5.2 0", "M12 19.2h.01")
+
     /** A tap and its ripples. */
     val Touch = icon("M12 12m-1.5 0a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0-3 0", "M7.8 16.2a6 6 0 1 1 8.4 0", "M5 19a10 10 0 1 1 14 0")
 
@@ -154,9 +164,15 @@ object VisorIcons {
 
     val Phone = icon("M8 3.5h8a1.5 1.5 0 0 1 1.5 1.5v14a1.5 1.5 0 0 1-1.5 1.5H8A1.5 1.5 0 0 1 6.5 19V5A1.5 1.5 0 0 1 8 3.5z", "M10.5 17.5h3")
 
-    val Sliders = icon(
-        "M5 7h8", "M17 7h2", "M15 7m-2 0a2 2 0 1 0 4 0a2 2 0 1 0-4 0",
-        "M5 17h2", "M11 17h8", "M9 17m-2 0a2 2 0 1 0 4 0a2 2 0 1 0-4 0",
+    /** Angle brackets: the engineering page. */
+    val Code = icon("M9 7.5L4.5 12 9 16.5", "M15 7.5l4.5 4.5-4.5 4.5")
+
+    /** Four tiles: the apps that use the glasses through Visor. */
+    val Apps = icon(
+        "M6.3 4.5h2.4a1.8 1.8 0 0 1 1.8 1.8v2.4a1.8 1.8 0 0 1-1.8 1.8H6.3a1.8 1.8 0 0 1-1.8-1.8V6.3a1.8 1.8 0 0 1 1.8-1.8z",
+        "M15.3 4.5h2.4a1.8 1.8 0 0 1 1.8 1.8v2.4a1.8 1.8 0 0 1-1.8 1.8h-2.4a1.8 1.8 0 0 1-1.8-1.8V6.3a1.8 1.8 0 0 1 1.8-1.8z",
+        "M6.3 13.5h2.4a1.8 1.8 0 0 1 1.8 1.8v2.4a1.8 1.8 0 0 1-1.8 1.8H6.3a1.8 1.8 0 0 1-1.8-1.8v-2.4a1.8 1.8 0 0 1 1.8-1.8z",
+        "M15.3 13.5h2.4a1.8 1.8 0 0 1 1.8 1.8v2.4a1.8 1.8 0 0 1-1.8 1.8h-2.4a1.8 1.8 0 0 1-1.8-1.8v-2.4a1.8 1.8 0 0 1 1.8-1.8z",
     )
 
     val Info = icon("M12 12m-8 0a8 8 0 1 0 16 0a8 8 0 1 0-16 0", "M12 11v5", "M12 8h.01")
@@ -173,9 +189,6 @@ object VisorIcons {
 
     /** A plug: what the assistant is connected to. */
     val Plug = icon("M9 3.5v4", "M15 3.5v4", "M6.5 7.5h11v3a5.5 5.5 0 0 1-11 0z", "M12 16v4.5")
-
-    /** A four-point star: something the glasses can do that Meta keeps off. */
-    val Spark = icon("M12 3.5C12.7 9.2 14.8 11.3 20.5 12C14.8 12.7 12.7 14.8 12 20.5C11.3 14.8 9.2 12.7 3.5 12C9.2 11.3 11.3 9.2 12 3.5z")
 
     /** An ear: hearing the person in front of you. */
     val Ear = icon("M7.5 9.5a4.5 4.5 0 1 1 9 0c0 2.6-1.8 3.6-2.8 4.6-.8.8-1 1.6-1.2 2.6a2.6 2.6 0 0 1-5 .3", "M10 9.8a2 2 0 1 1 3.6 1.2")
@@ -195,6 +208,8 @@ object VisorIcons {
         "M7.5 11h4", "M13.5 11h3", "M7.5 14h7",
     )
 
+    val Mirror = icon("M4 5.5h16v11H4z", "M9.5 19.5h5", "M12 16.5v3")
+
     val People = icon(
         "M9 9m-2.5 0a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0", "M4 18.5a5 5 0 0 1 10 0",
         "M16 9.5m-2 0a2 2 0 1 0 4 0a2 2 0 1 0-4 0", "M15.5 14a4.2 4.2 0 0 1 4.5 4.5",
@@ -204,12 +219,12 @@ object VisorIcons {
 
     /** Short arcs around the centre of the grid, [count] of them, each half a step long. */
     private fun dashedRing(radius: Float, count: Int): Array<String> = Array(count) { k ->
-        val step = 2 * Math.PI / count
+        val step = 2 * PI / count
         val a0 = k * step
         val a1 = a0 + step / 2
-        fun x(a: Double) = 12 + radius * kotlin.math.cos(a)
-        fun y(a: Double) = 12 + radius * kotlin.math.sin(a)
-        "M%.2f %.2fA%.2f %.2f 0 0 1 %.2f %.2f".format(java.util.Locale.ROOT, x(a0), y(a0), radius, radius, x(a1), y(a1))
+        fun x(a: Double) = 12 + radius * cos(a)
+        fun y(a: Double) = 12 + radius * sin(a)
+        "M%.2f %.2fA%.2f %.2f 0 0 1 %.2f %.2f".format(Locale.ROOT, x(a0), y(a0), radius, radius, x(a1), y(a1))
     }
 
     private fun icon(vararg paths: String, filled: Boolean = false): ImageVector =

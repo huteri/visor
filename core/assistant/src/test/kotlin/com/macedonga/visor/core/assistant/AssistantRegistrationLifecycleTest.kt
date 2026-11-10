@@ -69,10 +69,10 @@ class AssistantRegistrationLifecycleTest {
         set(stream, "scope", backgroundScope)
         set(stream, "connection", connection)
         set(stream, "hosts", SessionHostFactory { _, _ -> host })
-        set(stream, "_log", MutableStateFlow<List<String>>(emptyList()))
         set(stream, "_notes", MutableSharedFlow<String>(extraBufferCapacity = 64))
+        set(stream, "heard", java.util.concurrent.ConcurrentHashMap.newKeySet<Int>())
         set(stream, "_wifiSession", MutableStateFlow<DataXConnection?>(null))
-        backgroundScope.launch { call(stream, "openWifiSession", GlassesTarget(GlassesLink.Wifi("127.0.0.1", 1234), "test"), mock(com.macedonga.visor.core.identity.IdentityBundle::class.java), "127.0.0.1", 1234, null) }
+        backgroundScope.launch { call(stream, "openWifiSession", GlassesTarget(GlassesLink.Wifi("127.0.0.1", 1234), "test"), mock(com.macedonga.visor.core.identity.IdentityBundle::class.java), "127.0.0.1", 1234, null, true) }
         runCurrent()
         backgroundScope.launch { events.emit(LinkStateChanged(LinkState.READY)) }
         runCurrent()

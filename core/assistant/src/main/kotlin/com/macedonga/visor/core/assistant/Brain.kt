@@ -8,8 +8,10 @@ import com.macedonga.visor.core.assistant.mcp.PHOTO_DATA_URL
 import com.macedonga.visor.core.assistant.mcp.ToolAction
 import com.macedonga.visor.core.assistant.mcp.ToolResult
 import com.macedonga.visor.core.assistant.mcp.Toolbox
+import com.macedonga.visor.core.connection.objects
 import java.net.HttpURLConnection
 import java.net.URL
+import java.text.Normalizer
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -26,15 +28,20 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** Where an answer comes from. */
-enum class Provider { CLAUDE, OPENAI_COMPATIBLE }
-
 /** One question, its answer and what the tools did for it: the conversation behind the next question. */
 data class Exchange(val question: String, val answer: String, val actions: List<ToolAction> = emptyList(), val image: ByteArray? = null)
 
 /** The answer as the model reads it later: with Visor's note of what the tools did, so words alone never pass for an action. */
 private fun Exchange.told(): String = if (actions.isEmpty()) answer else
-    answer + " [Visor: " + actions.joinToString("; ") { "${it.server} · ${it.what}, " + if (it.ok) "done" else "failed" }.replace(']', ')') + "]"
+    answer + " [Visor: " + actions.joinToString("; ") { "${it.server.ifEmpty { "Phone" }} · ${it.what}, " + if (it.ok) "done" else "failed" }.replace(']', ')') + "]"
+
+/** [past] as the conversation so far: each question and its answer. */
+private fun JSONArray.putPast(past: List<Exchange>): JSONArray = apply {
+    for (e in past) {
+        put(JSONObject().put("role", "user").put("content", e.question))
+        put(JSONObject().put("role", "assistant").put("content", e.told()))
+    }
+}
 
 /**
  * An answer, what the model chose to remember while giving it, and what it did with the person's tools. [ends]: the
@@ -48,17 +55,18 @@ data class Reply(
  * What one answer may use and what it did with it; [photo] is the glasses' JPEG that came with the question, [canEnd]
  * whether the model may end the conversation.
  */
-private class Turn(val box: Toolbox, val photo: ByteArray? = null, val canEnd: Boolean = false) {
+private class Turn(
+    val box: Toolbox, var photo: ByteArray? = null, val glasses: GlassesToolbox? = null, val canEnd: Boolean = false,
+    val capturePhoto: (suspend () -> ByteArray?)? = null,
+    val cameraAction: (suspend (CameraAction) -> Boolean)? = null,
+    val apps: List<AppTool> = emptyList(),
+) {
     val remembered = ArrayList<String>()
     val actions = ArrayList<ToolAction>()
     var ends = false
-}
-
-/** What the assistant keeps about the wearer across conversations; the model adds and drops entries with its tools. */
-interface MemoryBook {
-    val memories: StateFlow<List<Memory>>
-    fun remember(text: String): Memory
-    fun forget(id: String): Memory?
+    var cameraRequested = false
+    // A tool ran: asking again would run it twice.
+    var toolsRan = false
 }
 
 /**
@@ -67,23 +75,62 @@ interface MemoryBook {
  */
 data class Fields(val reasoningOff: Boolean, val completionTokens: Boolean, val thinks: Boolean = false)
 
-/** Where [Fields] are kept, by address and model, until either changes. */
+/** Who the answer is for: spoken by the glasses, or read on the phone. */
+enum class Audience { GLASSES, PHONE }
+
+/** Why a photo was refused before the glasses were asked: the wearer has not turned on Voice photos. */
+const val VOICE_PHOTOS_OFF = "turn on Voice photos in Meta AI settings before taking photos"
+
+enum class CameraAction(val tool: String, val title: String, val help: String, val confirmed: String) {
+    TAKE_PHOTO(
+        "take_photo", "Take photo",
+        "Take a normal photo to keep on the glasses, without analyzing the scene. No image is returned. " +
+            "Report failure rather than substituting look_at_view. At most one camera request per question.",
+        "photo capture started",
+    ),
+    RECORD_VIDEO(
+        "record_video", "Record video",
+        "Start recording a normal video on the glasses. Use for requests to record or film a video. " +
+            "The video stays on the glasses, not in image analysis. At most one camera request per question.",
+        "video recording started",
+    ),
+    RECORD_HYPERLAPSE(
+        "record_hyperlapse", "Record hyperlapse",
+        "Start recording a hyperlapse on the glasses, only when the wearer asks for hyperlapse. " +
+            "The video stays on the glasses. At most one camera request per question.",
+        "hyperlapse recording started",
+    ),
+    STOP_RECORDING(
+        "stop_recording", "Stop recording",
+        "Stop recording video or hyperlapse on the glasses. This does not stop music or end the conversation. " +
+            "It is available even when camera use is off. At most one camera request per question.",
+        "video recording is stopped",
+    ),
+}
+
+/** The model behind the assistant. The conversation comes with each question, from the diary; tools from [hub] and [phone]. */
+interface MemoryBook {
+    val memories: StateFlow<List<Memory>>
+    fun remember(text: String): Memory
+    fun forget(id: String): Memory?
+}
 interface FieldBook {
     fun fields(key: String): Fields?
     fun keep(key: String, fields: Fields)
 }
 
-/** Who the answer is for: spoken by the glasses, or read on the phone. */
-enum class Audience { GLASSES, PHONE }
-
-/** The model behind the assistant. The conversation comes with each question, from the diary; tools from [hub] and [phone]. */
 class Brain(
     private val config: () -> AssistantConfig,
     private val book: MemoryBook? = null,
     private val hub: McpHub? = null,
     private val fields: FieldBook? = null,
     phone: Phone? = null,
+    private val store: AssistantConfigStore? = null,
+    private val appTools: AppTools = AppTools { emptyList() },
+    private val chatGpt: ChatGptPlan? = null,
 ) {
+    constructor(store: AssistantConfigStore, diary: Diary, hub: McpHub, phone: Phone, appTools: AppTools, chatGpt: ChatGptPlan) :
+        this({ store.config.value }, diary, hub, store, phone, store, appTools, chatGpt)
     private val phoneTools = phone?.let(::PhoneTools)
 
     /**
@@ -98,17 +145,42 @@ class Brain(
         note: String = "",
         audience: Audience = Audience.GLASSES,
         canEnd: Boolean = false,
+        glasses: GlassesToolbox? = null,
+        capturePhoto: (suspend () -> ByteArray?)? = null,
+        cameraAction: (suspend (CameraAction) -> Boolean)? = null,
     ): Reply = withContext(Dispatchers.IO) {
         val conversation = coroutineContext[ConversationContext]
-        if (conversation != null) conversation.serialized { answerTurn(question, locale, past, image, note, audience, canEnd) }
-        else answerTurn(question, locale, past, image, note, audience, canEnd)
+        if (conversation != null) conversation.serialized { answerTurn(question, locale, past, image, note, audience, glasses, canEnd, capturePhoto, cameraAction) }
+        else answerTurn(question, locale, past, image, note, audience, glasses, canEnd, capturePhoto, cameraAction)
     }
 
-    private suspend fun answerTurn(question: String, locale: Locale, past: List<Exchange>, image: ByteArray?, note: String, audience: Audience, canEnd: Boolean): Reply {
-        val c = config()
-        check(c.apiKey.isNotBlank() || c.provider == Provider.OPENAI_COMPATIBLE) { "no API key is set" }
+    private suspend fun answerTurn(question: String, locale: Locale, past: List<Exchange>, image: ByteArray?, note: String, audience: Audience, glasses: GlassesToolbox?, canEnd: Boolean, capturePhoto: (suspend () -> ByteArray?)?, cameraAction: (suspend (CameraAction) -> Boolean)?): Reply {
+        // With the camera off only a stop goes without the model; the model answers the rest, its camera tools withheld.
+        val keyword = if (cameraAction != null && audience == Audience.GLASSES) {
+            cameraKeyword(question, locale)?.takeIf { it in cameraTools(config()) }
+        } else null
+        if (keyword != null) {
+            val turn = Turn(Toolbox(emptyList(), ""), cameraAction = cameraAction)
+            val result = runTool(keyword.tool, JSONObject(), turn)
+            val text = when {
+                !result.isError -> ""
+                result.text == VOICE_PHOTOS_OFF && locale.language == "vi" -> "Hãy bật Voice photos trong cài đặt Meta AI để chụp ảnh."
+                result.text == VOICE_PHOTOS_OFF -> "Turn on Voice photos in Meta AI settings to take photos."
+                locale.language == "vi" -> "Kính chưa xác nhận lệnh camera."
+                else -> "The glasses did not confirm the camera command."
+            }
+            return Reply(text, actions = turn.actions)
+        }
+        val c = ready()
         // The tools never stand in the way of an answer: without them the model still answers.
-        val turn = Turn(hub?.let { runCatching { it.toolbox() }.getOrNull() } ?: Toolbox(emptyList(), ""), image, canEnd)
+        val box = try {
+            hub?.toolbox() ?: Toolbox(emptyList(), "")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            Toolbox(emptyList(), "")
+        }
+        val turn = Turn(box, image, glasses?.described(), canEnd, capturePhoto, cameraAction, appTools.tools())
         val system = (if (audience == Audience.PHONE) PHONE_PROMPT else SYSTEM_PROMPT) +
             " It is ${ZonedDateTime.now().format(DateTimeFormatter.ofPattern("EEEE d MMMM yyyy, HH:mm", Locale.ENGLISH))}." +
             (if (audience == Audience.GLASSES) " The glasses are set to ${locale.getDisplayLanguage(Locale.ENGLISH)}." else "") +
@@ -116,23 +188,28 @@ class Brain(
             phoneTools?.prompt.orEmpty() +
             (if (canEnd) END_PROMPT else "") +
             turn.box.prompt +
-            (if (image != null && turn.box.tools.isNotEmpty()) PHOTO_PROMPT else "") +
+            (if ((image != null || capturePhoto != null) && turn.box.tools.isNotEmpty()) PHOTO_PROMPT else "") +
             (if (note.isNotBlank()) " $note" else "") +
             if (c.instructions.isNotBlank()) " " + c.instructions else ""
         val recent = past.takeLast(MAX_EXCHANGES)
         val tokens = if (audience == Audience.PHONE) PHONE_TOKENS else GLASSES_TOKENS
-        val text = when (c.provider) {
-            Provider.CLAUDE -> claude(c, c.model.ifBlank { DEFAULT_CLAUDE_MODEL }, system, recent, question, image, tokens, c.webSearch, turn)
-            Provider.OPENAI_COMPATIBLE -> openAi(c, c.model, system, past, question, image, tokens, turn)
-        }.replace(VISOR_NOTE, "").trim()
+        val search = c.webSearch && c.provider.search != null && store?.cannotSearch(c) != true
+        val said = try {
+            ask(c, system, past, question, image, tokens, search, turn)
+        } catch (error: IllegalStateException) {
+            // A model that refuses the search still answers without it, and the settings say so. Not after a tool ran:
+            // asking again would run it twice.
+            if (!search || turn.toolsRan || !SEARCH_REFUSED.containsMatchIn(error.message.orEmpty())) throw error
+            ask(c, system, past, question, image, tokens, false, turn).also { store?.markCannotSearch(c) }
+        }
+        val text = (if (search) spoken(said) else said).replace(VISOR_NOTE, "").trim()
         check(text.isNotEmpty()) { "the model gave an empty answer" }
         return Reply(text, turn.remembered, turn.actions, turn.ends)
     }
 
     /** One sentence for the wearer, in [locale]'s language, written from [what]; outside the conversation. */
     suspend fun phrase(what: String, locale: Locale): String = withContext(Dispatchers.IO) {
-        val c = config()
-        check(c.apiKey.isNotBlank() || c.provider == Provider.OPENAI_COMPATIBLE) { "no API key is set" }
+        val c = ready()
         val system = "You write one short sentence that smart glasses speak to their wearer, in " +
             "${locale.getDisplayLanguage(Locale.ENGLISH)}. Answer with that sentence only."
         write(c, c.model, system, what, 200)
@@ -140,8 +217,7 @@ class Brain(
 
     /** A day's lines for the diary, in [locale]'s language, from [exchanges] in order; with the lines' own model if one is set. */
     suspend fun dayLines(exchanges: String, locale: Locale): String = withContext(Dispatchers.IO) {
-        val c = config()
-        check(c.apiKey.isNotBlank() || c.provider == Provider.OPENAI_COMPATIBLE) { "no API key is set" }
+        val c = ready()
         val system = "You keep the diary of a person who wears smart glasses with a voice assistant. From the day's " +
             "exchanges with the assistant, write the day's entry: one to three short sentences in " +
             "${locale.getDisplayLanguage(Locale.ENGLISH)}, in the second person (\"You asked about...\"), dry and precise, " +
@@ -150,15 +226,32 @@ class Brain(
         write(c, c.linesModel.ifBlank { c.model }, system, exchanges, 300)
     }
 
+    private fun ready(): AssistantConfig =
+        config().also { check(it.hasModel) { "no API key is set" } }
+
+    /** One answer from the provider, through the API that can [search] when asked to. */
+    private suspend fun ask(
+        c: AssistantConfig, system: String, past: List<Exchange>, question: String, image: ByteArray?, tokens: Int, search: Boolean, turn: Turn,
+    ): String {
+        val model = c.answerModel
+        return when {
+            c.provider == Provider.CLAUDE -> claude(c, model, system, past, question, image, tokens, search, turn)
+            c.provider == Provider.CHATGPT -> responses(c, model, system, past, question, image, tokens, search, turn)
+            search && c.provider.search == WebSearch.RESPONSES -> responses(c, model, system, past, question, image, tokens, true, turn)
+            search && c.provider.search == WebSearch.GEMINI -> gemini(c, model, system, past, question, image, tokens, turn)
+            else -> openAi(c, model, system, past, question, image, tokens, turn, if (search) chatSearch(c.provider) else null)
+        }
+    }
+
     private suspend fun write(c: AssistantConfig, model: String, system: String, text: String, tokens: Int): String = when (c.provider) {
         Provider.CLAUDE -> claude(c, model.ifBlank { DEFAULT_CLAUDE_MODEL }, system, emptyList(), text, null, tokens, false, null)
-        Provider.OPENAI_COMPATIBLE -> openAi(c, model, system, emptyList(), text, null, tokens, null)
+        Provider.CHATGPT -> responses(c, model.ifBlank { c.answerModel }, system, emptyList(), text, null, tokens, false, null)
+        else -> openAi(c, model, system, emptyList(), text, null, tokens, null)
     }.trim().also { check(it.isNotEmpty()) { "the model gave an empty answer" } }
 
-    /** What the model knows of the wearer, and how to keep it. Empty when there is nowhere to keep it. */
+    /** What the model knows of the wearer, and how to keep it. */
     private fun memoryPrompt(): String {
-        val book = book ?: return ""
-        val known = book.memories.value
+        val known = book?.memories?.value.orEmpty()
         return " You can keep lasting facts about the wearer with the remember tool, and drop wrong or outdated ones with " +
             "forget. When the wearer mentions something that would help in later conversations (people and their names, " +
             "where they live or work, preferences, plans, what they own), end your answer by asking whether to remember " +
@@ -172,29 +265,60 @@ class Brain(
     /** A tool run for the model: remember or forget, or one of the person's servers'. What it is told back. */
     private suspend fun runTool(name: String, input: JSONObject, turn: Turn): ToolResult {
         coroutineContext.ensureActive()
+        turn.toolsRan = true
+        val cameraAction = CameraAction.entries.firstOrNull { it.tool == name }
+        if (name == PHOTO_TOOL || cameraAction != null) {
+            val result = if (turn.cameraRequested) ToolResult("a camera request was already made for this question; use that result", true) else {
+                turn.cameraRequested = true
+                try {
+                    if (cameraAction != null) {
+                        val perform = checkNotNull(turn.cameraAction) { "camera commands are not available for this question" }
+                        if (perform(cameraAction)) ToolResult("the glasses confirmed ${cameraAction.confirmed}; do not describe the scene", false)
+                        else ToolResult("the glasses did not confirm ${cameraAction.title}; do not report success", true)
+                    } else {
+                        val capture = checkNotNull(turn.capturePhoto) { "the glasses camera is not available for this question" }
+                        turn.photo = capture()
+                        if (turn.photo == null) ToolResult("no photo arrived from the glasses; do not guess what the wearer sees", true)
+                        else ToolResult("the glasses photo is attached", false)
+                    }
+                } catch (cancel: CancellationException) {
+                    throw cancel
+                } catch (error: Exception) {
+                    ToolResult(error.message ?: "the glasses could not complete the camera request", true)
+                }
+            }
+            if (cameraAction != null) turn.actions += ToolAction("Glasses", cameraAction.title, !result.isError, kind = cameraAction.tool)
+            return result
+        }
         if (turn.canEnd && name == END_TOOL) {
             turn.ends = true
             return ToolResult("the glasses stop listening after your answer", false)
         }
-        val book = book
-        if (book != null && name == "remember") {
+        if (name == "remember") {
             val fact = input.optString("fact").trim()
             if (fact.isEmpty()) return ToolResult("nothing to remember", true)
-            book.remember(fact)
+            book?.remember(fact)
             turn.remembered += fact
             return ToolResult("kept", false)
 
         }
-        if (book != null && name == "forget") {
-            return if (book.forget(input.optString("id")) != null) ToolResult("forgotten", false) else ToolResult("no such fact", true)
+        if (name == "forget") {
+            return if (book?.forget(input.optString("id")) != null) ToolResult("forgotten", false) else ToolResult("no such fact", true)
         }
         phoneTools?.run(name, input)?.let { (result, action) ->
             action?.let(turn.actions::add)
             return result
         }
-        val tool = turn.box.find(name) ?: return ToolResult("unknown tool", true)
-        val (result, action) = hub?.call(tool, input, turn.photo) ?: return ToolResult("unavailable", true)
-        action?.let(turn.actions::add)
+        val glasses = turn.glasses
+        if (glasses != null) glasses.tools.find { it.short == name }?.let { return glasses.call(it.full, input) }
+        turn.box.find(name)?.let { tool ->
+            val (result, action) = checkNotNull(hub).call(tool, input, turn.photo)
+            action?.let(turn.actions::add)
+            return result
+        }
+        val app = turn.apps.find { it.name == name } ?: return ToolResult("unknown tool", true)
+        val result = app.run(input)
+        turn.actions += ToolAction(app.app, app.name, !result.isError)
         return result
     }
 
@@ -202,6 +326,23 @@ class Brain(
     private fun ExposedTool.help(): String =
         ("[${server.name}] " + (if (tool.title.isNotEmpty()) "${tool.title}. " else "") + tool.description).take(MAX_TOOL_HELP)
 
+    /** The camera actions the model may take: with the camera off, only a stop. */
+    private fun cameraTools(c: AssistantConfig) = CameraAction.entries.filter { c.vision || it == CameraAction.STOP_RECORDING }
+
+    /** Every tool [turn] offers the model, as name, help and input schema, in the order it sees them. */
+    private fun specs(c: AssistantConfig, turn: Turn): List<Triple<String, String, JSONObject>> = buildList {
+        add(Triple("remember", REMEMBER_HELP, schema("fact", FACT_HELP)))
+        add(Triple("forget", FORGET_HELP, schema("id", "The fact's id.")))
+        if (turn.canEnd) add(Triple(END_TOOL, END_HELP, NO_INPUT))
+        if (turn.capturePhoto != null) add(Triple(PHOTO_TOOL, PHOTO_HELP, NO_INPUT))
+        if (turn.cameraAction != null) cameraTools(c).forEach { add(Triple(it.tool, it.help, NO_INPUT)) }
+        addAll(phoneTools?.tools.orEmpty())
+        turn.box.tools.forEach { add(Triple(it.name, it.help(), it.tool.schema)) }
+        turn.glasses?.tools?.forEach { add(Triple(it.short, it.help, it.schema)) }
+        // Apps' tools come last, and one named like a tool above stays out: the call would reach the other.
+        val taken = mapTo(HashSet()) { it.first }
+        turn.apps.filter { it.name !in taken }.forEach { add(Triple(it.name, it.help, it.schema)) }
+    }
 
     private suspend fun claude(
         c: AssistantConfig, model: String, system: String, past: List<Exchange>, question: String, image: ByteArray?,
@@ -213,34 +354,22 @@ class Brain(
             messages.put(JSONObject().put("role", "assistant").put("content", e.told()))
         }
         val content = JSONArray()
-        if (image != null) {
-            content.put(
-                JSONObject().put("type", "image").put(
-                    "source",
-                    JSONObject().put("type", "base64").put("media_type", "image/jpeg")
-                        .put("data", Base64.encodeToString(image, Base64.NO_WRAP)),
-                ),
-            )
-        }
+        if (image != null) content.put(claudeImage(image))
         content.put(JSONObject().put("type", "text").put("text", question))
         messages.put(JSONObject().put("role", "user").put("content", content))
         val tools = JSONArray()
         if (webSearch) tools.put(JSONObject().put("type", "web_search_20250305").put("name", "web_search").put("max_uses", 2))
-        if (turn != null && book != null) {
-            tools.put(JSONObject().put("name", "remember").put("description", REMEMBER_HELP).put("input_schema", schema("fact", FACT_HELP)))
-            tools.put(JSONObject().put("name", "forget").put("description", FORGET_HELP).put("input_schema", schema("id", "The fact's id.")))
+        turn?.let { specs(c, it) }.orEmpty().forEach { (name, help, input) ->
+            tools.put(JSONObject().put("name", name).put("description", help).put("input_schema", input))
         }
-        if (turn?.canEnd == true) tools.put(JSONObject().put("name", END_TOOL).put("description", END_HELP).put("input_schema", NO_INPUT))
-        if (turn != null) phoneTools?.tools?.forEach { (name, help, input) -> tools.put(JSONObject().put("name", name).put("description", help).put("input_schema", input)) }
-        turn?.box?.tools?.forEach { t -> tools.put(JSONObject().put("name", t.name).put("description", t.help()).put("input_schema", t.tool.schema)) }
         var said = ""
         repeat(MAX_TOOL_ROUNDS) {
             // Current models think before they answer, and the thinking counts toward max_tokens.
             val body = JSONObject().put("model", model).put("max_tokens", tokens + THINKING_TOKENS).put("system", system).put("messages", messages)
             if (tools.length() > 0) body.put("tools", tools)
-            val answer = post("https://api.anthropic.com/v1/messages", mapOf("x-api-key" to c.apiKey, "anthropic-version" to "2023-06-01"), body)
+            val answer = post("$ANTHROPIC_API/messages", anthropicHeaders(c.apiKey), body)
             val blocks = answer.getJSONArray("content")
-            val list = (0 until blocks.length()).map { blocks.getJSONObject(it) }
+            val list = blocks.objects()
             // With web search the answer is split into several text blocks around the citations.
             val text = list.filter { it.optString("type") == "text" }.joinToString("") { it.getString("text") }
             if (text.isNotBlank()) said = text
@@ -250,9 +379,13 @@ class Brain(
             messages.put(JSONObject().put("role", "assistant").put("content", blocks))
             val results = JSONArray()
             for (use in uses) {
-                val out = runTool(use.getString("name"), use.optJSONObject("input") ?: JSONObject(), turn)
+                val name = use.getString("name")
+                val out = runTool(name, use.optJSONObject("input") ?: JSONObject(), turn)
+                val result: Any = if (name == PHOTO_TOOL && !out.isError) JSONArray()
+                    .put(JSONObject().put("type", "text").put("text", out.text))
+                    .put(claudeImage(checkNotNull(turn.photo))) else out.text
                 results.put(
-                    JSONObject().put("type", "tool_result").put("tool_use_id", use.getString("id")).put("content", out.text)
+                    JSONObject().put("type", "tool_result").put("tool_use_id", use.getString("id")).put("content", result)
                         .apply { if (out.isError) put("is_error", true) },
                 )
             }
@@ -263,7 +396,7 @@ class Brain(
 
     private suspend fun openAi(
         c: AssistantConfig, model: String, system: String, past: List<Exchange>, question: String, image: ByteArray?,
-        tokens: Int, turn: Turn?,
+        tokens: Int, turn: Turn?, searchTool: JSONObject? = null,
     ): String {
         val conversation = coroutineContext[ConversationContext]?.takeIf {
             turn != null && c.apiKey.isNotBlank() &&
@@ -287,25 +420,17 @@ class Brain(
         }
         val user: Any = if (image == null) question else JSONArray()
             .put(JSONObject().put("type", "text").put("text", question))
-            .put(
-                JSONObject().put("type", "image_url").put(
-                    "image_url",
-                    JSONObject().put("url", "data:image/jpeg;base64," + Base64.encodeToString(image, Base64.NO_WRAP)),
-                ),
-            )
+            .put(openAiImage(image))
         messages.put(JSONObject().put("role", "user").put("content", user))
         val headers = (if (c.apiKey.isBlank()) emptyMap() else mapOf("Authorization" to "Bearer ${c.apiKey}")) +
             (session?.let { mapOf("X-Hermes-Session-Id" to it) } ?: emptyMap())
-        val url = c.baseUrl.trimEnd('/') + "/chat/completions"
+        val url = c.api.trimEnd('/') + "/chat/completions"
         var tools: JSONArray? = JSONArray().apply {
-            if (turn != null && book != null) {
-                put(function("remember", REMEMBER_HELP, schema("fact", FACT_HELP)))
-                put(function("forget", FORGET_HELP, schema("id", "The fact's id.")))
-            }
-            if (turn?.canEnd == true) put(function(END_TOOL, END_HELP, NO_INPUT))
-            if (turn != null) phoneTools?.tools?.forEach { (name, help, input) -> put(function(name, help, input)) }
+            searchTool?.let(::put)
             // Some servers behind this API refuse a schema that names its own dialect.
-            turn?.box?.tools?.forEach { t -> put(function(t.name, t.help(), JSONObject(t.tool.schema.toString()).apply { remove("\$schema") })) }
+            turn?.let { specs(c, it) }.orEmpty().forEach { (name, help, input) ->
+                put(function(name, help, JSONObject(input.toString()).apply { remove("\$schema") }))
+            }
         }.takeIf { it.length() > 0 }
         var said = ""
         repeat(MAX_TOOL_ROUNDS) {
@@ -320,8 +445,12 @@ class Brain(
                 // A server without tools refuses the field; then the conversation goes on without memory. The person's
                 // own tools are never dropped unseen: their refusal is the answer's error.
                 conversation?.validate()
-                if (session != null || (scope != null && conversation.diary.session(scope) != null) || tools == null || turn?.box?.tools.orEmpty().isNotEmpty() || !TOOLS_REFUSED.containsMatchIn(error.message.orEmpty())) throw error
+                if (searchTool != null || session != null || (scope != null && conversation.diary.session(scope) != null) || tools == null || turn?.box?.tools.orEmpty().isNotEmpty() || !TOOLS_REFUSED.containsMatchIn(error.message.orEmpty())) throw error
                 tools = null
+                if (turn?.capturePhoto != null) messages.put(JSONObject().put("role", "system").put("content", NO_PHOTO))
+                if (turn?.cameraAction != null) messages.put(JSONObject().put("role", "system").put("content",
+                    "Camera commands are unavailable for this answer. If the wearer asked for a camera action, explain " +
+                        "that this model cannot use camera tools. Otherwise answer normally. Do not claim a camera action succeeded."))
                 send(url, headers, body.apply { remove("tools") })
             }
             conversation?.validate()
@@ -332,17 +461,203 @@ class Brain(
             if (text.isNotBlank()) said = text
             val calls = message.optJSONArray("tool_calls")
             if (calls == null || calls.length() == 0 || turn == null) return said
+            check(tools != null) { "the model requested a tool after tools were disabled" }
             messages.put(message)
-            for (i in 0 until calls.length()) {
-                val call = calls.getJSONObject(i)
+            var photo: ByteArray? = null
+            for (call in calls.objects()) {
                 val fn = call.getJSONObject("function")
                 val input = runCatching { JSONObject(fn.optString("arguments")) }.getOrDefault(JSONObject())
                 val out = runTool(fn.getString("name"), input, turn)
                 messages.put(JSONObject().put("role", "tool").put("tool_call_id", call.getString("id")).put("content", out.text))
+                if (fn.getString("name") == PHOTO_TOOL && !out.isError) photo = turn.photo
+            }
+            photo?.let {
+                messages.put(JSONObject().put("role", "user").put("content", JSONArray()
+                    .put(JSONObject().put("type", "text").put("text", "The current view from the glasses."))
+                    .put(openAiImage(it))))
             }
         }
         return said
     }
+
+    /**
+     * The Responses API: OpenAI's and Grok's way to search the web, and the only way to the ChatGPT plan. Nothing is
+     * stored on the server, so each round carries the whole exchange, the model's own output items included.
+     */
+    private suspend fun responses(
+        c: AssistantConfig, model: String, system: String, past: List<Exchange>, question: String, image: ByteArray?,
+        tokens: Int, search: Boolean, turn: Turn?,
+    ): String {
+        val input = JSONArray()
+        for (e in past) {
+            input.put(JSONObject().put("role", "user").put("content", e.question))
+            input.put(JSONObject().put("role", "assistant").put("content", e.told()))
+        }
+        input.put(JSONObject().put("role", "user").put("content", inputContent(question, image)))
+        val functions = turn?.let { specs(c, it) }.orEmpty().map { (name, help, schema) ->
+            JSONObject().put("type", "function").put("name", name).put("description", help)
+                .put("parameters", JSONObject(schema.toString()).apply { remove("\$schema") })
+        }
+        // The plan takes functions grouped in a namespace; should it refuse that, they go as a plain list.
+        val plan = c.provider == Provider.CHATGPT
+        fun tools() = JSONArray().apply {
+            if (search) put(JSONObject().put("type", "web_search"))
+            if (functions.isEmpty()) return@apply
+            if (plan && PLAN_FLAT !in refused) {
+                put(JSONObject().put("type", "namespace").put("name", NAMESPACE).put("description", "Visor's tools on the glasses and the phone.")
+                    .put("tools", JSONArray(functions)))
+            } else functions.forEach(::put)
+        }
+        fun body() = JSONObject().put("model", model).put("instructions", system).put("input", input).put("store", false)
+            .apply { tools().takeIf { it.length() > 0 }?.let { put("tools", it) } }
+        var said = ""
+        repeat(MAX_TOOL_ROUNDS) {
+            val answer = try {
+                respond(c, body(), tokens)
+            } catch (error: IllegalStateException) {
+                if (!plan || PLAN_FLAT in refused || functions.isEmpty() || !NAMESPACE_REFUSED.containsMatchIn(error.message.orEmpty())) throw error
+                refused += PLAN_FLAT
+                respond(c, body(), tokens)
+            }
+            val items = answer.optJSONArray("output")?.objects().orEmpty()
+            val text = items.filter { it.optString("type") == "message" }
+                .flatMap { it.optJSONArray("content")?.objects().orEmpty() }
+                .filter { it.optString("type") == "output_text" }
+                .joinToString("") { it.optString("text") }.replace(THINKING, "")
+            if (text.isNotBlank()) said = text
+            val calls = items.filter { it.optString("type") == "function_call" }
+            check(said.isNotBlank() || calls.isNotEmpty() || answer.optString("status") != "incomplete") { "the model used its whole answer thinking" }
+            if (calls.isEmpty() || turn == null) return said
+            items.forEach(input::put)
+            var photo: ByteArray? = null
+            for (call in calls) {
+                // A function from the namespace may come back named with it.
+                val name = call.getString("name").removePrefix("$NAMESPACE.").removePrefix("${NAMESPACE}__")
+                val args = runCatching { JSONObject(call.optString("arguments")) }.getOrDefault(JSONObject())
+                val out = runTool(name, args, turn)
+                input.put(JSONObject().put("type", "function_call_output").put("call_id", call.getString("call_id")).put("output", out.text))
+                if (name == PHOTO_TOOL && !out.isError) photo = turn.photo
+            }
+            photo?.let { input.put(JSONObject().put("role", "user").put("content", inputContent("The current view from the glasses.", it))) }
+        }
+        return said
+    }
+
+    /**
+     * One Responses API call, with a key or paid by the ChatGPT plan. A short think keeps a spoken answer quick, and
+     * its encrypted reasoning comes back for the next round; a model that does not reason refuses both, and is then
+     * asked without them.
+     */
+    private suspend fun respond(c: AssistantConfig, body: JSONObject, tokens: Int): JSONObject {
+        val plan = c.provider == Provider.CHATGPT
+        val url = c.api.trimEnd('/') + "/responses"
+        val key = (if (plan) "plan " else "$url ") + body.optString("model")
+        // The plan takes no length limit; it sets its own.
+        if (!plan) body.put("max_output_tokens", tokens + THINKING_TOKENS)
+        val call: suspend (JSONObject) -> JSONObject = if (plan) checkNotNull(chatGpt)::respond else { b -> post(url, bearerHeaders(c.apiKey), b) }
+        if (key in refused) return call(body)
+        return try {
+            call(reasoned(JSONObject(body.toString())))
+        } catch (error: IllegalStateException) {
+            if (!REASONING_REFUSED.containsMatchIn(error.message.orEmpty())) throw error
+            refused += key
+            call(body)
+        }
+    }
+
+    private fun reasoned(body: JSONObject) = body
+        .put("reasoning", JSONObject().put("effort", "low"))
+        .put("include", JSONArray().put("reasoning.encrypted_content"))
+
+    /** Responses API content: the text, and the glasses' photo when there is one. */
+    private fun inputContent(text: String, image: ByteArray?): JSONArray = JSONArray()
+        .put(JSONObject().put("type", "input_text").put("text", text))
+        .apply {
+            if (image != null) put(JSONObject().put("type", "input_image").put("image_url", "data:image/jpeg;base64," + Base64.encodeToString(image, Base64.NO_WRAP)))
+        }
+
+    /**
+     * Gemini's own API, the one with Google Search. Search and Visor's tools go together from Gemini 3, the model's
+     * turns going back exactly as they came, with their thought signatures; an older model refuses the pair, and
+     * answer() then asks without search.
+     */
+    private suspend fun gemini(
+        c: AssistantConfig, model: String, system: String, past: List<Exchange>, question: String, image: ByteArray?,
+        tokens: Int, turn: Turn?,
+    ): String {
+        val id = model.removePrefix("models/")
+        val url = "$GEMINI_API/models/$id:generateContent"
+        val headers = mapOf("x-goog-api-key" to c.apiKey)
+        val contents = JSONArray()
+        for (e in past) {
+            contents.put(geminiTurn("user", JSONArray().put(JSONObject().put("text", e.question))))
+            contents.put(geminiTurn("model", JSONArray().put(JSONObject().put("text", e.told()))))
+        }
+        val first = JSONArray()
+        if (image != null) first.put(geminiImage(image))
+        contents.put(geminiTurn("user", first.put(JSONObject().put("text", question))))
+        val functions = JSONArray()
+        turn?.let { specs(c, it) }.orEmpty().forEach { (name, help, schema) ->
+            functions.put(JSONObject().put("name", name).put("description", help).apply { geminiSchema(schema)?.let { put("parameters", it) } })
+        }
+        val tools = JSONArray().put(JSONObject().put("googleSearch", JSONObject()))
+        if (functions.length() > 0) tools.put(JSONObject().put("functionDeclarations", functions))
+        // Gemini 2 thinks as it sees fit; from Gemini 3 a level keeps a spoken answer quick.
+        val thinkingKey = "gemini $id"
+        val levels = !id.startsWith("gemini-2") && thinkingKey !in refused
+        var said = ""
+        repeat(MAX_TOOL_ROUNDS) {
+            val body = JSONObject()
+                .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))))
+                .put("contents", contents)
+                .put("tools", tools)
+                .put("generationConfig", JSONObject().put("maxOutputTokens", tokens + THINKING_TOKENS))
+            if (functions.length() > 0) {
+                body.put("toolConfig", JSONObject().put("includeServerSideToolInvocations", true)
+                    .put("functionCallingConfig", JSONObject().put("mode", "VALIDATED")))
+            }
+            val answer = if (!levels || thinkingKey in refused) post(url, headers, body) else try {
+                post(url, headers, JSONObject(body.toString()).apply {
+                    getJSONObject("generationConfig").put("thinkingConfig", JSONObject().put("thinkingLevel", "low"))
+                })
+            } catch (error: IllegalStateException) {
+                if (!REASONING_REFUSED.containsMatchIn(error.message.orEmpty())) throw error
+                refused += thinkingKey
+                post(url, headers, body)
+            }
+            val candidate = answer.optJSONArray("candidates")?.optJSONObject(0)
+                ?: error("the model gave no answer" + (answer.optJSONObject("promptFeedback")?.optString("blockReason")?.let { " ($it)" } ?: ""))
+            val content = candidate.optJSONObject("content") ?: JSONObject().put("role", "model").put("parts", JSONArray())
+            val parts = content.optJSONArray("parts")?.objects().orEmpty()
+            val text = parts.filter { it.has("text") && !it.optBoolean("thought") }.joinToString("") { it.getString("text") }
+            if (text.isNotBlank()) said = text
+            val calls = parts.mapNotNull { it.optJSONObject("functionCall") }
+            check(said.isNotBlank() || calls.isNotEmpty() || candidate.optString("finishReason") != "MAX_TOKENS") { "the model used its whole answer thinking" }
+            if (calls.isEmpty() || turn == null) return said
+            contents.put(content)
+            val results = JSONArray()
+            var photo: ByteArray? = null
+            for (call in calls) {
+                val name = call.getString("name")
+                val out = runTool(name, call.optJSONObject("args") ?: JSONObject(), turn)
+                val response = JSONObject().put("name", name).put("response", JSONObject().put(if (out.isError) "error" else "result", out.text))
+                call.optString("id").takeIf { it.isNotEmpty() }?.let { response.put("id", it) }
+                results.put(JSONObject().put("functionResponse", response))
+                if (name == PHOTO_TOOL && !out.isError) photo = turn.photo
+            }
+            photo?.let { results.put(geminiImage(it)) }
+            contents.put(geminiTurn("user", results))
+        }
+        return said
+    }
+
+    private fun geminiTurn(role: String, parts: JSONArray) = JSONObject().put("role", role).put("parts", parts)
+
+    private fun geminiImage(image: ByteArray) = JSONObject().put("inlineData",
+        JSONObject().put("mimeType", "image/jpeg").put("data", Base64.encodeToString(image, Base64.NO_WRAP)))
+
+    /** What a server refused (a model's reasoning setting, the plan's namespaces), left out until Visor restarts. */
+    private val refused = java.util.Collections.synchronizedSet(HashSet<String>())
 
     /**
      * A reasoning model otherwise spends the whole answer thinking (LM Studio, llama.cpp), or refuses tools on this API
@@ -469,7 +784,7 @@ class Brain(
 
     private val sessionSupport = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
     private fun supportsSessions(c: AssistantConfig): Boolean = sessionSupport.getOrPut(sessionScope(c, "capabilities")) {
-        val http = URL(c.baseUrl.trimEnd('/') + "/capabilities").openConnection() as HttpURLConnection
+        val http = URL(c.api.trimEnd('/') + "/capabilities").openConnection() as HttpURLConnection
         try {
             http.connectTimeout = 2_000
             http.readTimeout = 2_000
@@ -482,12 +797,12 @@ class Brain(
 
     private fun sessionScope(c: AssistantConfig, conversation: String): String =
         java.security.MessageDigest.getInstance("SHA-256").digest(
-            "${c.baseUrl.trimEnd('/')}\u0000${c.apiKey}\u0000${c.model}\u0000${c.vision}\u0000$conversation".toByteArray(),
+            "${c.api.trimEnd('/')}\u0000${c.apiKey}\u0000${c.model}\u0000${c.vision}\u0000$conversation".toByteArray(),
         ).joinToString("") { "%02x".format(it) }
 
     /** Hermes accepts unknown IDs as empty histories: check existence BEFORE any side-effecting POST. */
     private fun verifySession(c: AssistantConfig, id: String) {
-        val base = c.baseUrl.trimEnd('/').removeSuffix("/v1")
+        val base = c.api.trimEnd('/').removeSuffix("/v1")
         val encoded = java.net.URLEncoder.encode(id, "UTF-8")
         val http = URL("$base/api/sessions/$encoded").openConnection() as HttpURLConnection
         try {
@@ -515,12 +830,107 @@ class Brain(
         }
     }
 
+    private fun claudeImage(image: ByteArray): JSONObject = JSONObject().put("type", "image").put("source",
+        JSONObject().put("type", "base64").put("media_type", "image/jpeg").put("data", Base64.encodeToString(image, Base64.NO_WRAP)),
+    )
+
+    private fun openAiImage(image: ByteArray): JSONObject = JSONObject().put("type", "image_url").put("image_url",
+        JSONObject().put("url", "data:image/jpeg;base64," + Base64.encodeToString(image, Base64.NO_WRAP)),
+    )
+
     private companion object {
+        val CAMERA_WORD_SPACES = Regex("[\\s\\p{Z}]+")
+        val CAMERA_WAKE_PREFIX = Regex("^hey meta(?:, ?| )")
+
+        fun cameraKeyword(question: String, locale: Locale): CameraAction? {
+            if (locale.language != "vi" && locale.language != "en") return null
+            val words = Normalizer.normalize(question, Normalizer.Form.NFC).lowercase(Locale.ROOT)
+                .trim().trimEnd('.', '!').trim().replace(CAMERA_WORD_SPACES, " ").replace(CAMERA_WAKE_PREFIX, "")
+            return when (words) {
+                "chụp", "chụp ảnh", "chụp hình", "take photo", "take a photo", "take picture", "take a picture" -> CameraAction.TAKE_PHOTO
+                "quay video", "quay phim", "bắt đầu quay video", "bắt đầu quay phim", "record video", "record a video",
+                "start recording", "start recording video" -> CameraAction.RECORD_VIDEO
+                "quay hyperlapse", "bắt đầu quay hyperlapse", "record hyperlapse", "start hyperlapse",
+                "start recording hyperlapse" -> CameraAction.RECORD_HYPERLAPSE
+                "dừng quay", "dừng quay video", "dừng quay phim", "dừng quay hyperlapse", "stop recording",
+                "stop recording video", "stop recording hyperlapse", "stop hyperlapse" -> CameraAction.STOP_RECORDING
+                else -> null
+            }
+        }
+
         /** Thinking a server left inline in the answer. */
         val THINKING = Regex("(?s)<think>.*?(?:</think>|$)")
         /** Visor's note on past answers, should the model copy it into its own. */
         val VISOR_NOTE = Regex("""\s*\[Visor:[^\]]*]""")
         val TOOLS_REFUSED = Regex("tool|function", RegexOption.IGNORE_CASE)
+        // A request the server turned down as written, not a key, a limit or an outage.
+        val SEARCH_REFUSED = Regex("^the model answered (400|404|422):")
+        val REASONING_REFUSED = Regex("reasoning|encrypted|include|thinking", RegexOption.IGNORE_CASE)
+        val NAMESPACE_REFUSED = Regex("namespace", RegexOption.IGNORE_CASE)
+        const val NAMESPACE = "visor"
+        const val PLAN_FLAT = "plan flat tools"
+        const val GEMINI_API = "https://generativelanguage.googleapis.com/v1beta"
+
+        /** The search tool a server runs inside a Chat Completions request. */
+        fun chatSearch(provider: Provider): JSONObject? = when (provider.search) {
+            WebSearch.OPENROUTER -> JSONObject().put("type", "openrouter:web_search")
+            WebSearch.GROQ -> JSONObject().put("type", "browser_search")
+            else -> null
+        }
+
+        // A searched answer's citations: "([site](url))", "[1](url)", "[[1]](url)", then any link or address left.
+        private val CITED = Regex("""\s*\(\s*\[[^\]]*]\([^)]*\)\s*\)|\s*\[\[?\d+]?]\([^)]*\)""")
+        private val LINK = Regex("""\[([^\]]+)]\(https?://[^)]*\)""")
+        private val ADDRESS = Regex("""\s*\(?https?://[^\s)]+\)?""")
+
+        /** A searched answer as words to say: the sources it cites go, the words stay. */
+        fun spoken(text: String): String = text.replace(CITED, "").replace(LINK, "$1").replace(ADDRESS, "")
+            .replace(Regex("[ \\t]{2,}"), " ").replace(Regex(" +([.,;:!?])"), "$1")
+
+        private val GEMINI_KEYS = setOf(
+            "type", "format", "description", "nullable", "enum", "properties", "required", "items", "anyOf",
+            "minimum", "maximum", "minItems", "maxItems", "minLength", "maxLength", "pattern",
+        )
+
+        /**
+         * A tool's JSON Schema in the OpenAPI subset Gemini reads: unknown keywords go, a ["x", "null"] type becomes
+         * nullable x, a const an enum. Null for a tool without inputs, which Gemini wants with no parameters at all.
+         */
+        fun geminiSchema(schema: JSONObject, top: Boolean = true): JSONObject? {
+            val out = JSONObject()
+            val type = schema.opt("type")
+            if (type is JSONArray) {
+                val kinds = (0 until type.length()).map { type.optString(it) }
+                kinds.firstOrNull { it != "null" }?.let { out.put("type", it) }
+                if ("null" in kinds) out.put("nullable", true)
+            } else if (type is String) out.put("type", type)
+            if (schema.has("const")) out.put("enum", JSONArray().put(schema.get("const").toString()))
+            for (key in schema.keys()) {
+                if (key !in GEMINI_KEYS || key == "type") continue
+                val value = schema.get(key)
+                when (key) {
+                    "properties" -> {
+                        val props = JSONObject()
+                        (value as? JSONObject)?.let { p -> p.keys().forEach { name -> p.optJSONObject(name)?.let { geminiSchema(it, false) }?.let { props.put(name, it) } } }
+                        if (props.length() > 0) out.put("properties", props)
+                    }
+                    "items" -> (value as? JSONObject)?.let { geminiSchema(it, false) }?.let { out.put("items", it) }
+                    "anyOf" -> (value as? JSONArray)?.let { a -> JSONArray().apply { a.objects().forEach { geminiSchema(it, false)?.let(::put) } } }
+                        ?.takeIf { it.length() > 0 }?.let { out.put("anyOf", it) }
+                    // Gemini's enums are strings.
+                    "enum" -> (value as? JSONArray)?.let { a -> out.put("enum", JSONArray().apply { (0 until a.length()).forEach { put(a.get(it).toString()) } }) }
+                    else -> out.put(key, value)
+                }
+            }
+            val props = out.optJSONObject("properties")
+            out.optJSONArray("required")?.let { r ->
+                val kept = JSONArray().apply { (0 until r.length()).map { r.optString(it) }.filter { props?.has(it) == true }.forEach(::put) }
+                if (kept.length() > 0) out.put("required", kept) else out.remove("required")
+            }
+            if (top && props == null) return null
+            if (out.optString("type") == "object" && props == null) out.remove("required")
+            return out
+        }
         const val MAX_EXCHANGES = 12
         // A tool often looks something up, acts, then answers: room for a few of those.
         const val MAX_TOOL_ROUNDS = 6
@@ -528,7 +938,6 @@ class Brain(
         const val GLASSES_TOKENS = 400
         const val THINKING_TOKENS = 4_000
         const val PHONE_TOKENS = 900
-        const val DEFAULT_CLAUDE_MODEL = "claude-sonnet-5-5"
         const val SYSTEM_PROMPT =
             "You are the voice assistant in a pair of Meta smart glasses, run by the wearer's own app, Visor. " +
                 "Everything you write is spoken aloud through the glasses' speakers, so answer in one to three short, " +
@@ -544,6 +953,12 @@ class Brain(
         const val FORGET_HELP = "Drop a fact you remember that is wrong or outdated, or that the wearer asks you to forget."
         const val FACT_HELP = "One short sentence addressed to the wearer, in their language, e.g. \"Your sister is called Giulia.\""
         const val END_TOOL = "end_conversation"
+        const val PHOTO_TOOL = "look_at_view"
+        const val NO_PHOTO = "This model cannot see what the wearer sees. If the question needs it, say so briefly."
+        const val PHOTO_HELP = "Look at what the wearer sees through the glasses. Use it when their question " +
+            "needs the current view, such as identifying something, reading text or describing their surroundings. " +
+            "Do not use it for general knowledge or a request just to take a photo. The result includes the image; answer from it. " +
+            "For a photo to keep, use take_photo instead. At most one camera request per question."
         const val END_HELP = "After each answer the glasses keep listening for another question. Call this when the wearer is " +
             "done: they say no, that's all, thanks, stop or goodbye, or they turn down what you offered. The glasses then " +
             "stop listening after this answer. Still answer, in a few words."
@@ -561,5 +976,5 @@ class Brain(
 }
 
 // A tool takes the glasses' photo by a placeholder; McpHub puts the photo in its place.
-private val PHOTO_PROMPT = " The glasses' photo comes with this question. To hand it to a tool, write \"$PHOTO_BASE64\" as " +
+private val PHOTO_PROMPT = " When a glasses photo is available, hand it to a tool by writing \"$PHOTO_BASE64\" as " +
     "that argument's value for the JPEG as base64, or \"$PHOTO_DATA_URL\" for it as a data URL; Visor puts the photo there."

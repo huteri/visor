@@ -5,6 +5,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -24,7 +25,10 @@ data class BroadcastState(
     val since: Long = 0,
     val kbps: Int = 0,
     val problem: String = "",
-)
+) {
+    /** Starting, on air or getting back on: not off, not given up. */
+    val airing: Boolean get() = phase != BroadcastPhase.OFF && phase != BroadcastPhase.FAILED
+}
 
 /**
  * The stream going out to an RTMP server while it runs: frames are queued here and sent from one coroutine, so a
@@ -42,6 +46,7 @@ class Broadcast(private val scope: CoroutineScope) {
     private var queue = Channel<Item>(Channel.UNLIMITED)
     private val queued = AtomicLong()
     private var job: Job? = null
+    @Volatile private var current: RtmpPublisher? = null
     @Volatile private var skipToKey = false
 
     val running: Boolean get() = job?.isActive == true
@@ -74,25 +79,31 @@ class Broadcast(private val scope: CoroutineScope) {
         job = null
         queue.close()
         _state.value = BroadcastState()
+        // Blocking socket calls ignore cancel: a stalled server is cut off once the goodbye has had its chance.
+        current?.let { rtmp -> scope.launch { delay(1_000); rtmp.abort() } }
+        current = null
     }
 
     private suspend fun run(target: BroadcastTarget, config: ByteArray, frameRate: Int, bitrate: Int, audioFormat: () -> AacFormat?) {
         var tries = 0
-        while (scope.isActive) {
-            val rtmp = RtmpPublisher(target.url, target.key)
+        while (currentCoroutineContext().isActive) {
+            val rtmp = RtmpPublisher(target.url, target.key).also { current = it }
             var transcoder: AvcTranscoder? = null
             try {
                 rtmp.connect(scope)
-                val sps = hevcParameterSets(config)[33]?.firstOrNull()?.let(::parseHevcSps)
-                val width = sps?.width ?: 1080
-                val height = sps?.height ?: 1920
+                // H.264 from the glasses goes out as it is; HEVC goes out as HEVC, or is re-encoded to H.264.
+                val input = configCodec(config)
+                val out = if (input == VideoCodec.AVC) BroadcastCodec.H264 else target.codec
+                val (width, height) = videoSize(config) ?: (1080 to 1920)
                 val audio = audioFormat()
-                rtmp.metadata(width, height, frameRate, target.codec, audio)
+                rtmp.metadata(width, height, frameRate, out, audio)
                 if (audio != null) rtmp.audioHeader(audio)
                 var base = -1L
                 fun ms(pts: Long) = ((pts - base) / 1000).coerceAtLeast(0)
-                if (target.codec == BroadcastCodec.HEVC) {
+                if (out == BroadcastCodec.HEVC) {
                     rtmp.videoHeader(BroadcastCodec.HEVC, checkNotNull(hvcC(config)) { "the stream's parameter sets do not parse" })
+                } else if (input == VideoCodec.AVC) {
+                    rtmp.videoHeader(BroadcastCodec.H264, checkNotNull(avcC(config)) { "the stream's parameter sets do not parse" })
                 } else {
                     var headerSent = false
                     transcoder = AvcTranscoder(width, height, config, bitrate, frameRate,
@@ -119,8 +130,8 @@ class Broadcast(private val scope: CoroutineScope) {
                                 check(!transcoder.failed) { "the phone's H.264 encoder stopped" }
                                 transcoder.feed(item.frame)
                             } else {
-                                val units = annexBToLengthPrefixed(item.frame.data, dropParameterSets = true)
-                                rtmp.video(BroadcastCodec.HEVC, ms(item.frame.ptsUs), item.frame.isKey, units)
+                                val units = annexBToLengthPrefixed(item.frame.data, dropParameterSets = out == BroadcastCodec.HEVC)
+                                rtmp.video(out, ms(item.frame.ptsUs), item.frame.isKey, units)
                             }
                             sent += item.frame.data.size
                         }
@@ -140,7 +151,7 @@ class Broadcast(private val scope: CoroutineScope) {
                 }
                 return
             } catch (e: Exception) {
-                if (!scope.isActive || job?.isCancelled == true) return
+                if (!currentCoroutineContext().isActive) return
                 val why = rtmp.failure ?: e.message ?: e.javaClass.simpleName
                 if (++tries > RETRIES) {
                     _state.update { it.copy(phase = BroadcastPhase.FAILED, problem = why) }

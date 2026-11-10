@@ -2,39 +2,56 @@ package com.macedonga.visor.stage
 
 import android.content.Context
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 
-/**
- * The glasses, their light and their pose for the life of the activity, above navigation: the model loads once and
- * is drawn by the one [SharedStage]; screens say where they want it.
- */
+/** The glasses, their light and pose for the life of the activity: loaded once, drawn by the one [SharedStage]. */
 class StageHolder(private val context: Context, markAtLaunch: Boolean) {
     val light = LightFrame()
     /** The mark's opening, held from the first frame when the app opens on the home or the welcome. */
     val intro = MarkIntro(armed = markAtLaunch)
     val pose = GlassesPose()
-    /** The home has played its entrance in this process; coming back to it plays nothing. */
-    var entered = false
-    /** The Live view left the pair where the open home has it: the home comes back scrolled to the top. */
-    var homeToTop = false
     /** The mood the home last gave the pair, and whether the glasses were last folded: other screens start from these. */
     var mood = Mood.ABSENT
     var lastFolded = false
-    /** The Live has just closed: the home counts the glasses as here while Bluetooth comes back. */
-    var fromLive = false
     /** Turned by a finger; springs back to 0. */
     val yaw = Animatable(0f)
+    /** Sideways out of the light, in stage widths: a pair leaving for the next one. */
+    val slide = Animatable(0f)
+    /** A pair Visor has no model for, or one not connected, shows as Meta pictures it; null shows the model. */
+    var picture by mutableStateOf<ImageBitmap?>(null)
 
+    /** The pair slides out [direction] (1 to the left), [swap] puts the next one up, and it slides in from the far side. */
+    suspend fun page(direction: Int, swap: () -> Unit) {
+        coroutineScope {
+            launch { yaw.animateTo(0f, tween(PAGE_OUT_MS, easing = FastOutLinearInEasing)) }
+            slide.animateTo(-direction.toFloat(), tween(PAGE_OUT_MS, easing = FastOutLinearInEasing))
+        }
+        swap()
+        slide.snapTo(direction.toFloat())
+        slide.animateTo(0f, spring(dampingRatio = 0.86f, stiffness = 260f))
+    }
+
+    /** The [SharedStage]'s scope: a spring a screen starts finishes after the screen goes. */
+    internal lateinit var scope: CoroutineScope
     internal val spots = mutableStateListOf<Spot>()
     internal val looks = mutableStateListOf<LookRequest>()
-    internal var restingLook = LightLook(Color.Black, Color.Black, 0f, 0.7f)
     internal var restingClosed = true
 
     // The pair's place: where it was when the newest spot took it, where that spot wants it, and where it is.
@@ -44,15 +61,15 @@ class StageHolder(private val context: Context, markAtLaunch: Boolean) {
     private val handover = mutableFloatStateOf(1f)
     private var startedAt = 0L
     private var started = false
+    // How much of a ghost the pair was when the newest spot took it, and is now: 0 solid, 1 a ghost.
+    private var ghostFrom = 0f
+    private var ghostNow = 0f
 
     private var made: GlassesRenderer? = null
 
-    val renderer: GlassesRenderer get() = made ?: GlassesRenderer(context, light, pose, Looks.keptModel(context).asset).also { made = it }
+    val renderer: GlassesRenderer get() = made ?: GlassesRenderer(context, light, pose).also { made = it }
 
-    /**
-     * How much [spot]'s screen should show its own things around the pair: the newest goes 0 to 1 as the pair arrives,
-     * the one it came from 1 to 0.
-     */
+    /** How much [spot]'s screen shows its own things: the newest goes 0 to 1 as the pair arrives, the one before 1 to 0. */
     fun shown(spot: Spot): Float = if (spots.lastOrNull() === spot) handover.floatValue else 1f - handover.floatValue
 
     internal fun arrive(spot: Spot) {
@@ -70,6 +87,7 @@ class StageHolder(private val context: Context, markAtLaunch: Boolean) {
 
     private fun startHandover() {
         from.set(now)
+        ghostFrom = ghostNow
         handover.floatValue = 0f
         started = false
     }
@@ -89,7 +107,7 @@ class StageHolder(private val context: Context, markAtLaunch: Boolean) {
             startedAt = frameNanos
         }
         val t = ((frameNanos - startedAt).toFloat() / HANDOVER_NS).coerceIn(0f, 1f)
-        handover.floatValue = if (t >= 1f) 1f else HANDOVER_EASE.transform(t)
+        handover.floatValue = if (t >= 1f) 1f else SETTLE_EASE.transform(t)
     }
 
     /** Where the pair is this frame. Read from layout and drawing, so it follows whatever the newest spot reads. */
@@ -101,13 +119,22 @@ class StageHolder(private val context: Context, markAtLaunch: Boolean) {
         return now
     }
 
+    /** How much of a ghost the pair is this frame: it fills in or fades out as it travels between spots. */
+    internal fun ghost(): Float {
+        val newest = spots.lastOrNull() ?: return ghostNow
+        val target = if (newest.ghost) 1f else 0f
+        val t = handover.floatValue
+        ghostNow = if (t >= 1f) target else ghostFrom + (target - ghostFrom) * t
+        return ghostNow
+    }
+
     /** A point of the pair's view, as fractions of the stage, on the window: where the stage is now, [widthPx] wide. */
-    fun onWindow(fx: Float, fy: Float, widthPx: Float): androidx.compose.ui.geometry.Offset {
+    fun onWindow(fx: Float, fy: Float, widthPx: Float): Offset {
         val p = placement()
         val h = widthPx / STAGE_ASPECT
         val x = p.pivotX * widthPx + (fx - p.pivotX) * widthPx * p.scale
         val y = p.top + p.pivotY * h + (fy - p.pivotY) * h * p.scale + p.shift
-        return androidx.compose.ui.geometry.Offset(x, y)
+        return Offset(x, y)
     }
 
     fun destroy() {
@@ -125,3 +152,5 @@ fun rememberStageHolder(markAtLaunch: Boolean): StageHolder {
     DisposableEffect(stage) { onDispose { stage.destroy() } }
     return stage
 }
+
+private const val PAGE_OUT_MS = 200

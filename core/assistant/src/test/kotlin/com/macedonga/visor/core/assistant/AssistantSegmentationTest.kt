@@ -24,7 +24,7 @@ class AssistantSegmentationTest {
             } else RETURNS_DEFAULTS.answer(invocation)
         }
         val linkClass = Class.forName("com.macedonga.visor.core.assistant.Assistant\$Link")
-        val link = linkClass.getDeclaredConstructor(DataXConnection::class.java).let { it.isAccessible = true; it.newInstance(mux) }
+        val link = linkClass.getDeclaredConstructor(Assistant::class.java, DataXConnection::class.java).let { it.isAccessible = true; it.newInstance(assistant, mux) }
         set(link, "protocol", protocol)
         val payload = ByteArray(2500) { (it % 251).toByte() }
         val validate: () -> Unit = { check(owned) { "revoked" } }

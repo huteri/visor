@@ -1,5 +1,8 @@
 package com.macedonga.visor.log
 
+import androidx.compose.foundation.layout.Column
+import com.macedonga.visor.settings.ActionPill
+
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -7,17 +10,13 @@ import android.os.Build
 import android.webkit.WebView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -28,9 +27,8 @@ import androidx.compose.runtime.setValue
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runInterruptible
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -40,13 +38,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.macedonga.visor.R
 import com.macedonga.visor.core.design.Visor
-import com.macedonga.visor.core.media.MediaImport
-import com.macedonga.visor.settings.ActionPill
+import com.macedonga.visor.settings.ConfirmSheet
 import com.macedonga.visor.settings.Footnote
-import com.macedonga.visor.settings.Hairline
 import com.macedonga.visor.settings.MONO
-import com.macedonga.visor.gallery.RoundIcon
+import com.macedonga.visor.settings.RoundIcon
 import com.macedonga.visor.settings.SettingsPage
+import com.macedonga.visor.settings.cardItems
 import com.macedonga.visor.ui.VisorIcons
 import com.macedonga.visor.BuildConfig
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -64,7 +61,6 @@ private val FILE_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd-HHmmss")
 @HiltViewModel
 class EventLogViewModel @Inject constructor(
     val log: EventLog,
-    val media: MediaImport,
 ) : ViewModel()
 
 /** The log as one card of lines, opened at the end: what matters is what just happened. */
@@ -76,6 +72,7 @@ fun EventLogScreen(model: EventLogViewModel = hiltViewModel()) {
     val scope = rememberCoroutineScope()
     var capturingLogcat by remember { mutableStateOf(false) }
     var logcatFailed by remember { mutableStateOf(false) }
+    var clearing by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { if (lines.isNotEmpty()) list.scrollToItem(lines.size + 1) }
     val create = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
         if (uri != null) scope.launch {
@@ -85,13 +82,25 @@ fun EventLogScreen(model: EventLogViewModel = hiltViewModel()) {
 
     SettingsPage(
         stringResource(R.string.settings_event_log),
-        stringResource(R.string.event_log_lede),
         light = 0.3f,
         list = list,
         actions = {
             RoundIcon(VisorIcons.Download, stringResource(R.string.event_log_save), { create.launch("visor-log-${LocalDateTime.now().format(FILE_TIME)}.txt") })
-            RoundIcon(VisorIcons.Share, stringResource(R.string.event_log_share), { share(context, model.log.text()) })
-            RoundIcon(VisorIcons.Trash, stringResource(R.string.event_log_clear), model.log::clear)
+            RoundIcon(VisorIcons.Share, stringResource(R.string.event_log_share), {
+                scope.launch {
+                    runCatching { share(context, model.log.text()) }.onFailure { model.log.add("Could not share the log: ${it.message}") }
+                }
+            })
+            RoundIcon(VisorIcons.Trash, stringResource(R.string.event_log_clear), { clearing = true })
+        },
+        sheet = {
+            if (clearing) {
+                ConfirmSheet(
+                    stringResource(R.string.event_log_clear_title), null, stringResource(R.string.event_log_clear),
+                    onConfirm = { model.log.clear() },
+                    onDismiss = { clearing = false },
+                )
+            }
         },
     ) {
         item(key = "app-logcat") {
@@ -118,23 +127,8 @@ fun EventLogScreen(model: EventLogViewModel = hiltViewModel()) {
             }
         }
         if (lines.isEmpty()) item(key = "empty") { Footnote(stringResource(R.string.event_log_empty)) }
-        itemsIndexed(lines, key = { i, _ -> i }) { i, line ->
-            val shape = when {
-                lines.size == 1 -> RoundedCornerShape(18.dp)
-                i == 0 -> RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp)
-                i == lines.lastIndex -> RoundedCornerShape(bottomStart = 18.dp, bottomEnd = 18.dp)
-                else -> RectangleShape
-            }
-            Column(Modifier.padding(horizontal = 16.dp).fillMaxWidth().clip(shape).background(Visor.colors.raised)) {
-                if (i > 0) Hairline()
-                LogRow(line)
-            }
-        }
-        item(key = "bug-report") {
-            Box(Modifier.padding(horizontal = 32.dp, vertical = 20.dp)) {
-                ActionPill(stringResource(R.string.event_log_bug_report), model.media::requestBugReport, quiet = true)
-            }
-        }
+        // Keyed by place: the same line can come twice.
+        cardItems(lines.withIndex().toList(), { it.index }) { LogRow(it.value) }
     }
 }
 
@@ -146,7 +140,7 @@ private fun LogRow(line: String) {
     val text = line.substringAfter("  ", line)
     val failed = text.startsWith("Warning") || text.contains("failed", ignoreCase = true) || text.contains("crashed")
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
-        Text(time.dropLast(4), style = MONO, color = colors.textTertiary, modifier = Modifier.width(56.dp).padding(top = 3.dp))
+        Text(time.dropLast(4), style = MONO, color = colors.textTertiary, maxLines = 1, softWrap = false, modifier = Modifier.widthIn(min = 56.dp).padding(top = 3.dp))
         Spacer(Modifier.width(8.dp))
         Text(text, style = Visor.type.label, color = if (failed) colors.signal else colors.textPrimary)
     }
@@ -169,14 +163,16 @@ private fun report(context: Context, text: String): String {
 }
 
 /** The log for mail or chat. */
-private fun share(context: Context, text: String) {
-    val file = File(context.cacheDir, "log/visor-log.txt").apply {
-        parentFile?.mkdirs()
-        writeText(report(context, text))
+private suspend fun share(context: Context, text: String) {
+    val file = withContext(Dispatchers.IO) {
+        File(context.cacheDir, "log/visor-log.txt").apply {
+            parentFile?.mkdirs()
+            writeText(report(context, text))
+        }
     }
     val intent = Intent(Intent.ACTION_SEND)
         .setType("text/plain")
-        .putExtra(Intent.EXTRA_SUBJECT, "Visor event log")
+        .putExtra(Intent.EXTRA_SUBJECT, context.getString(R.string.settings_event_log))
         .putExtra(Intent.EXTRA_TEXT, head())
         .putExtra(Intent.EXTRA_STREAM, FileProvider.getUriForFile(context, context.packageName + ".files", file))
         .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
