@@ -69,6 +69,14 @@ class ChatGptPlan(context: Context, private val store: AssistantConfigStore) {
     val signIn: StateFlow<SignIn> = _signIn.asStateFlow()
 
     private val _limited = MutableStateFlow(false)
+    private val _notShared = MutableStateFlow(false)
+
+    /**
+     * ChatGPT answered that it does not share the plan with Visor (subscription_sharing_user_not_eligible): in #103 the
+     * app's usage setting in ChatGPT, switched off and on again, made it share. OpenAI asks apps to say so, not to sign
+     * in again; the sign-in and its registration stay, since the usage setting belongs to the registration.
+     */
+    val notShared: StateFlow<Boolean> = _notShared.asStateFlow()
     /** The plan's limit, or this app's, was reached; it clears with the next answer that goes through. */
     val limited: StateFlow<Boolean> = _limited.asStateFlow()
 
@@ -175,6 +183,7 @@ class ChatGptPlan(context: Context, private val store: AssistantConfigStore) {
             prefs.edit().putString(EMAIL, email).putString(ID_TOKEN, t.optString("id_token")).apply()
             note("signed in")
             _limited.value = false
+            _notShared.value = false
             store.update { it.copy(chatGpt = email) }
             _signIn.value = SignIn.Idle
         } finally {
@@ -210,6 +219,7 @@ class ChatGptPlan(context: Context, private val store: AssistantConfigStore) {
         cancel()
         prefs.edit().remove(ACCESS).remove(REFRESH).remove(EXPIRES).remove(ID_TOKEN).apply()
         _limited.value = false
+        _notShared.value = false
         store.update { it.copy(chatGpt = "") }
     }
 
@@ -383,6 +393,7 @@ class ChatGptPlan(context: Context, private val store: AssistantConfigStore) {
                 }
             }
             _limited.value = false
+            _notShared.value = false
             call.resume(code to answer)
         } catch (error: Exception) {
             call.resumeWithException(error)
@@ -399,9 +410,13 @@ class ChatGptPlan(context: Context, private val store: AssistantConfigStore) {
         if (code == LIMIT) {
             if (!_limited.value) note("usage limit reached")
             _limited.value = true
-            error("the model answered 429: ChatGPT usage limit reached")
+            throw ModelRefused(429, "ChatGPT usage limit reached", Refusal.LIMIT)
         }
-        if (code == NOT_ELIGIBLE) _signIn.value = SignIn.Failed(Why.NOT_ELIGIBLE)
+        if (code == NOT_ELIGIBLE) {
+            if (!_notShared.value) note("ChatGPT does not share the plan with Visor; its usage setting for Visor decides")
+            _notShared.value = true
+            throw ModelRefused(403, "ChatGPT does not share this account's plan with Visor", Refusal.PLAN)
+        }
         val words = err?.optString("message").orEmpty().ifEmpty { json?.optString("detail").orEmpty() }.ifEmpty { code }
         // A capability the plan does not offer, such as a tool, is refused as a server refuses a field.
         val shown = if (code == UNSUPPORTED) 400 else status

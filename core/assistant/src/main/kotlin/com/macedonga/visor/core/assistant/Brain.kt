@@ -63,6 +63,8 @@ private class Turn(
 ) {
     val remembered = ArrayList<String>()
     val actions = ArrayList<ToolAction>()
+    // Apps' tools by the name the model sees, which [Brain.specs] gives them.
+    val appNames = HashMap<String, AppTool>()
     var ends = false
     var cameraRequested = false
     // A tool ran: asking again would run it twice.
@@ -108,7 +110,7 @@ enum class CameraAction(val tool: String, val title: String, val help: String, v
     ),
 }
 
-/** The model behind the assistant. The conversation comes with each question, from the diary; tools from [hub] and [phone]. */
+/** Memory storage shared by the production diary and isolated model tests. */
 interface MemoryBook {
     val memories: StateFlow<List<Memory>>
     fun remember(text: String): Memory
@@ -128,10 +130,16 @@ class Brain(
     private val store: AssistantConfigStore? = null,
     private val appTools: AppTools = AppTools { emptyList() },
     private val chatGpt: ChatGptPlan? = null,
+    handset: Handset? = null,
 ) {
-    constructor(store: AssistantConfigStore, diary: Diary, hub: McpHub, phone: Phone, appTools: AppTools, chatGpt: ChatGptPlan) :
-        this({ store.config.value }, diary, hub, store, phone, store, appTools, chatGpt)
+    constructor(store: AssistantConfigStore, diary: Diary, hub: McpHub, phone: Phone, appTools: AppTools, chatGpt: ChatGptPlan, handset: Handset) :
+        this({ store.config.value }, diary, hub, store, phone, store, appTools, chatGpt, handset)
     private val phoneTools = phone?.let(::PhoneTools)
+    private val handsetTools = handset?.let { HandsetTools(it) { messaging } }
+
+    /** The phone's notifications, for the message tools; the assistant sets it. */
+    @Volatile
+    var messaging: Messaging? = null
 
     /**
      * The answer to [question] after [past], with [image] (a JPEG) when the glasses sent one; [canEnd] offers the
@@ -185,7 +193,7 @@ class Brain(
             " It is ${ZonedDateTime.now().format(DateTimeFormatter.ofPattern("EEEE d MMMM yyyy, HH:mm", Locale.ENGLISH))}." +
             (if (audience == Audience.GLASSES) " The glasses are set to ${locale.getDisplayLanguage(Locale.ENGLISH)}." else "") +
             memoryPrompt() +
-            phoneTools?.prompt.orEmpty() +
+            phoneTools?.prompt.orEmpty() + handsetTools?.prompt.orEmpty() +
             (if (canEnd) END_PROMPT else "") +
             turn.box.prompt +
             (if ((image != null || capturePhoto != null) && turn.box.tools.isNotEmpty()) PHOTO_PROMPT else "") +
@@ -305,7 +313,7 @@ class Brain(
         if (name == "forget") {
             return if (book?.forget(input.optString("id")) != null) ToolResult("forgotten", false) else ToolResult("no such fact", true)
         }
-        phoneTools?.run(name, input)?.let { (result, action) ->
+        (phoneTools?.run(name, input) ?: handsetTools?.run(name, input))?.let { (result, action) ->
             action?.let(turn.actions::add)
             return result
         }
@@ -316,7 +324,7 @@ class Brain(
             action?.let(turn.actions::add)
             return result
         }
-        val app = turn.apps.find { it.name == name } ?: return ToolResult("unknown tool", true)
+        val app = turn.appNames[name] ?: return ToolResult("unknown tool", true)
         val result = app.run(input)
         turn.actions += ToolAction(app.app, app.name, !result.isError)
         return result
@@ -337,11 +345,16 @@ class Brain(
         if (turn.capturePhoto != null) add(Triple(PHOTO_TOOL, PHOTO_HELP, NO_INPUT))
         if (turn.cameraAction != null) cameraTools(c).forEach { add(Triple(it.tool, it.help, NO_INPUT)) }
         addAll(phoneTools?.tools.orEmpty())
+        addAll(handsetTools?.tools.orEmpty())
         turn.box.tools.forEach { add(Triple(it.name, it.help(), it.tool.schema)) }
         turn.glasses?.tools?.forEach { add(Triple(it.short, it.help, it.schema)) }
-        // Apps' tools come last, and one named like a tool above stays out: the call would reach the other.
+        // Apps' tools come last; one named like a tool above gets a "_" more, as two apps' tools do.
         val taken = mapTo(HashSet()) { it.first }
-        turn.apps.filter { it.name !in taken }.forEach { add(Triple(it.name, it.help, it.schema)) }
+        turn.apps.forEach { app ->
+            val name = generateSequence(app.name) { it + "_" }.first(taken::add)
+            turn.appNames[name] = app
+            add(Triple(name, app.help, app.schema))
+        }
     }
 
     private suspend fun claude(
@@ -772,7 +785,7 @@ class Brain(
             val text = http.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
             checkCancelled()
             val message = runCatching { JSONObject(text).getJSONObject("error").getString("message") }.getOrDefault(text.take(200))
-            error("the model answered $code: $message")
+            throw ModelRefused(code, message, refusalOf(code, text))
         }
         http.getHeaderField("X-Hermes-Session-Id")?.trim()?.takeIf { it.isNotEmpty() }?.let(captureSession)
         return http.inputStream.reader(Charsets.UTF_8).use {

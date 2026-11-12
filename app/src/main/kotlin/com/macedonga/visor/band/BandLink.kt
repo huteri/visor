@@ -13,6 +13,7 @@ import com.macedonga.visor.core.identity.nowIso
 import com.macedonga.visor.core.identity.rawPublicKey
 import com.macedonga.visor.core.protocol.Band
 import com.macedonga.visor.core.protocol.BtPeer
+import com.macedonga.visor.core.protocol.CamControl
 import com.macedonga.visor.core.protocol.ServiceId
 import com.macedonga.visor.core.session.DataXError
 import com.macedonga.visor.core.session.GlassesSession
@@ -94,6 +95,13 @@ enum class ShareProblem { BAND_UNREACHABLE, DISPLAY_SILENT, KEPT_DROPPING }
 /** How an errand on the band ended. */
 enum class BandErrand { DONE, NO_ANSWER, NOT_CHANGED, REFUSED }
 
+/** What a band did with a manifest: holds [Held.version], took it without saying, or has no manifest service. */
+sealed interface ManifestInstall {
+    data class Held(val version: Long) : ManifestInstall
+    data object Unconfirmed : ManifestInstall
+    data object NoService : ManifestInstall
+}
+
 /**
  * The phone's link to the Neural Band (svc52822), taken from the Display for a lesson, a pairing, an update or one
  * errand, or kept while the band is shared: then the Display reaches the band through the phone's relay.
@@ -166,6 +174,22 @@ class BandLink @Inject constructor(
                 pair?.let { p -> all.firstOrNull { it.glasses == p } }?.takeIf { running && hold && want }
             }.distinctUntilChanged().collect { band -> gate.withLock { switchTo(band) } }
         }
+        // The Display links its band by a built-in rule that Meta's MobileConfig switches on (cam_sg_to_input); a Display
+        // that never had Meta's config links it only by a rule from the phone, a temporary one, gone when the Display
+        // restarts. So once a connection, a Display not holding the band a while after it came up gets the band rule.
+        // Not while it holds the band: a new rule makes it drop the band and link it again.
+        scope.launch {
+            connection.state.map { if (it.link == LinkState.READY) it.info?.serial else null }.distinctUntilChanged().collectLatest { serial ->
+                val band = serial?.let { s -> bands.all.value.firstOrNull { it.glasses == s } } ?: return@collectLatest
+                delay(RULE_CHECK_MS)
+                if (session != null) return@collectLatest
+                val listed = peers.refresh()?.peers ?: return@collectLatest
+                if (listed.any { it.connected }) return@collectLatest
+                val hint = band.publicKey?.let(::rawPublicKey)?.let(::keyHint) ?: return@collectLatest
+                log.add("Band: the Display does not hold the band; sending it the band rule")
+                connection.submit { it.sendOnService(CamControl.SERVICE, CamControl.OVERRIDE_RULE, CamControl.bandRule(hint)) }
+            }
+        }
         // While shared, the Display's link and the band's are joined whenever both are up. A band out of reach, or a
         // relay the two never use, ends the sharing, so the Display gets its band back rather than none.
         scope.launch {
@@ -190,7 +214,12 @@ class BandLink @Inject constructor(
                     relay.state.collect { s ->
                         when (s) {
                             RelayState.Opening -> _share.value = ShareState.Connecting
-                            RelayState.Up -> _share.value = ShareState.On
+                            RelayState.Up -> {
+                                _share.value = ShareState.On
+                                // As the Meta app does: told RELAY, the Display stops reaching for its band directly,
+                                // which every few minutes took the band off the phone.
+                                preferLink(BtPeer.LINK_RELAY)
+                            }
                             is RelayState.Failed -> stopSharing(if (s.silent) ShareProblem.DISPLAY_SILENT else ShareProblem.KEPT_DROPPING)
                         }
                     }
@@ -232,8 +261,16 @@ class BandLink @Inject constructor(
     }
 
     private fun setSharing(on: Boolean) {
+        if (!on && sharing.value) preferLink(BtPeer.LINK_DIRECT)
         prefs.edit().putBoolean(SHARE_KEY, on).apply()
         sharing.value = on
+    }
+
+    // svc41109 SET_PREFERRED_LINK for the band the Display let go of.
+    private fun preferLink(link: Int) {
+        val (identity, hint) = lent ?: return
+        if (connection.state.value.link != LinkState.READY) return
+        connection.submit { it.sendOnService(BtPeer.SERVICE, BtPeer.SET_PREFERRED_LINK, BtPeer.setPreferredLink(link, identity, hint)) }
     }
 
     /** Holds the band for [block], which needs it for minutes, then gives it back. */
@@ -339,9 +376,9 @@ class BandLink @Inject constructor(
     /**
      * Installs [manifest] under [authority] on the band, as the Meta app does: the band checks the Display's manifest
      * against its own authority key, and refuses the Display with 0xc004 until it holds the key that signed it. Then
-     * the two hand each other newer manifests. The version the band holds afterwards, or null when it did not answer.
+     * the two hand each other newer manifests.
      */
-    suspend fun installManifest(authority: ByteArray, manifest: ByteArray): Long? = holdFor { install(authority, manifest, salt = null) }
+    suspend fun installManifest(authority: ByteArray, manifest: ByteArray): ManifestInstall = holdFor { install(authority, manifest, salt = null) }
 
     // As the Meta app does on every band connection: a band holding another manifest than Visor's for its glasses gets
     // Visor's. The band stays here until it is done: half a manifest would leave it with none.
@@ -358,28 +395,66 @@ class BandLink @Inject constructor(
         }
     }
 
-    // svc102 on bands with AirShield 0x11 and up, svc10 before, as the Meta app picks. With [salt], a band already
-    // holding that manifest is left alone. The version the band holds afterwards, or null.
-    private suspend fun install(authority: ByteArray, manifest: ByteArray, salt: ByteArray?): Long? {
+    // svc102 on bands with AirShield 0x11 and up, svc10 before, as the Meta app picks; a service that does not know the
+    // version request (0xd001) is not the band's. A band without a manifest answers the request with an error (0xc004
+    // on a reset band, #95), and the Meta app sends its manifest all the same, without asking first. With [salt], a
+    // band already holding that manifest is left alone.
+    private suspend fun install(authority: ByteArray, manifest: ByteArray, salt: ByteArray?): ManifestInstall {
         for (service in MANIFEST_SERVICES) {
-            val before = manifestVersion(service) ?: continue
-            if (salt != null && before.salt.contentEquals(salt)) return before.version
-            log.add("Band: manifest ${before.version} on svc$service; installing Visor's")
+            when (val before = manifestVersion(service)) {
+                null -> continue
+                is ManifestAnswer.Refused -> {
+                    if (before.error == UNKNOWN_TYPE) continue
+                    log.add("Band: no manifest on svc$service (0x%04x); installing Visor's".format(before.error))
+                    // The Meta app installs on another channel than the one it asked on.
+                    forgetChannel(before.channel)
+                }
+                is ManifestAnswer.Held -> {
+                    if (salt != null && before.version.salt.contentEquals(salt)) return ManifestInstall.Held(before.version.version)
+                    log.add("Band: manifest ${before.version.version} on svc$service; installing Visor's")
+                }
+            }
             sendOn(service, ConstellationManifest.SET_AUTHORITY_KEY, ConstellationManifest.authorityKey(authority))
             ConstellationManifest.chunks(manifest).forEach { (type, chunk) -> sendOn(service, type, chunk) }
-            val after = manifestVersion(service)
-            log.add("Band: holds manifest ${after?.version}")
-            return after?.version
+            return when (val after = manifestVersion(service)) {
+                is ManifestAnswer.Held -> {
+                    log.add("Band: holds manifest ${after.version.version}")
+                    ManifestInstall.Held(after.version.version)
+                }
+                else -> {
+                    log.add("Band: manifest sent; the band does not say which one it holds" + if (after is ManifestAnswer.Refused) " (0x%04x)".format(after.error) else "")
+                    if (after is ManifestAnswer.Refused) forgetChannel(after.channel)
+                    ManifestInstall.Unconfirmed
+                }
+            }
         }
         log.add("Band: no manifest service answered")
-        return null
+        return ManifestInstall.NoService
     }
 
-    private suspend fun manifestVersion(service: Int): ConstellationManifest.Version? = withTimeoutOrNull(REPLY_MS) {
+    /** What the band answered to GET_VERSION on a service: the manifest it holds, or an error status on [channel]. */
+    private sealed interface ManifestAnswer {
+        class Held(val version: ConstellationManifest.Version) : ManifestAnswer
+        class Refused(val error: Int, val channel: Int) : ManifestAnswer
+    }
+
+    private suspend fun manifestVersion(service: Int): ManifestAnswer? = withTimeoutOrNull(REPLY_MS) {
         manifestFrames
             .onSubscription { sendOn(service, ConstellationManifest.GET_VERSION, ByteArray(0)) }
             .first { (it is ServiceData && it.serviceId == service && it.messageType == ConstellationManifest.VERSION_INFO) || (it is DataXError && it.serviceId == service) }
-    }?.let { (it as? ServiceData)?.payload }?.let(ConstellationManifest::version)
+    }?.let { event ->
+        when (event) {
+            is ServiceData -> runCatching { ManifestAnswer.Held(ConstellationManifest.version(event.payload)) }.getOrNull()
+            is DataXError -> ManifestAnswer.Refused(event.errorId, event.channelId)
+            else -> null
+        }
+    }
+
+    // The next message on that channel's service opens a new channel.
+    private fun forgetChannel(channel: Int) {
+        val running = session ?: throw BandAway()
+        running.submit(SessionCommand { s -> s.connection?.forgetServiceChannel(channel) })
+    }
 
     private fun sendOn(service: Int, type: Int, payload: ByteArray) {
         val running = session ?: throw BandAway()
@@ -470,7 +545,8 @@ class BandLink @Inject constructor(
         // the band is heard and reached, as the Meta app does. Pairing finds the band in pairing mode on its own.
         val address = if (pairing.value) band.address else {
             takeFromDisplay(band)
-            runCatching { nearby.bandNearby(first = true) }.getOrNull() ?: band.address
+            // The band is reached at the address it advertises; the Display waits about 20 s before it takes it back.
+            runCatching { nearby.bandNearby(first = true, millis = HEAR_MS) }.getOrNull() ?: band.address
         }
         val identity = IdentityBundle(key, address, band.serial, nowIso(), "band", BundleState.VERIFIED)
         val opened = GlassesSession(
@@ -525,6 +601,9 @@ class BandLink @Inject constructor(
         val hint = band.publicKey?.let(::rawPublicKey)?.let(::keyHint) ?: return log.add("Band: no key to name the band to the Display")
         lent = held.identity to hint
         if (!held.connected) return log.add("Band: the Display does not hold the band now")
+        // Since firmware 7202 the Display takes a band it let go of back within a second. A RELAY rule first makes it
+        // wait about 20 s for a way through the phone, time enough to reach the band; the hand-back undoes it.
+        connection.submit { it.sendOnService(CamControl.SERVICE, CamControl.OVERRIDE_RULE, CamControl.bandRule(hint, CamControl.SCOPE_RELAY)) }
         log.add("Band: asking the Display to let go of the band")
         val released = withTimeoutOrNull(RELEASE_MS) {
             connection.serviceData
@@ -539,7 +618,8 @@ class BandLink @Inject constructor(
 
     /**
      * Hands the band back to the Display after a borrow: the one it let go of, or, when the borrow began before the
-     * Display could be asked, the band it lists but does not hold. The Display does not reach for a band it let go of.
+     * Display could be asked, the band it lists but does not hold: a LOW rule in place of the borrow's RELAY one, as the
+     * Meta app moves a band to glasses, and CONNECT for firmware before 7202.
      */
     private suspend fun giveBack() {
         if (connection.state.value.link != LinkState.READY) {
@@ -550,6 +630,7 @@ class BandLink @Inject constructor(
         val (identity, hint) = lent ?: listedBand() ?: return
         lent = null
         log.add("Band: handing the band back to the Display")
+        connection.submit { it.sendOnService(CamControl.SERVICE, CamControl.OVERRIDE_RULE, CamControl.bandRule(hint)) }
         connection.submit { it.sendOnService(BtPeer.SERVICE, BtPeer.CONNECT, BtPeer.connect(identity, hint)) }
     }
 
@@ -623,8 +704,13 @@ class BandLink @Inject constructor(
         // Taking the band from the Display and reaching it, as a borrow allows, with room to spare.
         const val REACH_MS = 60_000L
         val MANIFEST_SERVICES = listOf(102, ConstellationManifest.SERVICE)
+        // DataX unknown_type: the service is there but does not handle the message.
+        const val UNKNOWN_TYPE = 0xD001
         const val HAPTICS_PLAYED = 1
         const val RELEASE_MS = 10_000L
+        const val HEAR_MS = 8_000L
+        // Long enough for a Display that links its band itself to have done it.
+        const val RULE_CHECK_MS = 30_000L
         const val POLL_MS = 5 * 60_000L
         const val INFO_WAIT_MS = 1_500L
         // The Display letting go (up to 10 s), hearing the band (15 s), then the link.

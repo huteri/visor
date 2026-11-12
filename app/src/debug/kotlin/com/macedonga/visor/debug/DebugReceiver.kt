@@ -20,6 +20,9 @@ import android.util.Base64
 import android.util.Log
 import com.macedonga.visor.band.BandLink
 import com.macedonga.visor.band.BandPair
+import com.macedonga.visor.band.BandPeers
+import com.macedonga.visor.band.Bands
+import com.macedonga.visor.band.DeviceLease
 import com.macedonga.visor.connection.ClassicBond
 import com.macedonga.visor.connection.GlassesService
 import com.macedonga.visor.connection.InternetSwitch
@@ -101,6 +104,7 @@ import com.macedonga.visor.pairs.KnownPair
 import com.macedonga.visor.pairs.Looks
 import com.macedonga.visor.pairs.Pairs
 import com.macedonga.visor.phone.PhoneActions
+import com.macedonga.visor.phone.PhoneLine
 import com.macedonga.visor.setup.Provisioner
 import com.macedonga.visor.stage.Mood
 import com.macedonga.visor.stage.StageDebug
@@ -147,6 +151,7 @@ class DebugReceiver : BroadcastReceiver() {
     @Inject lateinit var pairs: Pairs
     @Inject lateinit var looks: Looks
     @Inject lateinit var phone: PhoneActions
+    @Inject lateinit var line: PhoneLine
     @Inject lateinit var prompter: Teleprompter
     @Inject lateinit var captions: Captions
     @Inject lateinit var languages: LanguageInstaller
@@ -161,6 +166,9 @@ class DebugReceiver : BroadcastReceiver() {
     @Inject lateinit var hearing: Hearing
     @Inject lateinit var bandPair: BandPair
     @Inject lateinit var bandLink: BandLink
+    @Inject lateinit var bandPeers: BandPeers
+    @Inject lateinit var bands: Bands
+    @Inject lateinit var deviceLease: DeviceLease
     @Inject lateinit var classicBond: ClassicBond
     @Inject lateinit var albums: Albums
     @Inject lateinit var library: PhoneLibrary
@@ -667,6 +675,49 @@ class DebugReceiver : BroadcastReceiver() {
                 resultData = "started; BAND_PAIR_STATUS for how it ended, LOG for the steps"
             }
             "BAND_PAIR_STATUS" -> resultData = bandPair.status.value.toString()
+            // Whether the Display takes the band back on its own: it lets go, gets the band rule (--ez rule false skips it), and
+            // is watched for --ei s seconds (120); the band is handed back when it was not taken. Steps in LOG.
+            "BAND_CAM_TEST" -> {
+                scope.launch {
+                    runCatching {
+                        BandCamProbe.run(connection, bands, bandPeers, deviceLease, log, intent.getIntExtra("s", 120) * 1000L, intent.getBooleanExtra("rule", true))
+                    }.onFailure { log.add("CAM probe: failed: ${it.message}") }
+                }
+                resultData = "started; LOG for the steps"
+            }
+            // Whether SET_PREFERRED_LINK RELAY keeps the Display off the band after a DISCONNECT, then DIRECT gives it back;
+            // --ei s seconds a watch (30). Steps and every svc41109 message in LOG.
+            "BAND_TOPOLOGY_TEST" -> {
+                scope.launch {
+                    runCatching { BandCamProbe.topology(connection, bands, bandPeers, log, intent.getIntExtra("s", 30) * 1000L) }
+                        .onFailure { log.add("Topology probe: failed: ${it.message}") }
+                }
+                resultData = "started; LOG for the steps"
+            }
+            // Whether a band rule with --ei scope (1, disconnected) keeps the Display off the band, then LOW gives it back;
+            // --ei s seconds a watch (30). Steps and the Display's svc151 and svc41109 messages in LOG.
+            "BAND_RULE_TEST" -> {
+                scope.launch {
+                    runCatching { BandCamProbe.rule(connection, bands, bandPeers, log, intent.getIntExtra("scope", 1), intent.getIntExtra("s", 30) * 1000L, intent.getBooleanExtra("body", true), intent.getIntExtra("family", 1), intent.getBooleanExtra("disconnect", false)) }
+                        .onFailure { log.add("Rule probe: failed: ${it.message}") }
+                }
+                resultData = "started; LOG for the steps"
+            }
+            // Whether the band takes the phone while the Display holds it (BandLink's pairing hold, no DISCONNECT). LOG.
+            "BAND_DIRECT_TEST" -> {
+                scope.launch { runCatching { BandCamProbe.direct(bandLink, bandPeers, log) }.onFailure { log.add("Direct probe: failed: ${it.message}") } }
+                resultData = "started; LOG for the steps"
+            }
+            // Buzzes the band: a borrow from the Display, the buzz, the hand-back. It outlasts a broadcast; LOG has the steps.
+            "BAND_BUZZ" -> {
+                scope.launch { log.add("Debug: buzz ${runCatching { bandLink.vibrate() }.getOrElse { "failed: ${it.message}" }}") }
+                resultData = "started; LOG for the steps"
+            }
+            // The bands the Display lists on svc41109, each with whether it is connected, and the band its lease names.
+            "BAND_PEERS" -> answerLater {
+                val info = bandPeers.refresh()
+                "lease=${deviceLease.holder.value} listed=" + (info?.peers?.joinToString { "${it.identity.toHexString()} connected=${it.connected}" } ?: "no answer")
+            }
             // Shares the band with the Display through the phone's relay (--ez on false stops); LOG has the relay's steps.
             "BAND_SHARE" -> {
                 bandLink.share(intent.getBooleanExtra("on", true))
@@ -682,6 +733,31 @@ class DebugReceiver : BroadcastReceiver() {
             } else {
                 classicBond.start(if (action == "CLASSIC_REBOND") ClassicBond.Action.REBOND else ClassicBond.Action.UNDO)
                 "started; LOG for the steps"
+            }
+            // The assistant's phone tools, without the model: --es do call|text|calls|ring|unring|location|status|calendar|chats,
+            // with --es who --es kind --ez whatsapp, --es text, --ei count --ez missed, --ei from --ei days. chats gives only
+            // each conversation's app, size and reply; --ez full true adds the words.
+            "HANDSET" -> answerLater {
+                val who = intent.getStringExtra("who").orEmpty()
+                val kind = intent.getStringExtra("kind").orEmpty()
+                when (intent.getStringExtra("do")) {
+                    "call" -> line.call(who, kind, intent.getBooleanExtra("whatsapp", false)).toString()
+                    "text" -> line.text(who, kind, intent.getStringExtra("text").orEmpty()).toString()
+                    "calls" -> line.recentCalls(intent.getIntExtra("count", 5), intent.getBooleanExtra("missed", false)).toString()
+                    "ring" -> line.findPhone(false).toString()
+                    "unring" -> line.findPhone(true).toString()
+                    "location" -> line.location().toString()
+                    "calendar" -> line.calendar(intent.getIntExtra("from", 0), intent.getIntExtra("days", 1)).toString()
+                    "chats" -> assistant.messaging?.chats()?.let { chats ->
+                        if (intent.getBooleanExtra("full", false)) chats.joinToString("\n")
+                        else chats.joinToString("\n") { "${it.conversation.app} lines=${it.lines.size} group=${it.group} reply=${it.canReply}" }.ifEmpty { "none" }
+                    } ?: "no notification listener"
+                    "reply" -> assistant.messaging?.let { m ->
+                        val chat = m.chats().firstOrNull { it.conversation.sender.contains(who, ignoreCase = true) } ?: return@let "no chat with $who"
+                        m.reply(chat.conversation, intent.getStringExtra("text").orEmpty()) ?: "replied"
+                    } ?: "no notification listener"
+                    else -> line.status().toString()
+                }
             }
             // --es do directions --es to --es mode | play --es q --es app | media --es c pause|resume|next|... | now.
             "PHONE" -> answerLater {
