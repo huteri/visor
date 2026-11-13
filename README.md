@@ -4,7 +4,7 @@
 
 <p align="center">
   <b>An Android app for Meta glasses that replaces the Meta AI app.</b><br>
-  Your photos stay on your phone, and "Hey Meta" answers with the model you choose.
+  Your photos stay on your phone, "Hey Meta" answers with the model you choose, and your apps use the glasses too.
 </p>
 
 <p align="center">
@@ -14,7 +14,9 @@
 </p>
 
 <p align="center">
+  <a href="https://visor.macedonga.com">Website</a> |
   <a href="#what-it-does">Features</a> |
+  <a href="#apps-for-your-glasses">Apps</a> |
   <a href="#install">Install</a> |
   <a href="#what-it-sends-and-where">Privacy</a> |
   <a href="#good-to-know">Good to know</a> |
@@ -38,19 +40,35 @@ Visor works with Ray-Ban Meta, Oakley Meta and the other Meta glasses. It speaks
 | **Notifications** | Message notifications go to the glasses, which announce the sender by the name in your contacts. |
 | **Settings** | Every setting the glasses have, the way the Meta app shows them. Advanced holds the rest, assistant language packs and the firmware's feature flags. |
 | **Outside the app** | A home screen widget, a Quick Settings tile, launcher shortcuts, and a Live Update notification while the Live view runs. |
-| **Developer mode** | Other apps and automations can take photos and videos, import captures and hear about new ones. See [Developer mode](docs/developer-mode.md). |
+| **More than one pair** | Keep several pairs on one phone. Home swipes between them, each with its name, batteries and a Connect button, and ends with a page to set up another. |
+| **Meta Ray-Ban Display** | A teleprompter, live captions and translation, the Neural Band's gestures, the Briefing panel with your apps' own cards, and saved Wi-Fi networks. The glasses' own apps reach the internet through the phone, with Instagram's Reels and messages among them. Web apps get the phone's location, motion sensors and nearby Bluetooth devices, and can give your assistant tools. |
+| **Neural Band** | Set up from the Display's settings, with its battery on Home and its wrist in Settings. Share it with the phone, and apps buzz it at once and read its gestures and motion while the Display keeps using it. |
+
+## Apps for your glasses
+
+Visor is also where your apps meet the glasses. Through the [Visor Development Kit](https://visor.macedonga.com/developers/)
+(VDK), apps on your phone, programs and AI agents on your computer, and web apps on the Display use the camera and
+captures, the Display's layouts and Briefing cards, the Neural Band's gestures and motion, voice, the assistant's
+tools and the glasses' settings. No Meta account, no Meta AI app, no developer review.
+
+| To | Do this |
+|---|---|
+| **Use an app** | It asks for what it needs the first time, on Visor's consent screen. **Settings, Apps** lists every app, program and web app with access, and takes any of it back. |
+| **Connect a program or an AI agent** | In **Settings, Apps**, turn on **Let programs connect** and add the program, with its own token. Agents get the glasses over MCP. |
+| **Build your own** | For Android, Python, TypeScript, or a web app on the Display: start with the [getting started guide](https://visor.macedonga.com/developers/docs/getting-started/). `visor fake` stands in for the glasses while you build. |
+| **Automate** | Automation apps such as Tasker take photos and videos and hear about new captures through [Developer mode](https://visor.macedonga.com/developers/docs/developer-mode/)'s intents. |
 
 ## Requirements
 
-- **Glasses:** a pair of Meta glasses, such as Ray-Ban Meta or Oakley Meta. Support for the Meta Ray-Ban Display is limited and lives on the [`display`](https://github.com/macedonga/visor/tree/display) branch.
-- **Phone:** Android 10 or later.
+- **Glasses:** a pair of Meta glasses, such as Ray-Ban Meta, Oakley Meta or the Meta Ray-Ban Display. Support for the Display and its Neural Band is newer and does not yet cover everything the Meta AI app does.
+- **Phone:** Android 12 or later.
 - **Meta account**, for setup. Log in with a password or an email code. Passkeys do not work.
 - **For the assistant:** an API key from Anthropic or from an OpenAI-compatible service.
 
 ## Install
 
 1. Download `visor-<version>.apk` from the [latest release](https://github.com/macedonga/visor/releases/latest).
-2. Compare its SHA-256 with the `.sha256` file next to it.
+2. Compare its SHA-256 with the `.sha256` file next to it. To check that this repo's release workflow built it, run `gh attestation verify visor-<version>.apk -R macedonga/visor`.
 3. Install the APK. Android asks you to allow installs from your browser or file manager.
 4. Open Visor and follow the setup: permissions, Meta login, pairing, then pick your glasses.
 
@@ -73,10 +91,12 @@ Visor has no server of its own, no analytics and no crash reporting. It connects
 
 | To | When | What for |
 |---|---|---|
-| Meta (`accounts.meta.com`, `graph.facebook-hardware.com`) | During setup | The login, and the ownership receipt that makes Visor the owner app of your glasses |
-| Meta (`ar-genai.graph.meta.com`) | When it needs to | Your pair's frame style and lens colour, and assistant language packs |
+| Meta (`accounts.meta.com`, `api.accounts.meta.com`, `meta.graph.meta.com`, `ar.graph.meta.com`, `graph.facebook-hardware.com`) | During setup | The login, and the ownership receipt that makes Visor the owner app of your glasses |
+| Meta (`ar-genai.graph.meta.com`) | When it needs to | Your pair's frame style and lens colour, assistant language packs, and the Display's weather, sports and stocks |
+| Meta (`ar.graph.meta.com`, `graph.facebook.com`, `i.instagram.com`) | When you link a Facebook, Instagram or Threads account to the glasses | That account's tokens and ids, which Visor hands to the glasses |
 | Your model provider | When you ask the assistant | Your question, with your own API key |
 | Your RTMP server | When you broadcast from the Live view | The broadcast |
+| OpenStreetMap (`nominatim.openstreetmap.org`, `routing.openstreetmap.de`) | When Maps on the Display searches or plans a route | The search with your position, and the route's start and end |
 | GitHub (`api.github.com`) | Twice a day | The latest release, to tell you about a new version. Turn it off in Settings, About. |
 
 Everything else stays between the phone and the glasses.
@@ -88,7 +108,8 @@ Everything else stays between the phone and the glasses.
 
 - **Your own builds and releases do not mix.** A build you made has a different signing key from a release, so uninstall one before you install the other. Uninstalling removes the login and the glasses' keys from the phone, and you set up again.
 - **The first "Hey Meta" can go unheard.** For English answers in the glasses' own voice, Visor sometimes turns off a Meta setting and restarts the glasses' assistant when it connects.
-- **The assistant is as good as your model.** Visor sends it the question, the recent conversation and, when you ask about what you see, the photo the glasses take.
+- **The assistant is as good as your model.** Visor sends it the question, the recent conversation and, when you ask about what you see, the photo the glasses take. In a partner language, questions about what you see need a model with tool calls and images.
+- **Partner-language camera commands** take a photo, record a video or hyperlapse, and stop recording. Photos need "Voice photos" on.
 
 ## Build from source
 
@@ -138,7 +159,7 @@ A tag like `v1.2.3` builds the signed release APK in CI and publishes it as a Gi
 | Module | What it holds |
 |---|---|
 | `core/protocol` | Wire format, ciphers, handshake messages. Plain JVM. |
-| `core/transport` | The RFCOMM byte pipe and the wire log. |
+| `core/transport` | The LE L2CAP, RFCOMM and TCP byte pipes, and the wire log. |
 | `core/session` | The link: handshake, channel mux, reconnect ladder. |
 | `core/identity` | Owner key store, trust, Meta login, change of owner, language packs. |
 | `core/connection` | `GlassesConnection` and `GlassesState`, device status. |
@@ -148,7 +169,8 @@ A tag like `v1.2.3` builds the signed release APK in CI and publishes it as a Gi
 | `core/design` | Colours and type. |
 | `app` | The service, the screens, setup, the widget and the tile. |
 
-[CLAUDE.md](CLAUDE.md) lists the protocol traps that cost the most time to find.
+[CLAUDE.md](CLAUDE.md) lists the protocol traps that cost the most time to find. The protocol itself, down to the bytes, is documented at
+[visor.macedonga.com/protocol](https://visor.macedonga.com/protocol/).
 
 </details>
 

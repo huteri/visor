@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="requests_title">Requests</string>
+    <string name="requests_empty">No requests yet</string>
+    <string name="requests_copied">Link copied</string>
+    <string name="requests_running">running</string>
+    <string name="requests_source">source %1$d</string>
+    <string name="requests_tunnel">tunnel</string>
+    <string name="requests_meta">Meta</string>
+    <string name="requests_location">location</string>
+    <string name="requests_sms">SMS</string>
+    <string name="requests_calls">calls</string>
+    <string name="requests_maps">maps</string>
+</resources>

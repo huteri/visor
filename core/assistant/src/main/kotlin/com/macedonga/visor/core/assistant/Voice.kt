@@ -1,6 +1,9 @@
 package com.macedonga.visor.core.assistant
 
 import android.content.Context
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.os.Bundle
@@ -12,14 +15,14 @@ import java.nio.ByteOrder
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
-import kotlin.coroutines.resume
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 
 /** One Opus packet and how long it plays. */
 class OpusPacket(val data: ByteArray, val durationUs: Long)
@@ -34,15 +37,17 @@ class Voice(private val context: Context) {
     private var tts: TextToSpeech? = null
     private val pending = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
 
-    /** The engine and its default voice, for the screen. */
-    var engine: String = ""
-        private set
+    suspend fun checkLanguage(locale: Locale) = lock.withLock {
+        selectLanguage(ready(), locale)
+    }
 
     suspend fun speak(text: String, locale: Locale): List<OpusPacket> = lock.withLock {
         val wav = File(context.cacheDir, "assistant-tts.wav")
         synthesize(text, locale, wav)
-        val pcm = withContext(Dispatchers.Default) { readWav(wav) }
-        withContext(Dispatchers.Default) { encodeOpus(resample(pcm.samples, pcm.rate, 48_000)) }
+        withContext(Dispatchers.Default) {
+            val pcm = parseWav(wav.readBytes())
+            encodeOpus(resample(pcm.samples, pcm.rate, 48_000))
+        }
     }
 
     /** Bounded PCM for a continuous response; encoding belongs to the turn, not the clip. */
@@ -61,6 +66,9 @@ class Voice(private val context: Context) {
     }
 
     internal fun progressEncoder(): ProgressEncoder = PhoneProgressEncoder()
+    /** Audio synthesised elsewhere, such as by a cloud voice, as the same packets. */
+    suspend fun encode(pcm: SpeechPcm): List<OpusPacket> =
+        withContext(Dispatchers.Default) { encodeOpus(resample(pcm.samples, pcm.rate, 48_000)) }
 
     private suspend fun synthesize(text: String, locale: Locale, out: File) {
         val engine = ready()
@@ -78,15 +86,25 @@ class Voice(private val context: Context) {
         }
     }
 
+    private fun selectLanguage(engine: TextToSpeech, locale: Locale) {
+        val required = if (locale.language == "zh") TextToSpeech.LANG_COUNTRY_AVAILABLE else TextToSpeech.LANG_AVAILABLE
+        if (engine.isLanguageAvailable(locale) < required || engine.setLanguage(locale) < required) {
+            throw PhoneSpeechException(PhoneSpeech.NO_VOICE, "the phone has no text-to-speech voice for ${locale.toLanguageTag()}")
+        }
+    }
+
     private suspend fun ready(): TextToSpeech {
         tts?.let { return it }
-        var made: TextToSpeech? = null
-        val status = suspendCancellableCoroutine { cont ->
-            made = TextToSpeech(context) { if (cont.isActive) cont.resume(it) }
-            cont.invokeOnCancellation { made?.shutdown() }
+        val initialized = CompletableDeferred<Int>()
+        val engine = TextToSpeech(context) { initialized.complete(it) }
+        try {
+            val status = withTimeoutOrNull(10_000) { initialized.await() }
+                ?: error("the phone's text to speech did not start")
+            check(status == TextToSpeech.SUCCESS) { "the phone has no working text to speech" }
+        } catch (error: Exception) {
+            engine.shutdown()
+            throw error
         }
-        val engine = checkNotNull(made)
-        check(status == TextToSpeech.SUCCESS) { "the phone has no working text to speech" }
         engine.setOnUtteranceProgressListener(
             object : UtteranceProgressListener() {
                 override fun onStart(utteranceId: String) = Unit
@@ -104,7 +122,6 @@ class Voice(private val context: Context) {
                 }
             },
         )
-        this.engine = engine.defaultEngine.orEmpty()
         tts = engine
         return engine
     }
@@ -238,4 +255,63 @@ internal fun opusDurationUs(packet: ByteArray): Long {
         else -> if (packet.size > 1) packet[1].toInt() and 0x3F else 1
     }
     return frameUs * frames
+}
+
+/** 16-bit mono PCM and its sample rate. */
+class SpeechPcm(val samples: ShortArray, val rate: Int)
+
+/** 16-bit PCM WAV, mixed down to mono. Some engines and services leave the data size unset, so it runs to the end. */
+internal fun parseWav(bytes: ByteArray): SpeechPcm {
+    val b = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+    check(bytes.size > 12 && String(bytes, 0, 4) == "RIFF" && String(bytes, 8, 4) == "WAVE") { "not a WAV file" }
+    var at = 12
+    var rate = 0
+    var channels = 1
+    var bits = 16
+    while (at + 8 <= bytes.size) {
+        val id = String(bytes, at, 4)
+        val size = b.getInt(at + 4)
+        val body = at + 8
+        if (id == "fmt " && body + 16 <= bytes.size) {
+            channels = b.getShort(body + 2).toInt().coerceAtLeast(1)
+            rate = b.getInt(body + 4)
+            bits = b.getShort(body + 14).toInt()
+        } else if (id == "data") {
+            check(bits == 16 && rate > 0) { "the speech is $bits-bit at $rate Hz" }
+            val end = if (size <= 0 || body + size > bytes.size) bytes.size else body + size
+            val frames = (end - body) / (2 * channels)
+            val out = ShortArray(frames)
+            for (i in 0 until frames) {
+                var sum = 0
+                for (c in 0 until channels) sum += b.getShort(body + (i * channels + c) * 2)
+                out[i] = (sum / channels).toShort()
+            }
+            return SpeechPcm(out, rate)
+        }
+        if (size < 0) break
+        at = body + size + (size and 1)
+    }
+    error("the WAV has no data")
+}
+
+/** [pcm] on this phone's own speaker, until it has played. */
+suspend fun playAloud(pcm: SpeechPcm) {
+    check(pcm.samples.isNotEmpty()) { "the speech is empty" }
+    val track = AudioTrack.Builder()
+        .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+        .setAudioFormat(
+            AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(pcm.rate)
+                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build(),
+        )
+        .setTransferMode(AudioTrack.MODE_STATIC)
+        .setBufferSizeInBytes(pcm.samples.size * 2)
+        .build()
+    try {
+        track.write(pcm.samples, 0, pcm.samples.size)
+        track.play()
+        delay(pcm.samples.size * 1000L / pcm.rate + 300)
+    } finally {
+        runCatching { track.stop() }
+        track.release()
+    }
 }

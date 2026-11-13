@@ -7,8 +7,8 @@ android {
 }
 
 dependencies {
-    // The whole of this module's repository dependencies.
     api(project(":core:protocol"))
     api(project(":core:transport"))
     testImplementation(libs.junit)
+    testImplementation("org.mockito:mockito-core:5.14.2")
 }

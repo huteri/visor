@@ -9,8 +9,8 @@ class LiveAiOwnershipTest {
     @Test fun pendingStartupOwnedBeforeRunning() {
         val live = mock(LiveStream::class.java, CALLS_REAL_METHODS)
         fun set(name: String, value: Any?) { LiveStream::class.java.getDeclaredField(name).apply { isAccessible = true }.set(live, value) }
-        val params = Class.forName("com.macedonga.visor.core.media.LiveStream\$Params").declaredConstructors.single { it.parameterCount == 11 }.apply { isAccessible = true }
-        set("params", params.newInstance(GlassesApp.MMAI_LIVE, SessionApp.MMAI_LIVE, StreamQuality.LIVE_AI, 250000, 2, false, false, 0, false, true, false))
+        val params = Class.forName("com.macedonga.visor.core.media.LiveStream\$Params").declaredConstructors.single { it.parameterCount == 10 }.apply { isAccessible = true }
+        set("params", params.newInstance(GlassesApp.MMAI_LIVE, SessionApp.MMAI_LIVE, StreamQuality.LIVE_AI, 250000, 2, false, 0, false, true, false))
         set("_running", MutableStateFlow(false))
         set("wanted", true)
         assertTrue("Camera off must own and cancel pending startup", live.forLiveAi)

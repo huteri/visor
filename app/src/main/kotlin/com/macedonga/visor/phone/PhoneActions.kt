@@ -1,6 +1,5 @@
 package com.macedonga.visor.phone
 
-import android.app.ActivityManager
 import android.app.KeyguardManager
 import android.app.Notification
 import android.app.NotificationChannel
@@ -13,8 +12,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioManager
 import android.media.MediaMetadata
-import android.media.browse.MediaBrowser
 import android.media.session.MediaController
+import android.media.session.MediaSession
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
 import android.net.Uri
@@ -35,6 +34,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.coroutines.resume
+import java.text.Normalizer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
@@ -52,7 +52,7 @@ import kotlinx.coroutines.withTimeoutOrNull
  * notification.
  */
 @Singleton
-class PhoneActions @Inject constructor(@ApplicationContext private val context: Context) : Phone {
+class PhoneActions @Inject constructor(@ApplicationContext private val context: Context, private val spotify: SpotifySearch) : Phone {
     private val pm = context.packageManager
     private val listener = ComponentName(context, MirrorListener::class.java)
     private val prefs = context.getSharedPreferences("phone_actions", Context.MODE_PRIVATE)
@@ -70,7 +70,7 @@ class PhoneActions @Inject constructor(@ApplicationContext private val context: 
             .map { it.activityInfo.packageName }.toSet()
         val intent = if (maps.isEmpty() || handler(route) in maps) route else Intent(Intent.ACTION_VIEW, Uri.parse("geo:0,0?q=" + Uri.encode(destination)))
         val app = handler(intent)?.let(::label).orEmpty()
-        note("Directions to \"$destination\"${if (mode.isNotEmpty()) " by $mode" else ""} in ${app.ifEmpty { "the app the phone picks" }}: $intent")
+        note("Directions to \"$destination\"${if (mode.isNotEmpty()) " by $mode" else ""} in ${app.ifEmpty { "the app the phone picks" }}")
         return open(intent, DIRECTIONS_ID, context.getString(R.string.phone_directions, destination), app)
     }
 
@@ -80,7 +80,15 @@ class PhoneActions @Inject constructor(@ApplicationContext private val context: 
             ?: return PhoneDone("", if (app.isNotEmpty()) "there is no app called $app on the phone" else "no app was named and none played lately; ask which one")
         val label = label(pkg)
         note("Playing \"$query\" in $label")
-        // The step that did not play it, for the answer (#45).
+        // Spotify takes no search from another app, but opens a track by its uri.
+        if (pkg == SPOTIFY && query.isNotEmpty() && spotify.ready) spotify.trackFor(query, ::note)?.let { track ->
+            val done = open(Intent(Intent.ACTION_VIEW, Uri.parse(track.uri)).setPackage(pkg), PLAY_ID, context.getString(R.string.phone_play, query), label)
+            if (!done.opened) return done
+            prefs.edit().putString(LAST, pkg).apply()
+            note("Playing ${track.name} in $label")
+            return PhoneDone(label, playing = track.name)
+        }
+        // The step that did not play it, for the answer.
         var gaveUp = ""
         // Its session when it has one; then its media browser service, which an app may refuse to an app it does not know.
         sessions?.firstOrNull { it.packageName == pkg }?.takeIf { it.takes(PlaybackState.ACTION_PLAY_FROM_SEARCH) }?.let { c ->
@@ -92,9 +100,8 @@ class PhoneActions @Inject constructor(@ApplicationContext private val context: 
         if (browsed == null && browserService(pkg) != null) gaveUp = "$label's media browser did not let Visor in"
         browsed?.let { (browser, c) ->
             try {
-                // An app may say its session takes a search and do nothing with it (YouTube Music, issue #37); its
-                // browser still finds the song, and playing that by its id works.
-                if (query.isNotEmpty()) gaveUp = playFound(pkg, c, query) ?: return played(pkg, label, c)
+                // A session may accept a search and play nothing; its browser's search, played by id, still works.
+                if (query.isNotEmpty()) gaveUp = playFound(label, browser, c, query) ?: return played(pkg, label, c)
                 if (playIn(c, query)) return played(pkg, label, c)
                 if (gaveUp.isEmpty()) gaveUp = "$label's media browser took the search and played nothing"
                 note("$label's media browser did not play it")
@@ -104,7 +111,9 @@ class PhoneActions @Inject constructor(@ApplicationContext private val context: 
         }
         // Then the app itself, opened on the search.
         val search = Intent(MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH).setPackage(pkg)
-            .putExtra(SearchManager.QUERY, query).putExtra(MediaStore.EXTRA_MEDIA_FOCUS, "vnd.android.cursor.item/*")
+            .putExtra(SearchManager.QUERY, query)
+            .putExtra(MediaStore.EXTRA_MEDIA_FOCUS, if (query.isEmpty()) "vnd.android.cursor.item/*" else "vnd.android.cursor.item/audio")
+        if (query.isNotEmpty()) search.putExtra(MediaStore.EXTRA_MEDIA_TITLE, query)
         if (pm.resolveActivity(search, 0) == null) return PhoneDone(label, "$label does not take searches from other apps", gaveUp = gaveUp)
         prefs.edit().putString(LAST, pkg).apply()
         return open(search, PLAY_ID, context.getString(R.string.phone_play, query.ifEmpty { label }), label).copy(gaveUp = gaveUp)
@@ -160,12 +169,16 @@ class PhoneActions @Inject constructor(@ApplicationContext private val context: 
         return PhoneDone(label, playing = what)
     }
 
-    /** Asks [c] to play [query]; true once it plays, and plays something else than before if it was playing. */
     private suspend fun playIn(c: MediaController, query: String): Boolean {
         if (query.isEmpty() && c.playing()) return true
+        return startsNew(c) { c.transportControls.playFromSearch(query, Bundle()) }
+    }
+
+    /** Runs [start]; true once [c] plays, and plays something else than before if it was playing. */
+    private suspend fun startsNew(c: MediaController, start: () -> Unit): Boolean {
         val before = c.item()
         val was = c.playing()
-        c.transportControls.playFromSearch(query, Bundle())
+        start()
         return withTimeoutOrNull(PLAY_WAIT_MS) {
             while (!(c.playing() && (!was || c.item() != before))) delay(POLL_MS)
             true
@@ -173,57 +186,27 @@ class PhoneActions @Inject constructor(@ApplicationContext private val context: 
     }
 
     /**
-     * Searches [pkg]'s media browser for [query] and plays the first playable item it finds by its id, on [c]; null once
-     * it plays, else the step that did not work. Only the compat browser asks a service to search, and the music apps'
-     * services are compat ones.
+     * Searches [browser], the app's media browser, for [query] and plays the best playable item it finds by its id, on [c];
+     * null once it plays, else the step that did not work. Only the compat browser asks a service to search, and the
+     * music apps' services are compat ones.
      */
-    private suspend fun playFound(pkg: String, c: MediaController, query: String): String? {
-        val label = label(pkg)
-        val service = browserService(pkg) ?: return "$label has no media browser"
-        var browser: MediaBrowserCompat? = null
-        var connected = false
-        val id = try {
-            withContext(Dispatchers.Main) {
-                withTimeoutOrNull(BROWSE_MS) {
-                    suspendCancellableCoroutine<String?> { call ->
-                        lateinit var b: MediaBrowserCompat
-                        b = MediaBrowserCompat(context, service, object : MediaBrowserCompat.ConnectionCallback() {
-                            override fun onConnected() {
-                                connected = true
-                                b.search(query, null, object : MediaBrowserCompat.SearchCallback() {
-                                    override fun onSearchResult(query: String, extras: Bundle?, items: List<MediaBrowserCompat.MediaItem>) {
-                                        if (call.isActive) call.resume(items.firstOrNull { it.isPlayable }?.mediaId)
-                                    }
+    private suspend fun playFound(label: String, browser: MediaBrowserCompat, c: MediaController, query: String): String? {
+        val id = withContext(Dispatchers.Main) {
+            withTimeoutOrNull(BROWSE_MS) {
+                suspendCancellableCoroutine<String?> { call ->
+                    browser.search(query, null, object : MediaBrowserCompat.SearchCallback() {
+                        override fun onSearchResult(query: String, extras: Bundle?, items: List<MediaBrowserCompat.MediaItem>) {
+                            if (call.isActive) call.resume(chooseMediaSearchMatch(query, items)?.mediaId)
+                        }
 
-                                    override fun onError(query: String, extras: Bundle?) {
-                                        if (call.isActive) call.resume(null)
-                                    }
-                                })
-                            }
-
-                            override fun onConnectionFailed() {
-                                if (call.isActive) call.resume(null)
-                            }
-                        }, null)
-                        browser = b
-                        b.connect()
-                    }
+                        override fun onError(query: String, extras: Bundle?) {
+                            if (call.isActive) call.resume(null)
+                        }
+                    })
                 }
             }
-        } finally {
-            browser?.let { b -> main.post { b.disconnect() } }
-        }
-        if (id == null) {
-            val why = if (connected) "$label's media browser found nothing to play for \"$query\"" else "$label's media browser did not let Visor search"
-            return why.also(::note)
-        }
-        val before = c.item()
-        val was = c.playing()
-        c.transportControls.playFromMediaId(id, Bundle())
-        val plays = withTimeoutOrNull(PLAY_WAIT_MS) {
-            while (!(c.playing() && (!was || c.item() != before))) delay(POLL_MS)
-            true
-        } == true
+        } ?: return "$label's media browser found nothing to play for \"$query\"".also(::note)
+        val plays = startsNew(c) { c.transportControls.playFromMediaId(id, Bundle()) }
         return if (plays) null else "$label took the song its search found and did not start it".also(::note)
     }
 
@@ -232,16 +215,16 @@ class PhoneActions @Inject constructor(@ApplicationContext private val context: 
             ?.let { ComponentName(it.packageName, it.name) }
 
     /** [pkg]'s media browser service, connected, and a controller for its session; null when there is none or it refuses. */
-    private suspend fun browse(pkg: String): Pair<MediaBrowser, MediaController>? {
+    private suspend fun browse(pkg: String): Pair<MediaBrowserCompat, MediaController>? {
         val service = browserService(pkg) ?: return null
         // Its callbacks come on the thread that connects, which needs a looper.
         val connected = withContext(Dispatchers.Main) {
             withTimeoutOrNull(BROWSE_MS) {
-                suspendCancellableCoroutine<Pair<MediaBrowser, MediaController>?> { call ->
-                    lateinit var browser: MediaBrowser
-                    browser = MediaBrowser(context, service, object : MediaBrowser.ConnectionCallback() {
+                suspendCancellableCoroutine<Pair<MediaBrowserCompat, MediaController>?> { call ->
+                    lateinit var browser: MediaBrowserCompat
+                    browser = MediaBrowserCompat(context, service, object : MediaBrowserCompat.ConnectionCallback() {
                         override fun onConnected() {
-                            if (call.isActive) call.resume(browser to MediaController(context, browser.sessionToken)) else browser.disconnect()
+                            if (call.isActive) call.resume(browser to MediaController(context, browser.sessionToken.token as MediaSession.Token)) else browser.disconnect()
                         }
 
                         override fun onConnectionFailed() {
@@ -295,7 +278,7 @@ class PhoneActions @Inject constructor(@ApplicationContext private val context: 
             ?: return PhoneDone(named, "no app on the phone opens it")
         val intent = Intent(implicit).setPackage(pkg).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         val app = named.ifEmpty { label(pkg) }
-        val started = (onScreen() || companionAssociated(context)) && runCatching { context.startActivity(intent) }.isSuccess
+        val started = mayOpenApps(context) && runCatching { context.startActivity(intent) }.isSuccess
         if (started && !context.getSystemService(KeyguardManager::class.java).isKeyguardLocked) return PhoneDone(app, opened = true)
         val manager = context.getSystemService(NotificationManager::class.java)
         if (!manager.areNotificationsEnabled()) return PhoneDone(app, "Visor may not post notifications, and it cannot open $app from the background")
@@ -314,10 +297,6 @@ class PhoneActions @Inject constructor(@ApplicationContext private val context: 
         note("Waiting in a notification: $title")
         return PhoneDone(app, tapToOpen = true)
     }
-
-    /** Whether an activity of Visor's is in front: the only time it may open another app itself. */
-    private fun onScreen(): Boolean = ActivityManager.RunningAppProcessInfo()
-        .also(ActivityManager::getMyMemoryState).importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
 
     /** The app [intent] opens; null when the phone would ask which one. */
     private fun handler(intent: Intent): String? =
@@ -347,6 +326,7 @@ class PhoneActions @Inject constructor(@ApplicationContext private val context: 
             MediaControl.PREVIOUS to KeyEvent.KEYCODE_MEDIA_PREVIOUS,
             MediaControl.STOP to KeyEvent.KEYCODE_MEDIA_STOP,
         )
+        const val SPOTIFY = "com.spotify.music"
         const val CHANNEL = "assistant_actions"
         const val DIRECTIONS_ID = 11
         const val PLAY_ID = 12
@@ -359,3 +339,51 @@ class PhoneActions @Inject constructor(@ApplicationContext private val context: 
         fun simple(name: String) = name.lowercase().filter { it.isLetterOrDigit() }
     }
 }
+
+/** The playable result that best matches [query], else the first playable one. */
+private fun chooseMediaSearchMatch(query: String, items: List<MediaBrowserCompat.MediaItem>): MediaBrowserCompat.MediaItem? {
+    val playable = items.filter { it.isPlayable }
+    val normalizedQuery = normalizeSearchText(query)
+    if (normalizedQuery.isEmpty()) return playable.firstOrNull()
+    // On a tie the service's own order wins: maxByOrNull keeps the first.
+    val best = playable.map { it to scoreMediaSearchMatch(normalizedQuery, it) }.maxByOrNull { it.second }
+    return best?.takeIf { it.second > 0 }?.first ?: playable.firstOrNull()
+}
+
+private fun scoreMediaSearchMatch(query: String, item: MediaBrowserCompat.MediaItem): Int {
+    val desc = item.description ?: return 0
+    val title = normalizeSearchText(desc.title?.toString().orEmpty())
+    val subtitle = normalizeSearchText(desc.subtitle?.toString().orEmpty())
+
+    val candidates = buildList {
+        if (title.isNotEmpty()) add(title)
+        if (subtitle.isNotEmpty()) add(subtitle)
+        if (title.isNotEmpty() && subtitle.isNotEmpty()) {
+            add("$title by $subtitle")
+            add("$subtitle by $title")
+        }
+    }
+
+    var best = 0
+    for (candidate in candidates) {
+        when {
+            candidate == query -> best = maxOf(best, 200)
+            candidate.startsWith(query) || query.startsWith(candidate) -> best = maxOf(best, 150)
+            candidate.contains(query) || query.contains(candidate) -> best = maxOf(best, 120)
+            else -> {
+                val queryWords = query.split(' ').filter { it.isNotEmpty() }
+                val candidateWords = candidate.split(' ').filter { it.isNotEmpty() }
+                val shared = queryWords.count { it in candidateWords }
+                if (shared > 0) best = maxOf(best, shared * 25)
+            }
+        }
+    }
+    return best
+}
+
+// Accents go and every script stays, so "Perché" matches "Perche" and a title in Cyrillic or Japanese still compares.
+private fun normalizeSearchText(value: String): String =
+    Normalizer.normalize(value.lowercase(), Normalizer.Form.NFD).replace(MARKS, "").replace(NON_WORD, " ").trim()
+
+private val MARKS = Regex("\\p{Mn}+")
+private val NON_WORD = Regex("[^\\p{L}\\p{N}]+")

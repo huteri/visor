@@ -59,7 +59,7 @@ class ConversationPolicyTest {
             set(store, "config", MutableStateFlow(AssistantConfig(memoryMinutes = 10)))
             set(assistant, "store", store); set(assistant, "diary", diary)
             val linkType = Class.forName("com.macedonga.visor.core.assistant.Assistant\$Link")
-            val link = linkType.declaredConstructors.single().let { it.isAccessible = true; it.newInstance(org.mockito.Mockito.mock(com.macedonga.visor.core.session.DataXConnection::class.java)) }
+            val link = linkType.declaredConstructors.single().let { it.isAccessible = true; it.newInstance(assistant, org.mockito.Mockito.mock(com.macedonga.visor.core.session.DataXConnection::class.java)) }
             @Suppress("UNCHECKED_CAST")
             val fresh = linkType.getDeclaredField("fresh").let { it.isAccessible = true; it.get(link) as MutableSet<String> }
             fresh.add("new"); set(assistant, "link", link)

@@ -43,7 +43,7 @@ class LiveAiPreambleTest {
         val context = mock(Context::class.java)
         val store = mock(AssistantConfigStore::class.java)
         `when`(store.generation).thenReturn(java.util.concurrent.atomic.AtomicLong())
-        `when`(store.config).thenReturn(MutableStateFlow(AssistantConfig(glassesVoice = true)))
+        `when`(store.config).thenReturn(MutableStateFlow(AssistantConfig(tts = TtsPath.GLASSES)))
         val synthesisEntered = CompletableDeferred<Unit>()
         val synthesisRelease = CompletableDeferred<Unit>()
         val voice = mock(Voice::class.java) { invocation ->
@@ -99,7 +99,7 @@ class LiveAiPreambleTest {
         `when`(bitmap.height).thenReturn(1)
         doAnswer { invocation -> (invocation.getArgument<java.io.OutputStream>(2)).write(jpegBytes); true }.`when`(bitmap).compress(any(), anyInt(), any())
         val decoder = mockStatic(android.graphics.BitmapFactory::class.java)
-        decoder.`when`<android.graphics.Bitmap> { android.graphics.BitmapFactory.decodeByteArray(any(), anyInt(), anyInt()) }.thenReturn(bitmap)
+        decoder.`when`<android.graphics.Bitmap> { android.graphics.BitmapFactory.decodeByteArray(any(), anyInt(), anyInt(), any<android.graphics.BitmapFactory.Options>()) }.thenReturn(bitmap)
         var frameReads = 0
         val frameEntered = CompletableDeferred<Unit>()
         val frameRelease = CompletableDeferred<Unit>()
@@ -108,6 +108,7 @@ class LiveAiPreambleTest {
             if (endDuringFrame || revokeDuringFrame || replaceDuringFrame) { frameEntered.complete(Unit); frameRelease.await() }
             if (jpeg) jpegBytes else null
         })
+        set(assistant, "display", { false })
         set(assistant, "liveAiDetailed", { false })
         set(assistant, "liveAiVoiceOnly", { setting })
         set(assistant, "glassesVoice", { "voice-id" })
@@ -130,7 +131,7 @@ class LiveAiPreambleTest {
             } else RETURNS_DEFAULTS.answer(invocation)
         }
         val linkClass = Class.forName("com.macedonga.visor.core.assistant.Assistant\$Link")
-        val link = linkClass.getDeclaredConstructor(DataXConnection::class.java).apply { isAccessible = true }.newInstance(mux)
+        val link = linkClass.getDeclaredConstructor(Assistant::class.java, DataXConnection::class.java).apply { isAccessible = true }.newInstance(assistant, mux)
         set(link, "m0", 7)
         set(link, "s0", 8)
         set(link, "simplified", simplified)
@@ -170,8 +171,9 @@ class LiveAiPreambleTest {
         set(stream, "scope", eventScope)
         set(stream, "connection", connection)
         set(stream, "hosts", SessionHostFactory { _, _ -> wifiHost })
-        set(stream, "_log", MutableStateFlow<List<String>>(emptyList()))
+        set(stream, "_notes", MutableStateFlow<List<String>>(emptyList()))
         set(stream, "_notes", MutableSharedFlow<String>(extraBufferCapacity = 64))
+        set(stream, "heard", java.util.concurrent.ConcurrentHashMap.newKeySet<Int>())
         set(stream, "_wifiSession", MutableStateFlow<DataXConnection?>(null))
         val opening = eventScope.async { call(stream, "openWifiSession", GlassesTarget(GlassesLink.Wifi("127.0.0.1", 1234), "test"), mock(com.macedonga.visor.core.identity.IdentityBundle::class.java), "127.0.0.1", 1234, null) }
         wifiHostEvents.emit(LinkStateChanged(LinkState.READY))
@@ -238,7 +240,7 @@ class LiveAiPreambleTest {
                     assertTrue(audioTypes.isEmpty())
                     assertFalse(live.active)
                     if (closeDuringSynthesis) verify(camera).off()
-                    assertTrue(store.config.value.glassesVoice)
+                    assertTrue((store.config.value.tts == TtsPath.GLASSES))
                     return
                 }
                 if (stopAfter != null) {
@@ -255,7 +257,7 @@ class LiveAiPreambleTest {
             } else {
                 call(assistant, "deliver", link, sub, "Question", "Native reply.")
             }
-            assertTrue("Saved ordinary native preference unchanged", store.config.value.glassesVoice)
+            assertTrue("Saved ordinary native preference unchanged", (store.config.value.tts == TtsPath.GLASSES))
             assertTrue("No saved settings writes", mockingDetails(store).invocations.all { it.method.name.startsWith("get") })
             if (liveTurn) assertEquals("Unread setting must not read even cached Live frames", if (voiceOnly == false) 1 else 0, frameReads)
             if (jpeg && voiceOnly == false) assertArrayEquals(jpegBytes, modelImage) else assertNull(modelImage)

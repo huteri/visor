@@ -60,9 +60,22 @@ internal fun readMicrophoneFrames(chunk: ByteArray, decode: (ByteArray, Long?) -
                 val n = b.getInt(b.position() - 4)
                 if (end - b.position() < 4) return false
                 b.int // final decoder range
-                if (n <= 0 || n != end - b.position()) return false
-                frames += Frame(b.position(), n, ms)
-                b.position(end)
+                if (n > 0 && n == end - b.position()) {
+                    frames += Frame(b.position(), n, ms)
+                    b.position(end)
+                } else {
+                    // Audio-only glasses: clock, five-byte group header, LE32 length-prefixed Opus.
+                    b.order(ByteOrder.LITTLE_ENDIAN).position(end - length + 9)
+                    var time = ms
+                    while (b.position() < end) {
+                        if (end - b.position() < 4) return false
+                        val size = b.int
+                        if (size <= 0 || size > end - b.position()) return false
+                        frames += Frame(b.position(), size, time)
+                        time += opusDurationUs(chunk.copyOfRange(b.position(), b.position() + size)) / 1000
+                        b.position(b.position() + size)
+                    }
+                }
             }
             if (b.position() != end) return false
         }

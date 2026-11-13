@@ -3,10 +3,27 @@ package com.macedonga.visor.core.session
 import com.macedonga.visor.core.protocol.Header
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.launch
+import kotlin.coroutines.intrinsics.startCoroutineUninterceptedOrReturn
 import org.junit.Assert.*
 import org.junit.Test
 
 class DataXChannelLifecycleTest {
+    private interface PlaintextLink { suspend fun send(plaintext: ByteArray); suspend fun receive(): ByteArray }
+    private fun mux(link: PlaintextLink, registry: ChannelRegistry, channelTrace: ((String) -> Unit)? = null): DataXConnection {
+        val secure = org.mockito.Mockito.mock(SecureLink::class.java) { call ->
+            when (call.method.name) {
+                "send" -> {
+                    @Suppress("UNCHECKED_CAST") val continuation = call.rawArguments.last() as kotlin.coroutines.Continuation<Unit>
+                    val write: suspend () -> Unit = { link.send(call.getArgument(0)) }
+                    write.startCoroutineUninterceptedOrReturn(continuation)
+                }
+                "nextSdu" -> kotlinx.coroutines.runBlocking { link.receive() }
+                "open" -> call.getArgument<ByteArray>(0)
+                else -> org.mockito.Mockito.RETURNS_DEFAULTS.answer(call)
+            }
+        }
+        return DataXConnection(secure, registry, channelTrace = channelTrace)
+    }
     private class Link : PlaintextLink {
         val sent = mutableListOf<ByteArray>()
         val incoming = ArrayDeque<ByteArray>()
@@ -17,7 +34,7 @@ class DataXChannelLifecycleTest {
     @Test fun cameraChannelMetadataIsBoundedAndContainsNoPayload() = runBlocking {
         val link = Link()
         val metadata = mutableListOf<String>()
-        val mux = DataXConnection(link, ChannelRegistry(), channelTrace = { metadata += it })
+        val mux = mux(link, ChannelRegistry(), channelTrace = { metadata += it })
         repeat(20) { mux.sendOnService(51350, 1, "private-payload".toByteArray()) }
         assertEquals(1, metadata.size)
         assertTrue(metadata.first().contains("opened"))
@@ -43,13 +60,15 @@ class DataXChannelLifecycleTest {
             }
             override suspend fun receive(): ByteArray = error("unused")
         }
-        val mux = DataXConnection(link, ChannelRegistry())
+        val mux = mux(link, ChannelRegistry())
         val sending = kotlinx.coroutines.CoroutineScope(coroutineContext).launch {
             mux.sendOnService(51350, 1, byteArrayOf(7))
         }
         entered.await()
         val retired = Header.parse(sent.first()).channelId
         assertTrue(mux.invalidateServiceChannel(51350, DataXConnection.mirror(retired)))
+        release.complete(Unit)
+        sending.join()
         mux.sendOnService(51350, 1, byteArrayOf(7))
         val fresh = Header.parse(sent.last())
         assertNotEquals(retired, fresh.channelId)
@@ -59,12 +78,12 @@ class DataXChannelLifecycleTest {
         assertFalse(mux.invalidateServiceChannel(51350, DataXConnection.mirror(retired)))
         mux.sendOnService(51350, 2, byteArrayOf(7))
         assertEquals(fresh.channelId, Header.parse(sent.last()).channelId)
-        assertFalse(Header.parse(sent.last()).flags.setService)
+        assertEquals(0, Header.parse(sent.last()).serviceId)
     }
 
     @Test fun cameraServiceReopensAfterFirstAndSecondPeerClose() = runBlocking {
         val link = Link()
-        val mux = DataXConnection(link, ChannelRegistry())
+        val mux = mux(link, ChannelRegistry())
         val channels = mutableSetOf<Int>()
         repeat(3) {
             mux.sendOnService(51350, 1, byteArrayOf(7))
@@ -73,7 +92,7 @@ class DataXChannelLifecycleTest {
             assertEquals("New channel must explicitly name camera service", 51350, first.serviceId)
             mux.sendOnService(51350, 2, byteArrayOf(7))
             assertEquals(first.channelId, Header.parse(link.sent.last()).channelId)
-            assertFalse(Header.parse(link.sent.last()).flags.setService)
+            assertEquals(0, Header.parse(link.sent.last()).serviceId)
             link.incoming += Header.build(DataXConnection.mirror(first.channelId), 0, serviceId = 0)
             assertTrue(mux.receive().info.flags.isClosed)
         }
@@ -82,7 +101,7 @@ class DataXChannelLifecycleTest {
     @Test fun onlyCameraServiceNotFoundRetiresCacheButKeepsRegistryUntilClose() = runBlocking {
         val link = Link()
         val registry = ChannelRegistry()
-        val mux = DataXConnection(link, registry)
+        val mux = mux(link, registry)
         mux.sendOnService(51350, 1, byteArrayOf(7))
         val old = Header.parse(link.sent.last()).channelId
         val inbound = DataXConnection.mirror(old)
@@ -120,7 +139,7 @@ class DataXChannelLifecycleTest {
 
     @Test fun peerOriginSameNumberCloseAndStatusDoNotEvictLocalServices() = runBlocking {
         val link = Link()
-        val mux = DataXConnection(link, ChannelRegistry())
+        val mux = mux(link, ChannelRegistry())
         mux.sendOnService(51350, 1, byteArrayOf(7))
         val camera = Header.parse(link.sent.last()).channelId
         mux.sendOnService(15, 1, byteArrayOf(7))
@@ -135,6 +154,6 @@ class DataXChannelLifecycleTest {
         mux.receive()
         mux.sendOnService(15, 2, byteArrayOf(7))
         assertEquals(audio, Header.parse(link.sent.last()).channelId)
-        assertFalse(Header.parse(link.sent.last()).flags.setService)
+        assertEquals(0, Header.parse(link.sent.last()).serviceId)
     }
 }

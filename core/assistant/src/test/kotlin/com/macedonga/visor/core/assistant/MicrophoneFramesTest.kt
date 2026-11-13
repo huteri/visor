@@ -98,6 +98,18 @@ class MicrophoneFramesTest {
         assertEquals(1, calls)
     }
 
+    @Test fun groupedAudioOnlyPacketsKeepClockAndRejectTruncatedSuffix() {
+        val chunk = java.nio.ByteBuffer.allocate(25).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            .putInt(21).putInt(123).put(ByteArray(5)).putInt(2).put(byteArrayOf(0x48, 0))
+            .putInt(2).put(byteArrayOf(0x48, 0)).array()
+        val times = mutableListOf<Long?>()
+        assertTrue(readMicrophoneFrames(chunk) { p, ms -> assertArrayEquals(byteArrayOf(0x48, 0), p); times += ms })
+        assertEquals(listOf(123L, 143L), times)
+        var calls = 0
+        assertFalse(readMicrophoneFrames(chunk + chunk.copyOf(24)) { _, _ -> calls++ })
+        assertEquals(0, calls)
+    }
+
     @Test fun knownQuestionFramingKeepsPacketBytes() {
         val packets = mutableListOf<ByteArray>()
         assertTrue(readMicrophoneFrames(byteArrayOf(0, 0, 0, 2, 0x78, 0)) { p, ms ->

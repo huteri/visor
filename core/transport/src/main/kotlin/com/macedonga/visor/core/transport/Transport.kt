@@ -16,15 +16,14 @@ interface Transport {
 
     /** Close the link, and end any read waiting on it. Safe to call twice. */
     fun close()
+
+    /** The handshake is done: a leading bit 7 now starts a COMMAND frame, not a bare DataX message. */
+    fun handshakeDone() {}
 }
 
 /** The peer closed the link, or this end did. */
 class TransportClosedException(message: String, cause: Throwable? = null) :
     IOException(message, cause)
-
-/** A leading byte that belongs to neither framing on this link. */
-class TransportUnframeableException(val leadingByte: Int) :
-    IOException("unframeable leading byte 0x%02x".format(leadingByte))
 
 /** Why a link would not open. */
 enum class ConnectFailure {

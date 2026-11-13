@@ -14,7 +14,7 @@ class SpokenProgressWiringTest {
         assertTrue(assistant.contains("voice.progressPcm"))
         assertTrue(assistant.contains("voice.progressEncoder"))
         assertTrue(assistant.contains("val streamId = l.streamIds[interaction] ?: l.sessionOf[interaction]?.let"))
-        assertTrue(assistant.contains("if (!forcePhoneVoice && store.config.value.glassesVoice && !l.sessionTurn && store.config.value.speechLanguage.isEmpty())"))
+        assertTrue(assistant.contains("val ownVoice = !forcePhoneVoice && c.tts == TtsPath.GLASSES"))
     }
     @Test fun `settings disclose phone voice and provide off by default toggle`() {
         val root = File("../../app/src/main")
@@ -28,7 +28,7 @@ class SpokenProgressWiringTest {
     }
     @Test fun `progress preparation bounded and keepalive ownership checked`() {
         assertTrue(source("SpokenProgress").contains("withTimeout(15_000) { synthesize(phrase) }"))
-        assertTrue(source("Assistant").contains("holdOn(l) { check(owned())"))
+        assertTrue(source("Assistant").contains("holdOn(l, interaction) { check(owned())"))
     }
     @Test fun `settings generation and channel closure revoke active stream`() {
         assertTrue(source("AssistantConfig").contains("generation.incrementAndGet()"))
