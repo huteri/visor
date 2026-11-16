@@ -65,6 +65,7 @@ private class Turn(
     val actions = ArrayList<ToolAction>()
     // Apps' tools by the name the model sees, which [Brain.specs] gives them.
     val appNames = HashMap<String, AppTool>()
+    var runsInstructions = ""
     var ends = false
     var cameraRequested = false
     // A tool ran: asking again would run it twice.
@@ -189,10 +190,12 @@ class Brain(
             Toolbox(emptyList(), "")
         }
         val turn = Turn(box, image, glasses?.described(), canEnd, capturePhoto, cameraAction, appTools.tools())
-        val system = (if (audience == Audience.PHONE) PHONE_PROMPT else SYSTEM_PROMPT) +
+        val presentation = (if (audience == Audience.PHONE) PHONE_PROMPT else SYSTEM_PROMPT) +
             " It is ${ZonedDateTime.now().format(DateTimeFormatter.ofPattern("EEEE d MMMM yyyy, HH:mm", Locale.ENGLISH))}." +
-            (if (audience == Audience.GLASSES) " The glasses are set to ${locale.getDisplayLanguage(Locale.ENGLISH)}." else "") +
-            memoryPrompt() +
+            (if (audience == Audience.GLASSES) " The glasses are set to ${locale.getDisplayLanguage(Locale.ENGLISH)}." else "")
+        turn.runsInstructions = presentation + " Tools are managed by Hermes on the server. Visor phone, glasses and local MCP callbacks are unavailable." +
+            (if (note.isNotBlank()) " $note" else "") + (if (c.instructions.isNotBlank()) " ${c.instructions}" else "")
+        val system = presentation + memoryPrompt() +
             phoneTools?.prompt.orEmpty() + handsetTools?.prompt.orEmpty() +
             (if (canEnd) END_PROMPT else "") +
             turn.box.prompt +
@@ -411,6 +414,28 @@ class Brain(
         c: AssistantConfig, model: String, system: String, past: List<Exchange>, question: String, image: ByteArray?,
         tokens: Int, turn: Turn?, searchTool: JSONObject? = null,
     ): String {
+        val runConversation = coroutineContext[ConversationContext]
+        val runScope = "runs:" + java.security.MessageDigest.getInstance("SHA-256").digest(
+            "${c.api.trimEnd('/')}\u0000${c.apiKey}\u0000${runConversation?.conversation ?: java.util.UUID.randomUUID()}".toByteArray(),
+        ).joinToString("") { "%02x".format(it) }
+        if (c.apiKey.isNotBlank() && (runConversation?.diary?.session("$runScope.runs") == "true" || supportsRuns(c))) {
+            val conversation = runConversation
+            val scope = runScope
+            if (conversation != null) synchronized(conversation.diary) {
+                conversation.validate(); conversation.diary.keepSession("$scope.runs", "true")
+            }
+            val session = conversation?.diary?.session(scope)
+                ?: conversation?.diary?.session(sessionScope(c, conversation.conversation))
+            if (session != null && conversation?.diary?.session("$scope.run") == null) verifySession(c, session)
+            val input: Any = if (image == null) question else JSONArray()
+                .put(JSONObject().put("role", "user").put("content", JSONArray()
+                    .put(JSONObject().put("type", "text").put("text", question)).put(openAiImage(image))))
+            val body = JSONObject().put("model", model).put("instructions", turn?.runsInstructions?.takeIf { it.isNotBlank() } ?: system).put("input", input)
+            if (session != null) body.put("session_id", session)
+            else if (past.isNotEmpty()) body.put("conversation_history", JSONArray().putPast(past))
+            // Runs execute Hermes tools, not Visor's local function-call loop.
+            return HermesRuns.answer(c.api, c.apiKey, body, conversation, scope, inputIdentity = question)
+        }
         val conversation = coroutineContext[ConversationContext]?.takeIf {
             turn != null && c.apiKey.isNotBlank() &&
                 (it.diary.session(sessionScope(c, it.conversation)) != null || supportsSessions(c))
@@ -802,6 +827,17 @@ class Brain(
         else JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", "data:image/jpeg;base64,$encoded"))
         return JSONArray().put(JSONObject().put("type", "text").put("text", e.question + " [Prior reference photo, not the current view.]"))
             .put(photo)
+    }
+
+    private fun supportsRuns(c: AssistantConfig): Boolean {
+        val http = URL(c.api.trimEnd('/') + "/capabilities").openConnection() as HttpURLConnection
+        return try {
+            http.connectTimeout = 2_000; http.readTimeout = 2_000
+            http.setRequestProperty("Authorization", "Bearer ${c.apiKey}")
+            http.responseCode == 200 && http.inputStream.bufferedReader().use {
+                JSONObject(it.readText()).optJSONObject("features")?.optBoolean("run_status") == true
+            }
+        } catch (_: Exception) { false } finally { http.disconnect() }
     }
 
     private val sessionSupport = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
