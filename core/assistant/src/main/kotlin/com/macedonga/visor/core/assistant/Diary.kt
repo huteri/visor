@@ -4,6 +4,12 @@ import com.macedonga.visor.core.assistant.mcp.ToolAction
 import com.macedonga.visor.core.connection.objects
 import com.macedonga.visor.core.connection.strings
 import java.io.File
+import java.nio.channels.FileChannel
+import java.nio.file.StandardOpenOption.READ
+import java.nio.file.Files
+import java.nio.file.NoSuchFileException
+import java.nio.file.StandardCopyOption.ATOMIC_MOVE
+import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -58,7 +64,14 @@ data class Memory(val id: String, val text: String, val at: Long)
  * Everything asked of the assistant, kept on the phone by day until it is deleted: one file per day with its turns
  * and its lines, the photos the answers were given, and what the assistant remembers.
  */
-class Diary(private val dir: File, legacyTurns: File = File(dir, "legacy-turns.json"), legacyPhotos: File = File(dir, "legacy-photos")) : MemoryBook {
+class Diary(
+    private val dir: File,
+    legacyTurns: File = File(dir, "legacy-turns.json"),
+    legacyPhotos: File = File(dir, "legacy-photos"),
+    private val syncSessionDirectory: (File) -> Unit = { parent ->
+        FileChannel.open(parent.toPath(), READ).use { it.force(true) }
+    },
+) : MemoryBook {
 
     val photos = File(dir, "photos")
     private val days = File(dir, "days")
@@ -108,17 +121,37 @@ class Diary(private val dir: File, legacyTurns: File = File(dir, "legacy-turns.j
         validateGeneration(request.generation)
         keepSession(request.scope, id)
     }
-    @Synchronized fun session(scope: String): String? = runCatching {
-        JSONObject(sessionFile.readText()).optString(scope).takeIf { it.isNotBlank() }
-    }.getOrNull()
+    private fun readSessions(): JSONObject {
+        val text = try {
+            String(Files.readAllBytes(sessionFile.toPath()), Charsets.UTF_8)
+        } catch (_: NoSuchFileException) {
+            return JSONObject()
+        }
+        // Only absence is empty state. Bad bytes/schema must not erase admission records.
+        val tokens = org.json.JSONTokener(text)
+        val json = JSONObject(tokens)
+        check(tokens.nextClean() == '\u0000') { "Corrupt session state" }
+        check(json.keys().asSequence().all { json.get(it) is String }) { "Corrupt session state" }
+        return json
+    }
+    @Synchronized fun session(scope: String): String? = readSessions().optString(scope).takeIf { it.isNotBlank() }
     @Synchronized fun keepSession(scope: String, id: String) {
-        val json = runCatching { JSONObject(sessionFile.readText()) }.getOrDefault(JSONObject())
+        val json = readSessions()
         json.put(scope, id)
         while (json.length() > 128) {
-            val victim = json.keys().asSequence().first { it != scope }
+            // Runs admission tombstones cannot expire through cache churn: tools may have run.
+            val victim = json.keys().asSequence().firstOrNull { it != scope && !it.startsWith("runs:") } ?: break
             json.remove(victim)
         }
-        write(sessionFile, json.toString())
+        // Admission must be durable before POST; never fall back to a non-atomic replacement.
+        val tmp = File(dir, "sessions.json.tmp")
+        tmp.outputStream().use { stream ->
+            stream.write(json.toString().toByteArray(Charsets.UTF_8))
+            stream.fd.sync()
+        }
+        Files.move(tmp.toPath(), sessionFile.toPath(), ATOMIC_MOVE, REPLACE_EXISTING)
+        // Persist the renamed directory entry too; failure must stop admission before POST.
+        syncSessionDirectory(dir)
     }
 
     // --- turns ---------------------------------------------------------------
