@@ -74,7 +74,7 @@ class BrainMergeIntegrationTest {
             assertEquals(2, requests.size)
             assertTrue(requests.first().getJSONArray("tools").toString().contains("send_text"))
             assertTrue(requests.last().getJSONArray("messages").toString().contains("Battery 80 percent"))
-            assertTrue(requests.all { it.getBoolean("stream") })
+            assertFalse(requests.any { it.optBoolean("stream") })
         } finally { TestHttpConnections.handlers.remove(host) }
     }
 
@@ -141,7 +141,7 @@ class BrainMergeIntegrationTest {
             }
             assertTrue(requests.first().has("reasoning_effort"))
             assertFalse(requests[1].has("reasoning_effort"))
-            assertTrue(requests.all { it.getBoolean("stream") })
+            assertFalse(requests.any { it.optBoolean("stream") })
             if (session || partial) {
                 assertEquals("Accepted sessions and partial answers must never be silently replayed", 2, requests.size)
                 assertTrue(result.isFailure)

@@ -204,16 +204,16 @@ class Brain(
             (if ((image != null || capturePhoto != null) && turn.box.tools.isNotEmpty()) PHOTO_PROMPT else "") +
             (if (note.isNotBlank()) " $note" else "") +
             if (c.instructions.isNotBlank()) " " + c.instructions else ""
-        val recent = past.takeLast(MAX_EXCHANGES)
+        val recent = if (c.provider == Provider.HERMES) past else past.takeLast(MAX_EXCHANGES)
         val tokens = if (audience == Audience.PHONE) PHONE_TOKENS else GLASSES_TOKENS
         val search = c.webSearch && c.provider.search != null && store?.cannotSearch(c) != true
         val said = try {
-            ask(c, system, past, question, image, tokens, search, turn)
+            ask(c, system, recent, question, image, tokens, search, turn)
         } catch (error: IllegalStateException) {
             // A model that refuses the search still answers without it, and the settings say so. Not after a tool ran:
             // asking again would run it twice.
             if (!search || turn.toolsRan || !SEARCH_REFUSED.containsMatchIn(error.message.orEmpty())) throw error
-            ask(c, system, past, question, image, tokens, false, turn).also { store?.markCannotSearch(c) }
+            ask(c, system, recent, question, image, tokens, false, turn).also { store?.markCannotSearch(c) }
         }
         val text = (if (search) spoken(said) else said).replace(VISOR_NOTE, "").trim()
         check(text.isNotEmpty()) { "the model gave an empty answer" }
@@ -800,7 +800,8 @@ class Brain(
         http.doOutput = true
         http.setRequestProperty("content-type", "application/json")
         headers.forEach(http::setRequestProperty)
-        val streaming = protocol != ModelProtocol.JSON
+        // API-key providers keep upstream JSON requests; only Hermes opts into SSE.
+        val streaming = protocol == ModelProtocol.HERMES
         http.setRequestProperty("accept", if (streaming) "text/event-stream, application/json" else "application/json")
         val payload = JSONObject(body.toString()).apply { if (streaming) put("stream", true) else remove("stream") }
             .toString().toByteArray(Charsets.UTF_8)
@@ -819,7 +820,7 @@ class Brain(
         }
         http.getHeaderField("X-Hermes-Session-Id")?.trim()?.takeIf { it.isNotEmpty() }?.let(captureSession)
         return http.inputStream.reader(Charsets.UTF_8).use {
-            if (streaming) ModelResponse.read(it, protocol == ModelProtocol.ANTHROPIC, hermes = protocol == ModelProtocol.HERMES, checkCancelled = checkCancelled)
+            if (protocol != ModelProtocol.JSON) ModelResponse.read(it, protocol == ModelProtocol.ANTHROPIC, hermes = protocol == ModelProtocol.HERMES, checkCancelled = checkCancelled)
             else JSONObject(it.readText()).also { checkCancelled() }
         }
     }
