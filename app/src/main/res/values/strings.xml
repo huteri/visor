@@ -1221,7 +1221,5 @@
     <string name="toolkit_ready_sub">Apps can use your glasses\' screen and motion now.</string>
     <string name="ai_server_default">Server default</string>
     <string name="ai_hermes_tools">Server-owned tools</string>
-    <string name="ai_hermes_tools_sub">Hermes manages prompts, memory, web search and tools on your server. Visor phone, glasses and local MCP tools are unavailable. Retry resumes pending Runs only; completed requests are not replayed.</string>
-    <string name="ai_hermes_approvals">Automatic one-time approvals</string>
-    <string name="ai_hermes_approvals_sub">Off by default. When on, Visor approves each Hermes tool request once without review, including commands that may change files or run programs on your server. When off, review pending approvals in another Hermes client, then resume the original question.</string>
+    <string name="ai_hermes_tools_sub">Hermes manages prompts, memory, web search and tools on your server. Visor automatically approves each tool request once for its own run without review, including commands that may change files or run programs on your server. Visor phone, glasses and local MCP tools are unavailable. Retry resumes pending Runs only; completed requests are not replayed.</string>
 </resources>

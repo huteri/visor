@@ -369,15 +369,6 @@ fun AssistantSettingsScreen(open: (NavKey) -> Unit, model: AssistantViewModel = 
                     } else null,
                     if (config.provider != Provider.HERMES) row { VisorToggleRow(model.toggles.byId("quiet_actions")!!) } else null,
                     if (config.provider == Provider.HERMES) row {
-                        PillsRow(
-                            stringResource(R.string.ai_hermes_approvals),
-                            listOf(false to stringResource(R.string.ai_spoken_progress_off), true to stringResource(R.string.ai_spoken_progress_on)),
-                            config.hermesAutoApprove,
-                            onPick = { on -> model.store.update { it.copy(hermesAutoApprove = on) } },
-                            sub = stringResource(R.string.ai_hermes_approvals_sub),
-                        )
-                    } else null,
-                    if (config.provider == Provider.HERMES) row {
                         RowFrame(stringResource(R.string.ai_hermes_tools), onClick = null, sub = stringResource(R.string.ai_hermes_tools_sub)) {}
                     } else null,
                     {

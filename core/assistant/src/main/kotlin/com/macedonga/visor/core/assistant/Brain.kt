@@ -437,7 +437,7 @@ class Brain(
             if (session != null) body.put("session_id", session)
             else if (past.isNotEmpty()) body.put("conversation_history", JSONArray().putPast(past))
             // Runs execute Hermes tools, not Visor's local function-call loop.
-            return HermesRuns.answer(c.api, c.apiKey, body, conversation, scope, inputIdentity = question, allowApprovals = c.hermesAutoApprove)
+            return HermesRuns.answer(c.api, c.apiKey, body, conversation, scope, inputIdentity = question)
         }
         val conversation = coroutineContext[ConversationContext]?.takeIf {
             c.provider == Provider.HERMES && turn != null && c.apiKey.isNotBlank() &&

@@ -66,6 +66,49 @@ class HermesProviderTest {
         } finally { server.stop(0); dir.deleteRecursively() }
     }
 
+    @Test fun legacyDisabledApprovalPreferenceCannotBlockHermesRun() = runBlocking {
+        val paths = mutableListOf<String>()
+        val approvals = mutableListOf<JSONObject>()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/") { e ->
+            paths += e.requestURI.path
+            val body = e.requestBody.reader().readText()
+            val text = when (e.requestURI.path) {
+                "/capabilities" -> """{"features":{"run_status":true}}"""
+                "/runs" -> """{"run_id":"owned"}"""
+                "/runs/owned/approval" -> { approvals += JSONObject(body); "{}" }
+                "/runs/owned" -> if (approvals.isEmpty())
+                    """{"status":"waiting_for_approval","approval":{"run_id":"owned","request_id":"one","choices":["once","session","always"]}}"""
+                    else """{"status":"completed","output":"ok"}"""
+                else -> error("Unexpected HTTP path")
+            }
+            val bytes = text.toByteArray(); e.sendResponseHeaders(200, bytes.size.toLong()); e.responseBody.use { it.write(bytes) }
+        }
+        server.start()
+        val dir = Files.createTempDirectory("legacy-hermes-approval").toFile()
+        try {
+            val values = mapOf<String, Any>("provider" to Provider.HERMES.name,
+                "base_url" to "http://127.0.0.1:${server.address.port}", "api_key" to "key", "hermes_auto_approve" to false)
+            val prefs = java.lang.reflect.Proxy.newProxyInstance(android.content.SharedPreferences::class.java.classLoader,
+                arrayOf(android.content.SharedPreferences::class.java)) { _, method, args ->
+                when (method.name) {
+                    "getString", "getStringSet", "getBoolean", "getInt" -> values[args!![0]] ?: args[1]
+                    else -> error(method.name)
+                }
+            } as android.content.SharedPreferences
+            val context = org.mockito.Mockito.mock(android.content.Context::class.java)
+            org.mockito.Mockito.`when`(context.getSharedPreferences("assistant", android.content.Context.MODE_PRIVATE)).thenReturn(prefs)
+            val store = AssistantConfigStore(context)
+            withContext(ConversationContext(Diary(dir), "c")) {
+                assertEquals("ok", Brain({ store.config.value }).answer("question", Locale.ENGLISH).text)
+            }
+            assertEquals(1, paths.count { it == "/runs" })
+            assertEquals(setOf("request_id", "choice"), approvals.single().keys().asSequence().toSet())
+            assertEquals("one", approvals.single().getString("request_id"))
+            assertEquals("once", approvals.single().getString("choice"))
+        } finally { server.stop(0); dir.deleteRecursively() }
+    }
+
     @Test fun genericParserIgnoresHermesMetadata() {
         val text = "data: {\"hermes\":{\"failed\":true},\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
         assertEquals("ok", ModelResponse.read(text.reader(), false).getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content"))
@@ -96,7 +139,6 @@ class HermesProviderTest {
         assertEquals("https://old.example/v1", store.config.value.api)
         assertEquals("old-key", store.config.value.apiKey)
         assertEquals("old-model", store.config.value.model)
-        assertFalse(store.config.value.hermesAutoApprove)
         store.update { it.copy(baseUrl = "https://new.example/v1", apiKey = "new-key", model = "new-model") }
         store.switchProvider(Provider.OPENAI_COMPATIBLE)
         assertEquals("https://old.example/v1", store.config.value.api)

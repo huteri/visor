@@ -36,8 +36,6 @@ data class AssistantConfig(
     // Opt-in phone speech for progress; final uses saved voice (native handoff experimental).
     val spokenProgress: Boolean = false,
     val instructions: String = "",
-    // Explicit consent to approve each server tool request once, without reviewing it on the phone.
-    val hermesAutoApprove: Boolean = false,
     // How long a conversation is remembered after its last question.
     val memoryMinutes: Int = 10,
     // How long the glasses wait for an answer before they give up, written to them on connect.
@@ -173,7 +171,6 @@ class AssistantConfigStore(context: Context) : FieldBook {
             .putString("speech_language", next.speechLanguage)
             .putBoolean("spoken_progress", next.spokenProgress)
             .putString("instructions", next.instructions)
-            .putBoolean("hermes_auto_approve", next.hermesAutoApprove)
             .putInt("memory_minutes", next.memoryMinutes)
             .putInt("answer_wait_s", next.answerWaitSeconds)
             .putString("chatgpt", next.chatGpt)
@@ -208,7 +205,6 @@ class AssistantConfigStore(context: Context) : FieldBook {
             speechLanguage = prefs.getString("speech_language", d.speechLanguage).orEmpty(),
             spokenProgress = prefs.getBoolean("spoken_progress", d.spokenProgress),
             instructions = prefs.getString("instructions", d.instructions).orEmpty(),
-            hermesAutoApprove = prefs.getBoolean("hermes_auto_approve", false),
             memoryMinutes = prefs.getInt("memory_minutes", d.memoryMinutes),
             answerWaitSeconds = prefs.getInt("answer_wait_s", d.answerWaitSeconds),
             chatGpt = prefs.getString("chatgpt", d.chatGpt).orEmpty(),
