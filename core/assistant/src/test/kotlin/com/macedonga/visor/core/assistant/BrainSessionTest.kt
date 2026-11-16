@@ -48,7 +48,7 @@ class BrainSessionTest {
         } }
         try {
             val diary = Diary(dir)
-            val config = AssistantConfig(provider = Provider.OPENAI_COMPATIBLE, apiKey = "key", baseUrl = "visor-test://$host")
+            val config = AssistantConfig(provider = Provider.HERMES, apiKey = "key", baseUrl = "visor-test://$host")
             suspend fun answer(text: String) = withContext(ConversationContext(diary, "c")) { Brain({ config }).answer(text, Locale.ENGLISH) }
             val first = async(kotlinx.coroutines.Dispatchers.IO) { answer("A") }
             assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
@@ -89,7 +89,7 @@ class BrainSessionTest {
             val diary = Diary(dir)
             diary.record(TurnRecord("deleted", 1, "secret", conversation = "c"))
             val context = ConversationContext(diary, "c")
-            val config = AssistantConfig(provider = Provider.OPENAI_COMPATIBLE, apiKey = "key", baseUrl = "http://127.0.0.1:${server.address.port}")
+            val config = AssistantConfig(provider = Provider.HERMES, apiKey = "key", baseUrl = "http://127.0.0.1:${server.address.port}")
             val pending = async(kotlinx.coroutines.Dispatchers.IO) {
                 runCatching { withContext(context) { Brain({ config }).answer("first", Locale.ENGLISH) } }
             }
@@ -126,7 +126,7 @@ class BrainSessionTest {
         val dir = Files.createTempDirectory("concurrent-session").toFile()
         try {
             val diary = Diary(dir)
-            val config = AssistantConfig(provider = Provider.OPENAI_COMPATIBLE, apiKey = "key", baseUrl = "http://127.0.0.1:${server.address.port}")
+            val config = AssistantConfig(provider = Provider.HERMES, apiKey = "key", baseUrl = "http://127.0.0.1:${server.address.port}")
             val first = async(kotlinx.coroutines.Dispatchers.IO) { withContext(ConversationContext(diary, "c")) { Brain({ config }).answer("first", Locale.ENGLISH) } }
             assertTrue(firstEntered.await(5, java.util.concurrent.TimeUnit.SECONDS))
             val second = async(kotlinx.coroutines.Dispatchers.IO) { withContext(ConversationContext(diary, "c")) { Brain({ config }).answer("second", Locale.ENGLISH) } }
@@ -176,7 +176,7 @@ class BrainSessionTest {
             val dir = Files.createTempDirectory("retry-tool").toFile()
             try {
                 val diary = Diary(dir)
-                val config = AssistantConfig(provider = Provider.OPENAI_COMPATIBLE, apiKey = "key", baseUrl = "http://127.0.0.1:${server.address.port}")
+                val config = AssistantConfig(provider = Provider.HERMES, apiKey = "key", baseUrl = "http://127.0.0.1:${server.address.port}")
                 val brain = Brain({ config })
                 val initial = runCatching { withContext(ConversationContext(diary, "c")) { brain.answer("run tool", Locale.ENGLISH) } }
                 assertEquals(!lost, initial.isSuccess)
@@ -223,7 +223,7 @@ class BrainSessionTest {
         server.start()
         val dir = Files.createTempDirectory("brain-session").toFile()
         try {
-            val config = AssistantConfig(provider = Provider.OPENAI_COMPATIBLE, apiKey = "test-key", baseUrl = "http://127.0.0.1:${server.address.port}")
+            val config = AssistantConfig(provider = Provider.HERMES, apiKey = "test-key", baseUrl = "http://127.0.0.1:${server.address.port}")
             val old = (1..15).map { Exchange("q$it", "a$it") }
             withContext(ConversationContext(Diary(dir), "conversation")) { Brain({ config }).answer("first", Locale.ENGLISH, old) }
             withContext(ConversationContext(Diary(dir), "conversation")) { Brain({ config }).answer("second", Locale.ENGLISH, old + Exchange("first", "ok")) }
@@ -264,10 +264,11 @@ class BrainSessionTest {
             withContext(ConversationContext(diary, "photo")) { Brain({ config }).answer("after delete", Locale.ENGLISH) }
             assertNull(requests.last().first)
             server.removeContext("/capabilities")
-            withContext(ConversationContext(Diary(dir), "generic")) { Brain({ config }).answer("generic", Locale.ENGLISH, old) }
+            val generic = config.copy(provider = Provider.OPENAI_COMPATIBLE)
+            withContext(ConversationContext(Diary(dir), "generic")) { Brain({ generic }).answer("generic", Locale.ENGLISH, old) }
             assertEquals(26, requests.last().second.getJSONArray("messages").length())
             assertNull(requests.last().first)
-            withContext(ConversationContext(Diary(dir), "generic", replay = true)) { Brain({ config }).answer("generic retry", Locale.ENGLISH, old) }
+            withContext(ConversationContext(Diary(dir), "generic", replay = true)) { Brain({ generic }).answer("generic retry", Locale.ENGLISH, old) }
             assertEquals("generic retry", requests.last().second.getJSONArray("messages").getJSONObject(25).getString("content"))
             assertNull(requests.last().first)
             Brain({ config }).phrase("auxiliary", Locale.ENGLISH)

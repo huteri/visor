@@ -55,7 +55,10 @@ enum class Provider(
         billing = "https://openrouter.ai/settings/credits",
     ),
     GROQ("Groq", "https://api.groq.com/openai/v1", "https://console.groq.com/keys", WebSearch.GROQ, billing = "https://console.groq.com/settings/billing"),
+    HERMES("Hermes", "", "", null),
     OPENAI_COMPATIBLE("", "", "", null);
+
+    val customEndpoint: Boolean get() = this == OPENAI_COMPATIBLE || this == HERMES
 
     /** Answers come over Chat Completions (when they do not search). */
     val chat: Boolean get() = this != CLAUDE && this != CHATGPT
@@ -63,6 +66,6 @@ enum class Provider(
     companion object {
         /** The service that serves [url], for an address typed in before there were presets. */
         fun at(url: String): Provider? =
-            entries.firstOrNull { it.chat && it != OPENAI_COMPATIBLE && url.trim().trimEnd('/').equals(it.api, ignoreCase = true) }
+            entries.firstOrNull { it.chat && !it.customEndpoint && url.trim().trimEnd('/').equals(it.api, ignoreCase = true) }
     }
 }

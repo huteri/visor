@@ -260,7 +260,7 @@ class BrainRunsTest {
         val dir = Files.createTempDirectory("image-resume").toFile()
         try {
             val diary = Diary(dir)
-            val c = AssistantConfig(provider = Provider.OPENAI_COMPATIBLE, apiKey = "key", baseUrl = "http://127.0.0.1:${server.address.port}")
+            val c = AssistantConfig(provider = Provider.HERMES, apiKey = "key", baseUrl = "http://127.0.0.1:${server.address.port}")
             withContext(ConversationContext(diary, "c")) {
                 assertTrue(runCatching { HermesRuns.answer(c.api, c.apiKey, JSONObject().put("input", "data:image/jpeg;base64,AQ=="), coroutineContext[ConversationContext], "runs:" + java.security.MessageDigest.getInstance("SHA-256").digest("${c.api.trimEnd('/')}\u0000${c.apiKey}\u0000c".toByteArray()).joinToString("") { "%02x".format(it) }, inputIdentity = "question") }.exceptionOrNull()!!.message!!.contains("awaits approval"))
             }
@@ -291,7 +291,7 @@ class BrainRunsTest {
         val dir = Files.createTempDirectory("run-capability").toFile()
         try {
             val diary = Diary(dir)
-            val c = AssistantConfig(provider = Provider.OPENAI_COMPATIBLE, apiKey = "key", baseUrl = "http://127.0.0.1:${server.address.port}")
+            val c = AssistantConfig(provider = Provider.HERMES, apiKey = "key", baseUrl = "http://127.0.0.1:${server.address.port}")
             repeat(2) {
                 val result = runCatching { withContext(ConversationContext(diary, "c")) { Brain({ if (changeModel && it == 1) c.copy(model = "changed") else c }).answer("question", Locale.ENGLISH) } }
                 assertTrue(result.isFailure)
@@ -401,7 +401,7 @@ class BrainRunsTest {
         val dir = Files.createTempDirectory("brain-runs").toFile()
         try {
             val diary = Diary(dir)
-            val c = AssistantConfig(provider = Provider.OPENAI_COMPATIBLE, apiKey = "key", baseUrl = "http://127.0.0.1:${server.address.port}")
+            val c = AssistantConfig(provider = Provider.HERMES, apiKey = "key", baseUrl = "http://127.0.0.1:${server.address.port}")
             suspend fun ask(q: String) = withContext(ConversationContext(diary, "conversation")) { Brain({ c }).answer(q, Locale.ENGLISH) }
             assertEquals("answer", ask("first").text)
             assertEquals("answer", ask("next").text)

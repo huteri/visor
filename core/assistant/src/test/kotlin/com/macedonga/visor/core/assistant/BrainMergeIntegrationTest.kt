@@ -131,8 +131,14 @@ class BrainMergeIntegrationTest {
             }).byteInputStream()
         } }
         try {
-            val config = AssistantConfig(provider = Provider.OPENAI_COMPATIBLE, apiKey = "key", baseUrl = "visor-test://$host")
+            val config = AssistantConfig(provider = if (session) Provider.HERMES else Provider.OPENAI_COMPATIBLE, apiKey = "key", baseUrl = "visor-test://$host")
             val result = runCatching { withContext(ConversationContext(Diary(dir), "c")) { Brain({ config }).answer("Question", Locale.ENGLISH) } }
+            if (session) {
+                assertEquals(1, requests.size)
+                assertFalse(requests.first().has("reasoning_effort"))
+                assertTrue(result.isFailure)
+                return@runBlocking
+            }
             assertTrue(requests.first().has("reasoning_effort"))
             assertFalse(requests[1].has("reasoning_effort"))
             assertTrue(requests.all { it.getBoolean("stream") })

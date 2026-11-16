@@ -7,7 +7,7 @@ import org.junit.Test
 
 class ModelResponseTest {
     private fun parse(text: String, claude: Boolean = false): JSONObject =
-        ModelResponse.read(FragmentedReader(text), claude)
+        ModelResponse.read(FragmentedReader(text), claude, hermes = true)
 
     private class FragmentedReader(private val text: String) : Reader() {
         private var offset = 0

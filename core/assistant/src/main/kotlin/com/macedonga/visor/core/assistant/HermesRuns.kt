@@ -15,7 +15,7 @@ import org.json.JSONObject
 /** Polling observers never own the server task. No cancellation path sends /stop. */
 internal object HermesRuns {
     private val log = java.util.logging.Logger.getLogger("HermesRuns")
-    suspend fun answer(base: String, key: String, body: JSONObject, conversation: ConversationContext?, scope: String, inputIdentity: String = body.get("input").toString()): String {
+    suspend fun answer(base: String, key: String, body: JSONObject, conversation: ConversationContext?, scope: String, inputIdentity: String = body.get("input").toString(), allowApprovals: Boolean = false): String {
         val diary = conversation?.diary
         val slot = "$scope.run"
         conversation?.validate()
@@ -112,6 +112,7 @@ internal object HermesRuns {
                     error("Hermes run $state: ${status.optString("error", "request not replayed")}")
                 }
                 "waiting_for_approval" -> {
+                    check(allowApprovals) { "Hermes run awaits approval. Review it in an approval-capable Hermes client, or explicitly enable automatic one-time approvals in Meta AI settings. Resume the original question; request not replayed." }
                     val approval = status.optJSONObject("approval")
                     val requestId = approval?.opt("request_id") as? String
                     check(approval != null && approval.optString("run_id") == record.getString("run_id") &&

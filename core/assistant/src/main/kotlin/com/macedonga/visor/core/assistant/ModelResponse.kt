@@ -8,7 +8,7 @@ import org.json.JSONObject
 internal object ModelResponse {
     class ThinkingBudgetExhausted : IllegalStateException("the model stream failed: finish_reason=length (thinking only)")
 
-    fun read(reader: Reader, claude: Boolean, checkCancelled: () -> Unit = {}): JSONObject {
+    fun read(reader: Reader, claude: Boolean, hermes: Boolean = false, checkCancelled: () -> Unit = {}): JSONObject {
         val input = java.io.PushbackReader(reader.buffered(), 1)
         var first: Int
         do {
@@ -29,17 +29,17 @@ internal object ModelResponse {
             if (result.has("error")) error(streamError(text.toString()))
             return result
         }
-        return if (claude) readClaude(input, checkCancelled) else readOpenAi(input, checkCancelled)
+        return if (claude) readClaude(input, checkCancelled) else readOpenAi(input, checkCancelled, hermes)
     }
 
-    private fun readOpenAi(reader: Reader, checkCancelled: () -> Unit): JSONObject {
+    private fun readOpenAi(reader: Reader, checkCancelled: () -> Unit, hermes: Boolean): JSONObject {
         val message = JSONObject().put("role", "assistant").put("content", "")
         var finish = ""
         val calls = sortedMapOf<Int, JSONObject>()
         var done = false
         events(reader, checkCancelled) { type, data ->
             if (type == "error") error(streamError(data))
-            if (type == "approval.request") {
+            if (hermes && type == "approval.request") {
                 error("Hermes requires approval; approval is unsupported on glasses. Open an approval-capable Hermes client on your phone to review the request.")
             }
             // Named extensions are notifications, not Chat Completions chunks.
@@ -50,7 +50,7 @@ internal object ModelResponse {
             }
             val item = JSONObject(data)
             if (item.has("error")) error(streamError(data))
-            item.optJSONObject("hermes")?.let { status ->
+            item.optJSONObject("hermes")?.takeIf { hermes }?.let { status ->
                 check(status.optBoolean("completed", true) && !status.optBoolean("partial") && !status.optBoolean("failed")) {
                     "the model stream failed: " + status.optString("error", "incomplete Hermes response")
                 }

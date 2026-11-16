@@ -11,6 +11,19 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class HermesRunsApprovalTest {
+    @Test fun approvalRequiresExplicitConsentAndRetainsRun() = fixture { f ->
+        f.states += waiting("one")
+        f.allowApprovals = false
+        assertTrue(runCatching { f.ask() }.exceptionOrNull()!!.message!!.contains("approval"))
+        assertEquals(0, f.approvals.size)
+        assertNotNull(f.diary.session("scope.run"))
+        f.allowApprovals = true
+        f.states += completed
+        assertEquals("answer", f.ask(replay = true))
+        assertEquals(1, f.admissions)
+        assertEquals(1, f.approvals.size)
+    }
+
     @Test fun approvesEachExactRequestOnceAndKeepsPolling() = fixture { f ->
         f.states += listOf(waiting("one"), waiting("one"), waiting("two"), completed)
         assertEquals("answer", f.ask())
@@ -128,6 +141,7 @@ class HermesRunsApprovalTest {
         val approvals = java.util.concurrent.CopyOnWriteArrayList<JSONObject>()
         var admissions = 0
         var approvalCode = 200
+        var allowApprovals = true
         val dir = Files.createTempDirectory("runs-approval").toFile()
         var diary = Diary(dir)
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
@@ -148,7 +162,7 @@ class HermesRunsApprovalTest {
             start()
         }
         suspend fun ask(q: String = "question", replay: Boolean = false) = withContext(ConversationContext(diary, "c", replay = replay)) {
-            HermesRuns.answer("http://127.0.0.1:${server.address.port}", "secret", JSONObject().put("input", q), coroutineContext[ConversationContext], "scope")
+            HermesRuns.answer("http://127.0.0.1:${server.address.port}", "secret", JSONObject().put("input", q), coroutineContext[ConversationContext], "scope", allowApprovals = allowApprovals)
         }
     }
 }

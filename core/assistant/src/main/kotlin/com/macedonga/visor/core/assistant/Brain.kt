@@ -165,7 +165,7 @@ class Brain(
 
     private suspend fun answerTurn(question: String, locale: Locale, past: List<Exchange>, image: ByteArray?, note: String, audience: Audience, glasses: GlassesToolbox?, canEnd: Boolean, capturePhoto: (suspend () -> ByteArray?)?, cameraAction: (suspend (CameraAction) -> Boolean)?): Reply {
         // With the camera off only a stop goes without the model; the model answers the rest, its camera tools withheld.
-        val keyword = if (cameraAction != null && audience == Audience.GLASSES) {
+        val keyword = if (config().provider != Provider.HERMES && cameraAction != null && audience == Audience.GLASSES) {
             cameraKeyword(question, locale)?.takeIf { it in cameraTools(config()) }
         } else null
         if (keyword != null) {
@@ -183,19 +183,21 @@ class Brain(
         val c = ready()
         // The tools never stand in the way of an answer: without them the model still answers.
         val box = try {
+            if (c.provider == Provider.HERMES) Toolbox(emptyList(), "") else
             hub?.toolbox() ?: Toolbox(emptyList(), "")
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
             Toolbox(emptyList(), "")
         }
-        val turn = Turn(box, image, glasses?.described(), canEnd, capturePhoto, cameraAction, appTools.tools())
+        val turn = if (c.provider == Provider.HERMES) Turn(box, image)
+            else Turn(box, image, glasses?.described(), canEnd, capturePhoto, cameraAction, appTools.tools())
         val presentation = (if (audience == Audience.PHONE) PHONE_PROMPT else SYSTEM_PROMPT) +
             " It is ${ZonedDateTime.now().format(DateTimeFormatter.ofPattern("EEEE d MMMM yyyy, HH:mm", Locale.ENGLISH))}." +
             (if (audience == Audience.GLASSES) " The glasses are set to ${locale.getDisplayLanguage(Locale.ENGLISH)}." else "")
         turn.runsInstructions = presentation + " Tools are managed by Hermes on the server. Visor phone, glasses and local MCP callbacks are unavailable." +
             (if (note.isNotBlank()) " $note" else "") + (if (c.instructions.isNotBlank()) " ${c.instructions}" else "")
-        val system = presentation + memoryPrompt() +
+        val system = if (c.provider == Provider.HERMES) turn.runsInstructions else presentation + memoryPrompt() +
             phoneTools?.prompt.orEmpty() + handsetTools?.prompt.orEmpty() +
             (if (canEnd) END_PROMPT else "") +
             turn.box.prompt +
@@ -418,7 +420,7 @@ class Brain(
         val runScope = "runs:" + java.security.MessageDigest.getInstance("SHA-256").digest(
             "${c.api.trimEnd('/')}\u0000${c.apiKey}\u0000${runConversation?.conversation ?: java.util.UUID.randomUUID()}".toByteArray(),
         ).joinToString("") { "%02x".format(it) }
-        if (c.apiKey.isNotBlank() && (runConversation?.diary?.session("$runScope.runs") == "true" || supportsRuns(c))) {
+        if (c.provider == Provider.HERMES && c.apiKey.isNotBlank() && (runConversation?.diary?.session("$runScope.runs") == "true" || supportsRuns(c))) {
             val conversation = runConversation
             val scope = runScope
             if (conversation != null) synchronized(conversation.diary) {
@@ -430,24 +432,25 @@ class Brain(
             val input: Any = if (image == null) question else JSONArray()
                 .put(JSONObject().put("role", "user").put("content", JSONArray()
                     .put(JSONObject().put("type", "text").put("text", question)).put(openAiImage(image))))
-            val body = JSONObject().put("model", model).put("instructions", turn?.runsInstructions?.takeIf { it.isNotBlank() } ?: system).put("input", input)
+            val body = JSONObject().put("instructions", turn?.runsInstructions?.takeIf { it.isNotBlank() } ?: system).put("input", input)
+                .apply { if (model.isNotBlank()) put("model", model) }
             if (session != null) body.put("session_id", session)
             else if (past.isNotEmpty()) body.put("conversation_history", JSONArray().putPast(past))
             // Runs execute Hermes tools, not Visor's local function-call loop.
-            return HermesRuns.answer(c.api, c.apiKey, body, conversation, scope, inputIdentity = question)
+            return HermesRuns.answer(c.api, c.apiKey, body, conversation, scope, inputIdentity = question, allowApprovals = c.hermesAutoApprove)
         }
         val conversation = coroutineContext[ConversationContext]?.takeIf {
-            turn != null && c.apiKey.isNotBlank() &&
+            c.provider == Provider.HERMES && turn != null && c.apiKey.isNotBlank() &&
                 (it.diary.session(sessionScope(c, it.conversation)) != null || supportsSessions(c))
         }
         conversation?.validate()
         val scope = conversation?.let { sessionScope(c, it.conversation) }
-        check(conversation?.replay != true) {
+        check(c.provider != Provider.HERMES || runConversation?.replay != true) {
             "Retry/Again is unavailable for Hermes server conversations: the previous request may already have run tools. Send a new question explicitly; request not replayed."
         }
         val session = if (scope != null) conversation.diary.session(scope) else null
         if (session != null) verifySession(c, session)
-        val sessionSystem = system + (conversation?.let {
+        val sessionSystem = (if (c.provider == Provider.HERMES) turn?.runsInstructions?.takeIf { it.isNotBlank() } ?: system else system) + (conversation?.let {
             // Never reuse a fingerprint after deletion/reset, even within the same minute.
             " [Visor conversation: ${it.conversation}; bootstrap: ${if (session == null) java.util.UUID.randomUUID() else "continued"}]"
         } ?: "")
@@ -466,24 +469,26 @@ class Brain(
         var tools: JSONArray? = JSONArray().apply {
             searchTool?.let(::put)
             // Some servers behind this API refuse a schema that names its own dialect.
-            turn?.let { specs(c, it) }.orEmpty().forEach { (name, help, input) ->
+            turn?.takeUnless { c.provider == Provider.HERMES }?.let { specs(c, it) }.orEmpty().forEach { (name, help, input) ->
                 put(function(name, help, JSONObject(input.toString()).apply { remove("\$schema") }))
             }
         }.takeIf { it.length() > 0 }
         var said = ""
         repeat(MAX_TOOL_ROUNDS) {
             conversation?.validate()
-            val body = JSONObject().put("model", model).put("messages", messages).put("max_tokens", tokens)
+            val body = JSONObject().put("messages", messages).put("max_tokens", tokens)
+                .apply { if (model.isNotBlank() || c.provider != Provider.HERMES) put("model", model) }
             tools?.let { body.put("tools", it) }
             val answer = try {
-                withContext(SessionCapture(conversation, scope)) { send(url, headers, body) }
+                if (c.provider == Provider.HERMES) withContext(SessionCapture(conversation, scope)) { post(url, headers, body, ModelProtocol.HERMES) }
+                else send(url, headers, body)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: IllegalStateException) {
                 // A server without tools refuses the field; then the conversation goes on without memory. The person's
                 // own tools are never dropped unseen: their refusal is the answer's error.
                 conversation?.validate()
-                if (searchTool != null || session != null || (scope != null && conversation.diary.session(scope) != null) || tools == null || turn?.box?.tools.orEmpty().isNotEmpty() || !TOOLS_REFUSED.containsMatchIn(error.message.orEmpty())) throw error
+                if (c.provider == Provider.HERMES || searchTool != null || session != null || (scope != null && conversation.diary.session(scope) != null) || tools == null || turn?.box?.tools.orEmpty().isNotEmpty() || !TOOLS_REFUSED.containsMatchIn(error.message.orEmpty())) throw error
                 tools = null
                 if (turn?.capturePhoto != null) messages.put(JSONObject().put("role", "system").put("content", NO_PHOTO))
                 if (turn?.cameraAction != null) messages.put(JSONObject().put("role", "system").put("content",
@@ -749,7 +754,7 @@ class Brain(
         if (f.completionTokens) put("max_completion_tokens", remove("max_tokens"))
     }
 
-    private enum class ModelProtocol { JSON, CHAT_COMPLETIONS, ANTHROPIC }
+    private enum class ModelProtocol { JSON, CHAT_COMPLETIONS, HERMES, ANTHROPIC }
 
     // Responses and Gemini generateContent use JSON; their SSE formats are not Chat Completions.
     private suspend fun post(url: String, headers: Map<String, String>, body: JSONObject): JSONObject =
@@ -814,7 +819,7 @@ class Brain(
         }
         http.getHeaderField("X-Hermes-Session-Id")?.trim()?.takeIf { it.isNotEmpty() }?.let(captureSession)
         return http.inputStream.reader(Charsets.UTF_8).use {
-            if (streaming) ModelResponse.read(it, protocol == ModelProtocol.ANTHROPIC, checkCancelled)
+            if (streaming) ModelResponse.read(it, protocol == ModelProtocol.ANTHROPIC, hermes = protocol == ModelProtocol.HERMES, checkCancelled = checkCancelled)
             else JSONObject(it.readText()).also { checkCancelled() }
         }
     }
