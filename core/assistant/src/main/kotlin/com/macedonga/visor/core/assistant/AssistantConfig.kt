@@ -45,13 +45,13 @@ data class AssistantConfig(
 ) {
     /** A model can answer: a service needs its key or sign-in, an OpenAI-compatible server may need neither. */
     val hasModel: Boolean get() = when (provider) {
-        Provider.OPENAI_COMPATIBLE -> true
+        Provider.OPENAI_COMPATIBLE, Provider.HERMES -> true
         Provider.CHATGPT -> chatGpt.isNotEmpty()
         else -> apiKey.isNotBlank()
     }
 
     /** The API address: the service's own, or the one typed in for an OpenAI-compatible server. */
-    val api: String get() = if (provider == Provider.OPENAI_COMPATIBLE) baseUrl else provider.api
+    val api: String get() = if (provider.customEndpoint) baseUrl else provider.api
 
     /** The model asked: the one chosen, or the provider's own default. */
     val answerModel: String get() = model.ifBlank { provider.defaultModel }
@@ -124,12 +124,18 @@ class AssistantConfigStore(context: Context) : FieldBook {
         val c = _config.value
         if (c.provider == to) return
         val slots = runCatching { JSONObject(prefs.getString(SLOTS, null) ?: "{}") }.getOrDefault(JSONObject())
-        slots.put(c.provider.name, JSONObject().put("key", c.apiKey).put("model", c.model).put("lines", c.linesModel))
+        // Legacy generic slots shared base_url; preserve it before another custom provider can change it.
+        slots.optJSONObject(Provider.OPENAI_COMPATIBLE.name)?.let {
+            if (!it.has("url")) it.put("url", c.baseUrl)
+        }
+        slots.put(c.provider.name, JSONObject().put("key", c.apiKey).put("model", c.model).put("lines", c.linesModel).put("url", c.baseUrl))
         prefs.edit().putString(SLOTS, slots.toString()).apply()
         val slot = slots.optJSONObject(to.name)
+            ?: if (to == Provider.HERMES && c.provider == Provider.OPENAI_COMPATIBLE) slots.optJSONObject(c.provider.name) else null
         update {
             it.copy(
                 provider = to,
+                baseUrl = slot?.optString("url")?.takeIf { it.isNotBlank() } ?: if (to.customEndpoint) c.baseUrl else it.baseUrl,
                 apiKey = slot?.optString("key").orEmpty(),
                 model = slot?.optString("model").orEmpty(),
                 linesModel = slot?.optString("lines").orEmpty(),

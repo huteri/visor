@@ -2033,7 +2033,8 @@ class Assistant(
     }
 
     /** The conversation a question asked now from the app would continue, or null when it would start a new one. */
-    fun openConversation(): String? = diary.openConversation(System.currentTimeMillis(), windowMs())
+    fun openConversation(): String? = hermesConversationScope()?.let { diary.session(it) }
+        ?: if (store.config.value.provider == Provider.HERMES) null else diary.openConversation(System.currentTimeMillis(), windowMs())
 
     private suspend fun answerHere(id: String, replay: Boolean = false) {
         val turn = diary.turn(id) ?: return
@@ -2131,10 +2132,27 @@ class Assistant(
         }
     }
 
+    // Durable logical identity is separate from server session/run mappings and their retention.
+    private fun hermesConversationScope(): String? {
+        val c = store.config.value
+        if (c.provider != Provider.HERMES) return null
+        val identity = java.security.MessageDigest.getInstance("SHA-256")
+            .digest("${c.api.trimEnd('/')}\u0000${c.apiKey}".toByteArray()).joinToString("") { "%02x".format(it) }
+        return "hermes-conversation:$identity"
+    }
+
     /** Into the diary, in the open conversation unless it names its own. */
     private fun record(turn: TurnRecord) {
+        val scope = hermesConversationScope()?.takeIf { turn.source != TurnSource.LIVE_AI }
+        if (scope != null) {
+            val reset = turn.question.trim().matches(Regex("new conversation[.!?]*", RegexOption.IGNORE_CASE))
+            val conversation = turn.conversation.ifEmpty {
+                if (reset) UUID.randomUUID().toString() else diary.session(scope) ?: UUID.randomUUID().toString()
+            }
+            diary.keepSession(scope, conversation)
+            return diary.record(turn.copy(conversation = conversation))
+        }
         if (turn.conversation.isNotEmpty()) return diary.record(turn)
-        // Both fresh wakes and follow-ups honor the configured conversation window.
         diary.record(turn.copy(conversation = diary.conversationAt(turn.at, windowMs())))
     }
 

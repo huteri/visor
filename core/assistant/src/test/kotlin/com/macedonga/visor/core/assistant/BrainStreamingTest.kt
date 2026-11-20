@@ -73,7 +73,7 @@ class BrainStreamingTest {
             assertFalse(requests[1].has("reasoning_effort"))
             assertTrue(requests[2].has("max_completion_tokens"))
             assertFalse(requests[2].has("max_tokens"))
-            assertTrue(requests.all { it.getBoolean("stream") })
+            assertFalse(requests.any { it.optBoolean("stream") })
         }
     }
 
@@ -128,7 +128,7 @@ class BrainStreamingTest {
             assertEquals(listOf("Tea"), reply.remembered)
             assertTrue(book.memories.value.any { it.text == "Tea" })
             assertEquals(2, requests.size)
-            assertTrue(requests.all { it.getBoolean("stream") })
+            assertFalse(requests.any { it.optBoolean("stream") })
             val messages = requests[1].getJSONArray("messages")
             val assistant = messages.getJSONObject(messages.length() - 2)
             assertEquals("assistant", assistant.getString("role"))
@@ -149,7 +149,7 @@ class BrainStreamingTest {
             assertFalse(requests[1].has("reasoning_effort"))
             assertEquals(3, requests.size)
             assertFalse(requests[2].has("tools"))
-            assertTrue(requests.all { it.getBoolean("stream") })
+            assertFalse(requests.any { it.optBoolean("stream") })
         }
     }
 
@@ -181,7 +181,7 @@ class BrainStreamingTest {
         }
     }
 
-    @Test fun requestsAndConsumesOpenAiStreaming() = runBlocking {
+    @Test fun acceptsUnsolicitedOpenAiStreamingWithoutRequestingIt() = runBlocking {
         val requests = LinkedBlockingQueue<JSONObject>()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         server.createContext("/chat/completions") { exchange ->
@@ -199,7 +199,7 @@ class BrainStreamingTest {
         try {
             val brain = Brain({ AssistantConfig(provider = Provider.OPENAI_COMPATIBLE, model = "test-model", baseUrl = "http://127.0.0.1:${server.address.port}") })
             assertEquals("Hello", brain.answer("Hi", Locale.ENGLISH).text)
-            assertTrue(requests.take().getBoolean("stream"))
+            assertFalse(requests.take().optBoolean("stream"))
         } finally {
             server.stop(0)
         }
