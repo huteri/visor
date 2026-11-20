@@ -17,34 +17,22 @@ internal object HermesRuns {
     private val log = java.util.logging.Logger.getLogger("HermesRuns")
     suspend fun answer(base: String, key: String, body: JSONObject, conversation: ConversationContext?, scope: String, inputIdentity: String = body.get("input").toString()): String {
         val diary = conversation?.diary
-        val slot = "$scope.run"
         conversation?.validate()
-        val fingerprint = java.security.MessageDigest.getInstance("SHA-256").digest(inputIdentity.toByteArray())
-            .joinToString("") { "%02x".format(it) }
-        var previous = diary?.session(slot)?.let(::JSONObject)
-        if (previous != null && previous.getString("input") != fingerprint && previous.has("run_id") && conversation?.replay != true) {
-            val id = previous.getString("run_id")
-            check(id.matches(Regex("[A-Za-z0-9_-]{1,512}"))) { "Invalid Hermes run ID" }
-            val status = request("${base.trimEnd('/')}/runs/$id", key)
-            if (status.optString("status") in setOf("completed", "failed", "cancelled", "interrupted")) {
-                synchronized(diary!!) {
-                    conversation.validate()
-                    status.optString("session_id").takeIf { it.isNotBlank() }?.let {
-                        diary.keepSession(scope, it)
-                        body.put("session_id", it)
-                        body.remove("conversation_history")
-                    }
-                    diary.keepSession(slot, "")
-                }
-                previous = null
-            }
-        }
+        val fingerprint = fingerprint(inputIdentity)
+        // Read old single-slot admissions in place; new questions own independent durable slots.
+        val legacy = diary?.session("$scope.run")?.let(::JSONObject)
+        val slot = if (legacy?.getString("input") == fingerprint) "$scope.run" else slot(scope, inputIdentity)
+        val previous = diary?.session(slot)?.let(::JSONObject)
         val recovery = "Tools may already have run. In Live AI say 'new conversation', or tap 'New conversation' in the app; request not replayed."
-        check(previous == null || previous.getString("input") == fingerprint) {
-            "Hermes has an unresolved run. Resume the original question. $recovery"
+        // Runs supports a caller-selected body.session_id, including the first turn with imported
+        // history. Reserve it in the admission BEFORE POST, rather than depending on a reply to
+        // learn identity. Never assign a fresh session to an older uncertain admission.
+        if (previous == null && conversation != null && !body.has("session_id")) {
+            body.put("session_id", "visor_${UUID.randomUUID()}")
         }
         val record = previous ?: JSONObject().put("key", UUID.randomUUID().toString()).put("input", fingerprint)
             .put("created", System.currentTimeMillis()).put("attempts", 0).apply {
+                body.optString("session_id").takeIf { it.isNotBlank() }?.let { put("session_id", it) }
                 // Never persist photos, including photos in imported history. Those admissions cannot be replayed.
                 if (!body.toString().contains("data:image", ignoreCase = true)) put("body", body.toString())
             }
@@ -149,9 +137,40 @@ internal object HermesRuns {
         }
     }
 
-    private class HttpFailure(val code: Int, val reason: String) : IllegalStateException("Hermes HTTP $code; request not replayed.")
+    /** Recover identity only; the server owns admission and run/conversation policy. */
+    internal suspend fun recoverSession(base: String, key: String, conversation: ConversationContext, scope: String): String? {
+        conversation.validate()
+        val records = conversation.diary.pendingRuns(scope).map(::JSONObject)
+        if (records.isEmpty()) return null
+        val record = records.maxByOrNull { it.optLong("created", 0) }!!
+        // A predeclared identity survives even a lost admission response. Brain still verifies
+        // that its server transcript exists before submitting any distinct question.
+        record.optString("session_id").takeIf { it.isNotBlank() }?.let { return it }
+        check(record.has("run_id")) { "Hermes session identity unknown; resume original question. Request not replayed." }
+        val id = record.getString("run_id")
+        check(id.matches(Regex("[A-Za-z0-9_-]{1,512}"))) { "Invalid Hermes run ID" }
+        val status = request("${base.trimEnd('/')}/runs/$id", key)
+        val session = status.optString("session_id")
+        check(session.isNotBlank()) { "Hermes session identity unavailable; resume original question. Request not replayed." }
+        synchronized(conversation.diary) {
+            conversation.validate(); conversation.diary.keepSession(scope, session)
+        }
+        return session
+    }
 
-    private class AdmissionRejected(code: Int) : IllegalStateException("Hermes HTTP $code; admission rejected, request not replayed.")
+    internal fun slot(scope: String, input: String) = "$scope.${fingerprint(input)}.run"
+
+    internal fun pending(diary: Diary, scope: String, input: String): Boolean =
+        diary.session(slot(scope, input)) != null || diary.session("$scope.run")?.let {
+            JSONObject(it).getString("input") == fingerprint(input)
+        } == true
+
+    private fun fingerprint(input: String) = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(input.toByteArray()).joinToString("") { "%02x".format(it) }
+
+    private class HttpFailure(val code: Int, val reason: String) : IllegalStateException("Hermes HTTP $code${reason.takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty()}; request not replayed.")
+
+    private class AdmissionRejected(code: Int, reason: String) : IllegalStateException("Hermes HTTP $code${reason.takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty()}; admission rejected, request not replayed.")
 
     private suspend fun request(url: String, key: String, body: String? = null, idempotency: String? = null): JSONObject =
         suspendCancellableCoroutine { pending ->
@@ -175,9 +194,9 @@ internal object HermesRuns {
                         http.outputStream.use { validate(); it.write(bytes) }
                     }
                     val code = http.responseCode
-                    if (idempotency != null && code in 400..499 && code != 408) throw AdmissionRejected(code)
                     if (code !in 200..299) {
                         val reason = runCatching { http.errorStream?.bufferedReader()?.use { JSONObject(it.readText()).optJSONObject("error")?.optString("code") } }.getOrNull().orEmpty()
+                        if (idempotency != null && code in 400..499 && code != 408) throw AdmissionRejected(code, reason)
                         throw HttpFailure(code, reason)
                     }
                     val answer = http.inputStream.bufferedReader().use { JSONObject(it.readText()) }

@@ -428,7 +428,9 @@ class Brain(
             }
             val session = conversation?.diary?.session(scope)
                 ?: conversation?.diary?.session(sessionScope(c, conversation.conversation))
-            if (session != null && conversation?.diary?.session("$scope.run") == null) verifySession(c, session)
+                ?: conversation?.takeUnless { HermesRuns.pending(it.diary, scope, question) }
+                    ?.let { HermesRuns.recoverSession(c.api, c.apiKey, it, scope) }
+            if (session != null && conversation?.let { HermesRuns.pending(it.diary, scope, question) } != true) verifySession(c, session)
             val input: Any = if (image == null) question else JSONArray()
                 .put(JSONObject().put("role", "user").put("content", JSONArray()
                     .put(JSONObject().put("type", "text").put("text", question)).put(openAiImage(image))))
