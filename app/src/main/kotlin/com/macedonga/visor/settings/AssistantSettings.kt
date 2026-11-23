@@ -211,7 +211,7 @@ fun AssistantSettingsScreen(open: (NavKey) -> Unit, model: AssistantViewModel = 
                 SectionLabel(stringResource(R.string.ai_section_model))
                 Rows(
                     { ValueRow(stringResource(R.string.ai_provider), providerName(config.provider), onClick = { sheet = "provider" }) },
-                    if (config.provider == Provider.OPENAI_COMPATIBLE) row {
+                    if (config.provider.customEndpoint) row {
                         ValueRow(stringResource(R.string.ai_base_url), config.baseUrl, onClick = { sheet = "url" })
                     } else null,
                     if (plan) row {
@@ -233,7 +233,7 @@ fun AssistantSettingsScreen(open: (NavKey) -> Unit, model: AssistantViewModel = 
                     {
                         ValueRow(
                             stringResource(R.string.ai_model),
-                            modelWords(config.answerModel).ifEmpty { stringResource(R.string.settings_not_set) },
+                            modelWords(config.answerModel).ifEmpty { stringResource(if (config.provider == Provider.HERMES) R.string.ai_server_default else R.string.settings_not_set) },
                             onClick = { sheet = "model" },
                         )
                     },
@@ -362,12 +362,15 @@ fun AssistantSettingsScreen(open: (NavKey) -> Unit, model: AssistantViewModel = 
                         )
                     } else null,
                     { VisorToggleRow(model.toggles.byId("vision")!!) },
-                    if (partner || config.voicePhotos) row { VisorToggleRow(model.toggles.byId("voice_photos")!!) } else null,
+                    if (config.provider != Provider.HERMES && (partner || config.voicePhotos)) row { VisorToggleRow(model.toggles.byId("voice_photos")!!) } else null,
                     if (config.provider.search != null) row {
                         val refused = config.webSearch && "${config.provider.name} ${config.answerModel}" in noSearch
                         VisorToggleRow(model.toggles.byId("web")!!, problem = if (refused) stringResource(R.string.ai_web_unavailable) else null)
                     } else null,
-                    { VisorToggleRow(model.toggles.byId("quiet_actions")!!) },
+                    if (config.provider != Provider.HERMES) row { VisorToggleRow(model.toggles.byId("quiet_actions")!!) } else null,
+                    if (config.provider == Provider.HERMES) row {
+                        RowFrame(stringResource(R.string.ai_hermes_tools), onClick = null, sub = stringResource(R.string.ai_hermes_tools_sub)) {}
+                    } else null,
                     {
                         PillsRow(
                             stringResource(R.string.ai_memory_window),
@@ -397,8 +400,8 @@ fun AssistantSettingsScreen(open: (NavKey) -> Unit, model: AssistantViewModel = 
         item(key = "places") {
             Column(Modifier.padding(top = 28.dp)) {
                 Rows(
-                    { NavRow(VisorIcons.Plug, stringResource(R.string.mcp_title), integrationsSummary(model.hub), onClick = { open(IntegrationsKey) }, onCard = true) },
-                    { NavRow(VisorIcons.Memory, stringResource(R.string.meta_ai_memories), null, onClick = { open(MemoriesKey) }, onCard = true) },
+                    if (config.provider != Provider.HERMES) row { NavRow(VisorIcons.Plug, stringResource(R.string.mcp_title), integrationsSummary(model.hub), onClick = { open(IntegrationsKey) }, onCard = true) } else null,
+                    if (config.provider != Provider.HERMES) row { NavRow(VisorIcons.Memory, stringResource(R.string.meta_ai_memories), null, onClick = { open(MemoriesKey) }, onCard = true) } else null,
                     { WakeWordRow(onClick = { open(WakeWordKey) }) },
                 )
             }
@@ -507,6 +510,7 @@ fun AssistantSettingsScreen(open: (NavKey) -> Unit, model: AssistantViewModel = 
                 check = check,
                 current = if (lines) config.linesModel else config.model,
                 emptyLabel = if (lines) stringResource(R.string.ai_same_model)
+                    else if (config.provider == Provider.HERMES) stringResource(R.string.ai_server_default)
                     else config.provider.defaultModel.takeIf { it.isNotEmpty() }?.let { stringResource(R.string.ai_default_model, modelWords(it)) },
                 onPick = { id -> model.store.update { if (lines) it.copy(linesModel = id) else it.copy(model = id) } },
                 onDismiss = { sheet = null },
@@ -554,6 +558,7 @@ private fun providerName(p: Provider): String = if (p == Provider.OPENAI_COMPATI
 private fun providerDetail(p: Provider): String? = when (p) {
     Provider.CHATGPT -> stringResource(R.string.ai_provider_chatgpt_sub)
     Provider.OPENAI -> stringResource(R.string.ai_provider_openai_sub)
+    Provider.HERMES -> stringResource(R.string.ai_hermes_tools_sub)
     Provider.OPENAI_COMPATIBLE -> stringResource(R.string.ai_openai_compatible)
     else -> null
 }

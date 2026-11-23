@@ -17,7 +17,7 @@ class HermesRunsApprovalTest {
         assertEquals(listOf("one", "two"), f.approvals.map { it.getString("request_id") })
         f.approvals.forEach { assertEquals(setOf("choice", "request_id"), it.keys().asSequence().toSet()); assertEquals("once", it.getString("choice")) }
         assertEquals(1, f.admissions)
-        assertNull(f.diary.session("scope.run"))
+        assertNull(f.diary.session(HermesRuns.slot("scope", "question")))
     }
 
     @Test fun progressingApprovalsResetStalePollBudgetForEachRequest() = fixture { f ->
@@ -27,7 +27,7 @@ class HermesRunsApprovalTest {
         assertEquals("answer", f.ask())
         assertEquals(ids, f.approvals.map { it.getString("request_id") })
         assertEquals(1, f.admissions)
-        assertNull(f.diary.session("scope.run"))
+        assertNull(f.diary.session(HermesRuns.slot("scope", "question")))
     }
 
     @Test fun resumedExecutionResetsStalePollBudgetWithoutRepeatingApproval() = fixture { f ->
@@ -38,10 +38,10 @@ class HermesRunsApprovalTest {
         assertEquals("answer", f.ask())
         assertEquals(listOf("one"), f.approvals.map { it.getString("request_id") })
         assertEquals(1, f.admissions)
-        assertNull(f.diary.session("scope.run"))
+        assertNull(f.diary.session(HermesRuns.slot("scope", "question")))
     }
 
-    @Test fun distinctQuestionRetiresOnlyAuthoritativelyTerminalPriorRun() = fixture { f ->
+    @Test fun distinctQuestionLeavesPriorRunRecoverable() = fixture { f ->
         f.states += listOf(waiting("one"), completed, completed)
         f.approvalCode = 503
         assertTrue(runCatching { f.ask() }.isFailure)
@@ -77,14 +77,16 @@ class HermesRunsApprovalTest {
         assertEquals(1, f.admissions)
     }
 
-    @Test fun distinctQuestionCannotApproveOrAbandonActiveRun() = fixture { f ->
+    @Test fun distinctQuestionOwnsIndependentAdmissionAndApproval() = fixture { f ->
         f.states += waiting("one")
         f.approvalCode = 503
         assertTrue(runCatching { f.ask() }.isFailure)
         assertTrue(runCatching { f.ask("next") }.isFailure)
-        assertEquals(1, f.admissions)
-        assertEquals(1, f.approvals.size)
-        assertNotNull(f.diary.session("scope.run"))
+        assertEquals(2, f.admissions)
+        assertEquals(2, f.approvals.size)
+        assertEquals(listOf("owned", "owned_2"), f.approvalRuns)
+        assertEquals("owned", JSONObject(f.diary.session(HermesRuns.slot("scope", "question"))!!).getString("run_id"))
+        assertEquals("owned_2", JSONObject(f.diary.session(HermesRuns.slot("scope", "next"))!!).getString("run_id"))
     }
 
     @Test fun cancellationLeavesRunAndApprovalResumeSafe() = fixture { f ->
@@ -112,7 +114,7 @@ class HermesRunsApprovalTest {
         f.states += waiting("one")
         assertTrue(runCatching { f.ask() }.exceptionOrNull()!!.message!!.contains("still pending"))
         assertEquals(1, f.approvals.size)
-        assertNotNull(f.diary.session("scope.run"))
+        assertNotNull(f.diary.session(HermesRuns.slot("scope", "question")))
     }
 
     private val completed = """{"run_id":"owned","status":"completed","output":"answer"}"""
@@ -126,6 +128,8 @@ class HermesRunsApprovalTest {
     private class Fixture {
         val states = java.util.concurrent.CopyOnWriteArrayList<String>()
         val approvals = java.util.concurrent.CopyOnWriteArrayList<JSONObject>()
+        val runIds = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val approvalRuns = java.util.concurrent.CopyOnWriteArrayList<String>()
         var admissions = 0
         var approvalCode = 200
         val dir = Files.createTempDirectory("runs-approval").toFile()
@@ -134,12 +138,24 @@ class HermesRunsApprovalTest {
             createContext("/runs") { e ->
                 val body = e.requestBody.bufferedReader().readText()
                 val response = when {
-                    e.requestMethod == "POST" && e.requestURI.path == "/runs" -> { admissions++; """{"run_id":"owned"}""" }
-                    e.requestMethod == "POST" && e.requestURI.path == "/runs/owned/approval" -> {
-                        approvals += JSONObject(body)
-                        """{"object":"hermes.run.approval_response","run_id":"owned","choice":"once","request_id":"${approvals.last().getString("request_id")}","resolved":1}"""
+                    e.requestMethod == "POST" && e.requestURI.path == "/runs" -> {
+                        admissions++
+                        val id = if (admissions == 1) "owned" else "owned_$admissions"
+                        runIds += id
+                        """{"run_id":"$id"}"""
                     }
-                    e.requestMethod == "GET" && e.requestURI.path == "/runs/owned" -> if (states.size > 1) states.removeAt(0) else states.single()
+                    e.requestMethod == "POST" && e.requestURI.path.endsWith("/approval") -> {
+                        val id = e.requestURI.path.split('/')[2]
+                        check(id in runIds || id == "owned")
+                        approvalRuns += id
+                        approvals += JSONObject(body)
+                        """{"object":"hermes.run.approval_response","run_id":"$id","choice":"once","request_id":"${approvals.last().getString("request_id")}","resolved":1}"""
+                    }
+                    e.requestMethod == "GET" -> {
+                        val id = e.requestURI.path.split('/')[2]
+                        check(id in runIds || id == "owned")
+                        (if (states.size > 1) states.removeAt(0) else states.single()).replace("\"owned\"", "\"$id\"")
+                    }
                     else -> error("Unexpected HTTP path")
                 }
                 val bytes = (if (e.requestURI.path.endsWith("/approval") && approvalCode == 409) """{"error":{"code":"approval_not_pending"}}""" else response).toByteArray()

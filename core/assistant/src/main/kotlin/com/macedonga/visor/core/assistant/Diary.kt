@@ -135,12 +135,19 @@ class Diary(
         return json
     }
     @Synchronized fun session(scope: String): String? = readSessions().optString(scope).takeIf { it.isNotBlank() }
+    @Synchronized internal fun pendingRuns(scope: String): List<String> {
+        val json = readSessions()
+        return json.keys().asSequence().filter { it == "$scope.run" || (it.startsWith("$scope.") && it.endsWith(".run")) }
+            .map { json.getString(it) }.filter { it.isNotBlank() }.toList()
+    }
     @Synchronized fun keepSession(scope: String, id: String) {
         val json = readSessions()
         json.put(scope, id)
         while (json.length() > 128) {
-            // Runs admission tombstones cannot expire through cache churn: tools may have run.
-            val victim = json.keys().asSequence().firstOrNull { it != scope && !it.startsWith("runs:") } ?: break
+            // Hermes logical IDs, legacy hashed server mappings and Runs state last until explicit deletion/reset.
+            val victim = json.keys().asSequence().firstOrNull {
+                it != scope && !it.startsWith("runs:") && !it.startsWith("hermes-conversation:") && !it.matches(Regex("[0-9a-f]{64}"))
+            } ?: break
             json.remove(victim)
         }
         // Admission must be durable before POST; never fall back to a non-atomic replacement.
