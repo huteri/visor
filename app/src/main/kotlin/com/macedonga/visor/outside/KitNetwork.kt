@@ -66,6 +66,10 @@ class NetworkClients @Inject constructor(@ApplicationContext context: Context) {
     private val _on = MutableStateFlow(prefs.getBoolean(ON, false))
     val on: StateFlow<Boolean> = _on.asStateFlow()
 
+    // A fresh identity on every enable, even if collectors miss a quick off/on.
+    private val _webhookEpoch = MutableStateFlow(if (_on.value) Any() else null)
+    internal val webhookEpoch: StateFlow<Any?> = _webhookEpoch.asStateFlow()
+
     private val _lan = MutableStateFlow(prefs.getBoolean(LAN, false))
 
     /** True when other devices on the local network reach the door too, not only this phone. */
@@ -74,10 +78,22 @@ class NetworkClients @Inject constructor(@ApplicationContext context: Context) {
     private val _all = MutableStateFlow(read())
     val all: StateFlow<List<NetworkClient>> = _all.asStateFlow()
 
+    @Synchronized
     fun setOn(on: Boolean) {
-        prefs.edit().putBoolean(ON, on).apply()
+        if (_on.value != on) _webhookEpoch.value = if (on) Any() else null
         _on.value = on
+        prefs.edit().putBoolean(ON, on).apply()
     }
+
+    @Synchronized
+    internal fun ownsWebhook(epoch: Any, client: NetworkClient): Boolean =
+        _webhookEpoch.value === epoch && _all.value.any { it === client }
+
+    @Synchronized
+    internal fun admitWebhookWrite(epoch: Any, client: NetworkClient, write: () -> Unit): (() -> Unit)? =
+        // Transfer this one write to the sender under the same lock as revocation. Once admitted,
+        // it is in flight; the sender runs it outside this lock so settings never wait on I/O.
+        if (ownsWebhook(epoch, client)) write else null
 
     fun setLan(lan: Boolean) {
         prefs.edit().putBoolean(LAN, lan).apply()

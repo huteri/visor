@@ -44,7 +44,6 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -91,9 +90,6 @@ class Assistant(
     private val processingTimeoutS: () -> Long?,
     /** The phone's player, for pausing, resuming and skipping by voice. */
     private val phone: Phone? = null,
-    /** Effective device setting, null until a successful settings read. */
-    private val liveAiVoiceOnly: () -> Boolean? = { null },
-    liveAiSettingChanges: Flow<Unit> = emptyFlow(),
     /** The connected glasses have a display: each answer then comes with a card for it. */
     private val display: () -> Boolean = { false },
     private val cameraAction: suspend (CameraAction) -> Boolean = { false },
@@ -167,8 +163,6 @@ class Assistant(
             // Reuse existing SessionEnd encoder; no new Live AI/native-TTS packet schema.
             if (!wakeWord.end(session)) say("Live AI: device session stop could not be sent")
         }
-
-        override val voiceOnly: Boolean? get() = liveAiVoiceOnly?.invoke()
 
         override fun cameraOn() {
             camera.on()
@@ -489,7 +483,6 @@ class Assistant(
     private var typed: Typed? = null
 
     init {
-        scope.launch { liveAiSettingChanges.collect { liveAi.refreshCameraSetting() } }
         // The assistant's photo comes over airship, in a namespace the media import refuses.
         airship.extras += object : ExtraFiles {
             override fun wants(offer: Offer): Boolean {
@@ -1687,10 +1680,10 @@ class Assistant(
         val started = System.currentTimeMillis()
         val session = liveAi.sessionId.ifEmpty { liveAi.interaction }
         record(TurnRecord(sub, started, question, source = TurnSource.LIVE_AI, session = session, conversation = diary.liveConversationAt(started, windowMs(), session, question.trim().matches(Regex("new conversation[.!?]*", RegexOption.IGNORE_CASE)))))
-        val frame = if (liveAi.imageAllowed) runCatching { liveFrame() }.getOrNull() else null
+        val frame = runCatching { liveFrame() }.getOrNull()
         kotlin.coroutines.coroutineContext.ensureActive()
         if (!owned()) return
-        val image = if (liveAi.imageAllowed) frame?.let { toModelJpeg(it) } else null
+        val image = frame?.let { toModelJpeg(it) }
         say("Live AI camera: frameAvailable=${frame != null} modelAttachment=${image != null}")
         if (image != null) {
             val file = File(photos, "$sub.jpg")
@@ -1703,7 +1696,7 @@ class Assistant(
         var problem = ""
         val reply = try {
             inConversation(sub, LiveImageLease {
-                check(owned() && (image == null || liveAi.imageAllowed))
+                check(owned())
             }) { brain.answer(question, spoken(l), pastOf(sub), image, liveAiNote()) }
         } catch (error: Exception) {
             problem = error.why()
@@ -2113,16 +2106,14 @@ class Assistant(
     private fun contextOf(id: String, replay: Boolean = false): kotlin.coroutines.CoroutineContext {
         val turn = diary.turn(id) ?: return kotlin.coroutines.EmptyCoroutineContext
         if (turn.conversation.isBlank()) return kotlin.coroutines.EmptyCoroutineContext
-        // Voice-only Live AI must not resume a server transcript holding camera images.
-        val privacyScope = if (turn.source == TurnSource.LIVE_AI && !liveAi.imageAllowed) ":live-voice-only" else ""
-        return ConversationContext(diary, turn.conversation + privacyScope, replay)
+        return ConversationContext(diary, turn.conversation, replay)
     }
 
     /** What the model has heard of [id]'s conversation before it. */
     private fun pastOf(id: String): List<Exchange> {
         val conversation = diary.turn(id)?.conversation ?: return emptyList()
         val turns = diary.past(conversation, before = id)
-        val allowed = store.config.value.vision && (diary.turn(id)?.source != TurnSource.LIVE_AI || liveAi.imageAllowed)
+        val allowed = store.config.value.vision
         val reference = if (allowed) turns.lastOrNull { it.image.isNotEmpty() } else null
         return turns.map { t ->
             val image = if (t === reference) runCatching {

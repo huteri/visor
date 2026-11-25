@@ -66,8 +66,6 @@ data class SettingsState(
     val stored: Map<String, String> = emptyMap(),
     val reading: Boolean = false,
     val readAt: Long? = null,
-    val connectionGeneration: Long = -1,
-    val complete: Boolean = false,
     // Written and not yet seen on a read, key to the value asked for.
     val pending: Map<String, String> = emptyMap(),
     // Written, read back, and still the old value.
@@ -76,21 +74,11 @@ data class SettingsState(
     val quiet: Set<String> = emptySet(),
     // The Meta product id of the glasses last connected (266 for Ray-Ban Meta Gen 2), for what the catalogue offers.
     val product: Int? = null,
+    // The serial of the pair these are, so a reader never takes them for another's.
     val pair: String? = null,
     // RLDrive refused before any read: no store for this pair until the app restarts.
     val unserved: Boolean = false,
-    val problem: String = "",
-) {
-    /** Never infer camera consent from catalogue defaults or another connection's read. */
-    fun liveAiVoiceOnly(generation: Long, ready: Boolean): Boolean? {
-        if (!ready || generation != connectionGeneration || !complete || problem.isNotEmpty() || "live_ai_voice_only" in pending) return null
-        return when (stored["live_ai_voice_only"]?.trim()?.lowercase()) {
-            "true", "1" -> true
-            "false", "0" -> false
-            else -> null
-        }
-    }
-}
+)
 
 /** The glasses' settings: read over RLDrive (in full at connect, a delta after each write), written on svc31 or into RLDrive. */
 class GlassesSettings(private val connection: GlassesConnection, drive: RlDriveResponder) {
@@ -175,11 +163,11 @@ class GlassesSettings(private val connection: GlassesConnection, drive: RlDriveR
             }
         }
         scope.launch {
-            connection.state.map { it.generation to (it.link == LinkState.READY && it.info != null) }.distinctUntilChanged().collect { (_, ready) ->
+            connection.state.map { it.link == LinkState.READY && it.info != null }.distinctUntilChanged().collect { ready ->
                 if (ready) {
                     read(full = true)
                 } else {
-                    _state.update { it.copy(pending = emptyMap(), complete = false, connectionGeneration = -1) }
+                    _state.update { it.copy(pending = emptyMap()) }
                 }
             }
         }
@@ -283,7 +271,7 @@ class GlassesSettings(private val connection: GlassesConnection, drive: RlDriveR
         val requests = namespaces.associateBy { UUID.randomUUID().toString() }
         val s = Sync(ConcurrentHashMap(requests), push)
         sync = s
-        _state.update { it.copy(reading = true, complete = if (full) false else it.complete) }
+        _state.update { it.copy(reading = true) }
         connection.submit { link ->
             for ((id, namespace) in requests) {
                 link.sendOnService(SVC_RLDRIVE, MT_SYNC_MESSAGE, buildSync(namespace, id, 0, known[namespace].orEmpty()))
@@ -294,12 +282,11 @@ class GlassesSettings(private val connection: GlassesConnection, drive: RlDriveR
         // The error collector has said why, once.
         if (s.refused) return
 
-        if (connection.state.value.generation != glasses.generation || connection.state.value.link != LinkState.READY) return
         val changed = s.objects.values.sumOf { it.size }
         val now = System.currentTimeMillis()
         val objects = s.objects.mapValues { (_, list) -> synchronized(list) { list.toList() } }
         val stored = merge(objects, s.versions, full) {
-            it.copy(reading = false, readAt = if (finished || changed > 0) now else it.readAt, connectionGeneration = glasses.generation, complete = finished && uuid.isNotEmpty() && (full || it.complete), problem = if (!finished) "The glasses did not answer the settings read." else if (uuid.isEmpty()) "The glasses did not give their device id." else "")
+            it.copy(reading = false, readAt = if (finished || changed > 0) now else it.readAt)
         }
         say(
             (if (full) "Read" else "Re-read") + " settings: $changed objects from ${s.objects.size} of ${namespaces.size} namespaces" +
@@ -327,7 +314,7 @@ class GlassesSettings(private val connection: GlassesConnection, drive: RlDriveR
         full: Boolean,
         more: (SettingsState) -> SettingsState,
     ): Map<String, String> {
-        val stores = if (full) mutableMapOf<String, Map<String, String>>() else byNamespace.toMutableMap()
+        val stores = byNamespace.toMutableMap()
         for ((namespace, list) in objects) {
             val before = if (full) emptyMap() else stores[namespace].orEmpty()
             stores[namespace] = before.toMutableMap().apply {

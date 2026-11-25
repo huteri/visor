@@ -1,7 +1,5 @@
 package com.macedonga.visor.di
 
-import kotlinx.coroutines.flow.map
-
 import android.content.Context
 import com.macedonga.visor.BuildConfig
 import com.macedonga.visor.band.DeviceLease
@@ -296,11 +294,6 @@ object ConnectionModule {
         display = { isDisplayBuild(connection.state.value.info?.build) },
         cameraAction = camera::act,
         apps = kitVoices,
-        liveAiSettingChanges = settings.state.map { Unit },
-        liveAiVoiceOnly = {
-            val link = connection.state.value
-            settings.state.value.liveAiVoiceOnly(link.generation, link.link == com.macedonga.visor.core.session.LinkState.READY)
-        },
     )
 
     @Provides

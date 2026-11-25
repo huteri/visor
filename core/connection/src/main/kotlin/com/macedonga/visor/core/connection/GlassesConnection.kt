@@ -193,12 +193,12 @@ class GlassesConnection(
                 GlassesTarget(GlassesLink.Bluetooth(it.glassesAddress), it.serial)
             }
             if (target == null) {
-                _state.value = GlassesState(noGlasses = true, generation = _state.value.generation)
+                _state.value = GlassesState(noGlasses = true)
                 return@launch
             }
 
             if (chooses) _pair.value = target.serial
-            _state.value = GlassesState(target = target, generation = _state.value.generation)
+            _state.value = GlassesState(target = target)
             val opened = hosts.create(target, bundle)
             host = opened
             opened.start(this)
@@ -288,7 +288,6 @@ class GlassesConnection(
                 _state.update {
                     it.copy(
                         link = if (refused) LinkState.LOST else event.state,
-                        generation = it.generation + if (fresh) 1 else 0,
                         // The session publishes CONNECTING at the top of every attempt, including a
                         // reconnect, so that is where the slate is cleared.
                         reason = if (fresh) "" else event.reason,

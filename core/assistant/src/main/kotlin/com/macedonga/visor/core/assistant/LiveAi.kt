@@ -18,8 +18,6 @@ import kotlinx.coroutines.launch
 
 /** What Live AI needs from the assistant around it. */
 internal interface LiveAiHost {
-    /** Null means unread: fail closed, never infer voice-only OFF. */
-    val voiceOnly: Boolean? get() = null
     /** A NetEvent on the message channel. */
     suspend fun event(id: Int, body: ByteArray)
 
@@ -53,7 +51,6 @@ enum class LiveAiPhase { OFF, STARTING, LISTENING, THINKING }
  * listens, and answers each utterance as a sub-interaction of it, with the camera's picture.
  */
 internal class LiveAi(private val context: Context, private val scope: CoroutineScope, private val host: LiveAiHost, private val display: () -> Boolean = { false }) {
-    private var cameraRequested = false
     private val turns = java.util.concurrent.ConcurrentHashMap.newKeySet<Job>()
     private val generation = AtomicInteger()
     private val sessionGeneration = AtomicInteger()
@@ -65,19 +62,6 @@ internal class LiveAi(private val context: Context, private val scope: Coroutine
         generation.incrementAndGet()
         turns.forEach { it.cancel() }
         turns.clear()
-    }
-
-    private fun ensureCamera() {
-        if (host.voiceOnly != false) {
-            if (cameraRequested) { revokeTurns(); host.cameraOff() }
-            cameraRequested = false
-            host.note("Live AI camera: requested=false voiceOnly=${host.voiceOnly}")
-            return
-        }
-        if (cameraRequested) return
-        cameraRequested = true
-        host.cameraOn()
-        host.note("Live AI camera: requested=true")
     }
 
     private val _phase = MutableStateFlow(LiveAiPhase.OFF)
@@ -100,21 +84,20 @@ internal class LiveAi(private val context: Context, private val scope: Coroutine
     private fun inputSnapshot() = host.note("Live AI stages: input-summary ${inputStats.snapshot()} ${ears?.diagnosticSnapshot() ?: "ears=absent"}")
 
     val active: Boolean get() = _phase.value != LiveAiPhase.OFF
-    internal val imageAllowed: Boolean get() = active && host.voiceOnly == false
-
-    fun refreshCameraSetting() {
-        if (active) ensureCamera()
-    }
 
     /** ev289 with mode LIVE_AI: the glasses are switching; the camera stream is the phone's to open. */
     fun onModeLiveAi(session: String, fields: Map<Int, Any?>) {
         host.note("Live AI: session mode LIVE_AI for $session (${deep(fields)})")
         if (active && session == sessionId) return
-        sessionGeneration.incrementAndGet()
-        if (active) revokeTurns()
+        // Mode can arrive after START_INTERACTION. Do not invalidate that startup.
+        val lateMode = active && sessionId.isEmpty() && interaction.isNotEmpty()
+        if (!lateMode) {
+            sessionGeneration.incrementAndGet()
+            if (active) revokeTurns()
+            _phase.value = LiveAiPhase.STARTING
+        }
         sessionId = session
-        _phase.value = LiveAiPhase.STARTING
-        ensureCamera()
+        host.cameraOn()
     }
 
     /** START_INTERACTION for Live AI: acknowledge it the way the server does, then listen. */
@@ -122,13 +105,9 @@ internal class LiveAi(private val context: Context, private val scope: Coroutine
         val id = fields[1].asText()
         host.note("Live AI: start interaction $id, use case ${fields[5]}, method ${fields[3]} (${deep(fields)})")
         if (id.isEmpty()) return
-        if (active && interaction == id) {
-            ensureCamera()
-            return
-        }
+        if (active && interaction == id) return
         val startup = sessionGeneration.incrementAndGet()
         if (active) revokeTurns()
-        ensureCamera()
         interaction = id
         heardAudio = false
         micChunks = 0
@@ -192,7 +171,7 @@ internal class LiveAi(private val context: Context, private val scope: Coroutine
 
     /** The camera's first frame, acknowledged as the video payload. */
     fun onFirstFrame() {
-        if (imageAllowed && interaction.isNotEmpty()) {
+        if (active && interaction.isNotEmpty()) {
             host.note("Live AI camera: frameAvailable=true")
             scope.launch { firstPayload(PAYLOAD_VIDEO) }
         }
@@ -280,7 +259,6 @@ internal class LiveAi(private val context: Context, private val scope: Coroutine
         ears = null
         interaction = ""
         sessionId = ""
-        cameraRequested = false
         host.cameraOff()
     }
 
