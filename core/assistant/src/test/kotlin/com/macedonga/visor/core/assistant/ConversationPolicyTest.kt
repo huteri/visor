@@ -138,34 +138,21 @@ class ConversationPolicyTest {
         } finally { server.stop(0); dir.deleteRecursively() }
     }
 
-    @Test fun voiceOnlyLiveContextNeverResumesImageBearingServerSession() {
-        val dir = Files.createTempDirectory("hermes-live-privacy").toFile()
+    @Test fun liveFollowUpKeepsItsConversationContextWithoutSettings() {
+        val dir = Files.createTempDirectory("hermes-live-context").toFile()
         try {
             val assistant = unsafe.allocateInstance(Assistant::class.java) as Assistant
-            val store = unsafe.allocateInstance(AssistantConfigStore::class.java) as AssistantConfigStore
-            set(store, "config", MutableStateFlow(AssistantConfig(provider = Provider.HERMES)))
-            set(assistant, "store", store)
-            var diary = Diary(dir)
-            diary.record(TurnRecord("photo", 1_000, "look", answer = "image answer", image = "photo.jpg", conversation = "camera-chat"))
-            diary.record(TurnRecord("voice", 200_000_000, "continue", source = TurnSource.LIVE_AI, conversation = "camera-chat"))
+            val diary = Diary(dir)
+            diary.record(TurnRecord("photo", 1_000, "look", answer = "image answer", image = "photo.jpg", source = TurnSource.LIVE_AI, conversation = "camera-chat"))
+            diary.record(TurnRecord("follow-up", 2_000, "continue", source = TurnSource.LIVE_AI, conversation = "camera-chat"))
             set(assistant, "diary", diary)
-            val live = org.mockito.Mockito.mock(LiveAi::class.java)
-            set(assistant, "liveAi", live)
             fun context(id: String) = assistant.javaClass.getDeclaredMethod("contextOf", String::class.java, Boolean::class.javaPrimitiveType).let {
                 it.isAccessible = true; it.invoke(assistant, id, false) as ConversationContext
             }
-            org.mockito.Mockito.`when`(live.imageAllowed).thenReturn(true)
             val camera = context("photo").conversation
-            org.mockito.Mockito.`when`(live.imageAllowed).thenReturn(false)
-            val voice = context("voice").conversation
-            assertNotEquals(camera, voice)
-            diary.keepSession(camera, "image-bearing-server-session")
-            assertNull(diary.session(voice))
-            @Suppress("UNCHECKED_CAST")
-            val past = assistant.javaClass.getDeclaredMethod("pastOf", String::class.java).let {
-                it.isAccessible = true; it.invoke(assistant, "voice") as List<Exchange>
-            }
-            assertTrue(past.all { it.image == null })
+            diary.keepSession(camera, "existing-server-session")
+            assertEquals("camera-chat", context("follow-up").conversation)
+            assertEquals("existing-server-session", diary.session(context("follow-up").conversation))
         } finally { dir.deleteRecursively() }
     }
 

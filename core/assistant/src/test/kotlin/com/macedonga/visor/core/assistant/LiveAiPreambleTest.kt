@@ -37,7 +37,7 @@ class LiveAiPreambleTest {
             method.invoke(target, *supplied.toTypedArray(), continuation)
         }
 
-    private suspend fun sequence(simplified: Boolean, liveTurn: Boolean, voiceOnly: Boolean? = null, endDuringFrame: Boolean = false, jpeg: Boolean = false, revokeDuringFrame: Boolean = false, revokeDuringModel: Boolean = false, replaceDuringFrame: Boolean = false, replaceDuringModel: Boolean = false, stopAfter: Int? = null, expectPhone: Boolean = liveTurn, stopDuringSynthesis: Boolean = false, disableDuringModel: Boolean = false, closeDuringSynthesis: Boolean = false, staleCloseDuringSynthesis: Boolean = false, closeDuringModel: Boolean = false) {
+    private suspend fun sequence(simplified: Boolean, liveTurn: Boolean, endDuringFrame: Boolean = false, jpeg: Boolean = false, replaceDuringFrame: Boolean = false, replaceDuringModel: Boolean = false, stopAfter: Int? = null, expectPhone: Boolean = liveTurn, stopDuringSynthesis: Boolean = false, disableDuringModel: Boolean = false, closeDuringSynthesis: Boolean = false, staleCloseDuringSynthesis: Boolean = false, closeDuringModel: Boolean = false) {
         val unsafe = Unsafe::class.java.getDeclaredField("theUnsafe").apply { isAccessible = true }.get(null) as Unsafe
         val assistant = unsafe.allocateInstance(Assistant::class.java) as Assistant
         val context = mock(Context::class.java)
@@ -70,7 +70,7 @@ class LiveAiPreambleTest {
         val brain = mock(Brain::class.java) { invocation ->
             if (invocation.method.name == "answer") {
                 modelImage = invocation.getArgument(3)
-                if (revokeDuringModel || replaceDuringModel || disableDuringModel || closeDuringModel) {
+                if (replaceDuringModel || disableDuringModel || closeDuringModel) {
                     val continuation = invocation.rawArguments.last() as kotlin.coroutines.Continuation<Reply>
                     val preparation: suspend () -> Reply = {
                         modelEntered.complete(Unit)
@@ -92,7 +92,6 @@ class LiveAiPreambleTest {
         val directory = java.nio.file.Files.createTempDirectory("visor-jpeg-test-").toFile()
         `when`(diary.photos).thenReturn(directory)
         set(assistant, "diary", diary)
-        var setting = voiceOnly
         val jpegBytes = byteArrayOf(-1, -40, -1, -39)
         val bitmap = mock(android.graphics.Bitmap::class.java)
         `when`(bitmap.width).thenReturn(1)
@@ -105,12 +104,11 @@ class LiveAiPreambleTest {
         val frameRelease = CompletableDeferred<Unit>()
         set(assistant, "liveFrame", suspend {
             frameReads++
-            if (endDuringFrame || revokeDuringFrame || replaceDuringFrame) { frameEntered.complete(Unit); frameRelease.await() }
+            if (endDuringFrame || replaceDuringFrame) { frameEntered.complete(Unit); frameRelease.await() }
             if (jpeg) jpegBytes else null
         })
         set(assistant, "display", { false })
         set(assistant, "liveAiDetailed", { false })
-        set(assistant, "liveAiVoiceOnly", { setting })
         set(assistant, "glassesVoice", { "voice-id" })
         set(assistant, "_phase", MutableStateFlow(AssistantPhase.WAITING))
         val notes = MutableSharedFlow<String>(extraBufferCapacity = 64)
@@ -195,7 +193,7 @@ class LiveAiPreambleTest {
                 }
                 live.javaClass.getDeclaredMethod("heard", String::class.java, Long::class.javaPrimitiveType, Long::class.javaPrimitiveType)
                     .apply { isAccessible = true }.invoke(live, "Question", 1234L, 5678L)
-                if (revokeDuringModel || replaceDuringModel || disableDuringModel || closeDuringModel) {
+                if (replaceDuringModel || disableDuringModel || closeDuringModel) {
                     withTimeout(3000) { modelEntered.await() }
                     if (closeDuringModel) {
                         closeWifi()
@@ -204,7 +202,6 @@ class LiveAiPreambleTest {
                     }
                     else if (replaceDuringModel) live.onStartInteraction(mapOf(1 to "replacement", 5 to 3), java.util.Locale.US)
                     else if (disableDuringModel) (store.config as MutableStateFlow).value = store.config.value.copy(enabled = false)
-                    else { setting = true; live.refreshCameraSetting() }
                     modelRelease.complete(Unit)
                     delay(30)
                     assertFalse("Suspended model preparation must not dispatch image", dispatched)
@@ -212,10 +209,10 @@ class LiveAiPreambleTest {
                     assertEquals(listOf(EV_START_OF_USER_SPEECH, EV_FINAL_TRANSCRIPTION), writes.map { it.event.id }.filterNot { it in listOf(EV_MWA_INTERACTION_CREATION_SUCCESS, EV_SERVER_CONNECTION_STATUS, EV_KEEP_AIR_SESSION_ALIVE) })
                     return
                 }
-                if (endDuringFrame || revokeDuringFrame || replaceDuringFrame) {
+                if (endDuringFrame || replaceDuringFrame) {
                     withTimeout(3000) { frameEntered.await() }
                     if (replaceDuringFrame) live.onStartInteraction(mapOf(1 to "replacement", 5 to 3), java.util.Locale.US)
-                    else if (endDuringFrame) live.end("frame suspended") else { setting = true; live.refreshCameraSetting() }
+                    else live.end("frame suspended")
                     frameRelease.complete(Unit)
                     delay(30)
                     assertTrue("Ended session must not dispatch model", mockingDetails(brain).invocations.none { it.method.name == "answer" })
@@ -259,8 +256,8 @@ class LiveAiPreambleTest {
             }
             assertTrue("Saved ordinary native preference unchanged", (store.config.value.tts == TtsPath.GLASSES))
             assertTrue("No saved settings writes", mockingDetails(store).invocations.all { it.method.name.startsWith("get") })
-            if (liveTurn) assertEquals("Unread setting must not read even cached Live frames", if (voiceOnly == false) 1 else 0, frameReads)
-            if (jpeg && voiceOnly == false) assertArrayEquals(jpegBytes, modelImage) else assertNull(modelImage)
+            if (liveTurn) assertEquals("Live AI checks for a frame without settings", 1, frameReads)
+            if (jpeg) assertArrayEquals(jpegBytes, modelImage) else assertNull(modelImage)
             if (expectPhone) {
                 assertEquals(listOf(MT_STREAM_HEADER, MT_STREAM_AUDIO, null, MT_STREAM_END), audioTypes)
                 assertArrayEquals(varm(sub, "Question", "Native reply."), writes.single { it.event.id == EV_VOICE_ACTION_RESPONSE }.event.body)
@@ -285,24 +282,18 @@ class LiveAiPreambleTest {
             assertEquals("Ordering must not mutate effective forwarding state", simplified, linkClass.getDeclaredField("simplified").apply { isAccessible = true }.get(link))
         } finally { eventScope.cancel(); job.cancel(); decoder.close(); directory.deleteRecursively() }
     }
-    @Test fun wifiChannelCloseDuringBlockedModelPreventsImageRequest() = runBlocking { sequence(true, true, false, jpeg = true, closeDuringModel = true) }
-    @Test fun disableDuringBlockedModelPreventsImageRequest() = runBlocking { sequence(true, true, false, jpeg = true, disableDuringModel = true) }
+    @Test fun wifiChannelCloseDuringBlockedModelPreventsImageRequest() = runBlocking { sequence(true, true, jpeg = true, closeDuringModel = true) }
+    @Test fun disableDuringBlockedModelPreventsImageRequest() = runBlocking { sequence(true, true, jpeg = true, disableDuringModel = true) }
     @Test fun ownedChannelCloseDuringSynthesisRevokesSpeech() = runBlocking { sequence(true, true, closeDuringSynthesis = true) }
     @Test fun staleChannelCloseCannotRevokeReplacement() = runBlocking { sequence(true, true, staleCloseDuringSynthesis = true) }
     @Test fun stopDuringPhoneSynthesisRevokesAllSpeechWrites() = runBlocking { sequence(true, true, stopDuringSynthesis = true) }
     @Test fun liveUsesPhoneStreamWithSavedNativePreference() = runBlocking { sequence(true, true, expectPhone = true) }
     @Test fun stopAfterTtsStartPreventsAudioForBothForwardingModes() = runBlocking { for (simplified in listOf(true, false)) sequence(simplified, true, stopAfter = EV_TTS_START_INFO) }
     @Test fun stopAfterVarmPreventsKeepaliveForBothForwardingModes() = runBlocking { for (simplified in listOf(true, false)) sequence(simplified, true, stopAfter = EV_VOICE_ACTION_RESPONSE) }
-    @Test fun replacementDuringFramePreventsOldDispatchAndDelivery() = runBlocking { mockConstruction(GlassesEars::class.java).use { sequence(true, true, false, jpeg = true, replaceDuringFrame = true) } }
-    @Test fun replacementDuringModelPreventsOldDispatchAndDelivery() = runBlocking { mockConstruction(GlassesEars::class.java).use { sequence(true, true, false, jpeg = true, replaceDuringModel = true) } }
-    @Test fun revocationDuringModelPreparationPreventsImageDispatch() = runBlocking { sequence(true, true, false, jpeg = true, revokeDuringModel = true) }
-    @Test fun nonNullJpegAttachedOnlyWhenExplicitlyOff() = runBlocking { sequence(true, true, false, jpeg = true) }
-    @Test fun nonNullCachedJpegBlockedWhenOn() = runBlocking { sequence(true, true, true, jpeg = true) }
-    @Test fun nonNullCachedJpegBlockedWhenUnknown() = runBlocking { sequence(true, true, null, jpeg = true) }
-    @Test fun revocationDuringFramePreventsDispatch() = runBlocking { sequence(true, true, false, jpeg = true, revokeDuringFrame = true) }
-    @Test fun sessionEndDuringFramePreventsDispatch() = runBlocking { sequence(true, true, false, endDuringFrame = true) }
-    @Test fun voiceOnlyOnSkipsCachedFrame() = runBlocking { sequence(true, true, true) }
-    @Test fun voiceOnlyOffReadsLiveFrame() = runBlocking { sequence(true, true, false) }
+    @Test fun replacementDuringFramePreventsOldDispatchAndDelivery() = runBlocking { mockConstruction(GlassesEars::class.java).use { sequence(true, true, jpeg = true, replaceDuringFrame = true) } }
+    @Test fun replacementDuringModelPreventsOldDispatchAndDelivery() = runBlocking { mockConstruction(GlassesEars::class.java).use { sequence(true, true, jpeg = true, replaceDuringModel = true) } }
+    @Test fun nonNullJpegAttachedWithoutSettings() = runBlocking { sequence(true, true, jpeg = true) }
+    @Test fun sessionEndDuringFramePreventsDispatch() = runBlocking { sequence(true, true, endDuringFrame = true) }
     @Test fun livePhoneSimplifiedKeepsOriginalAnnouncement() = runBlocking { sequence(true, true) }
     @Test fun livePhoneFullKeepsOriginalAnnouncement() = runBlocking { sequence(false, true) }
     @Test fun ordinaryNativeSimplifiedUnchanged() = runBlocking { sequence(true, false) }

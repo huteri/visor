@@ -16,7 +16,6 @@ import org.mockito.Mockito.*
 
 class LiveAiCameraLifecycleTest {
     private class Host : LiveAiHost {
-        override var voiceOnly: Boolean? = false
         var starts = 0
         var stops = 0
         var answers = 0
@@ -29,50 +28,21 @@ class LiveAiCameraLifecycleTest {
         override fun note(text: String) = Unit
     }
 
-    @Test fun modeFirstVoiceOnlyAndUnreadNeverRequestCamera() = runBlocking {
+    @Test fun modeFirstRequestsCameraWithoutSettingsAndDoesNotRestartOnStart() = runBlocking {
         mockConstruction(GlassesEars::class.java).use {
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+            val host = Host()
+            val live = LiveAi(mock(Context::class.java), scope, host)
             try {
-                for (setting in listOf(true, null, false)) {
-                    val host = Host().apply { voiceOnly = setting }
-                    val live = LiveAi(mock(Context::class.java), scope, host)
-                    live.onModeLiveAi("session", emptyMap())
-                    live.onModeLiveAi("session", emptyMap())
-                    live.onStartInteraction(mapOf(1 to "turn", 5 to 3), Locale.US)
-                    assertEquals(if (setting == false) 1 else 0, host.starts)
-                    assertEquals(setting == false, live.imageAllowed)
-                    host.voiceOnly = false
-                    live.refreshCameraSetting()
-                    live.refreshCameraSetting()
-                    assertEquals(1, host.starts)
-                    host.voiceOnly = true
-                    assertFalse(live.imageAllowed)
-                    live.refreshCameraSetting()
-                    assertEquals(1, host.stops)
-                    live.end("test")
-                    assertFalse(live.imageAllowed)
-                }
+                live.onModeLiveAi("session", emptyMap())
+                assertEquals(1, host.starts)
+                live.onModeLiveAi("session", emptyMap())
+                live.onStartInteraction(mapOf(1 to "turn", 5 to 3), Locale.US)
+                assertEquals(1, host.starts)
+                live.end("test")
+                assertEquals(1, host.stops)
             } finally { scope.cancel() }
         }
-    }
-
-    @Test fun repeatedConfirmedSettingDoesNotRestartCameraOrRevokeTurns() {
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
-        val host = Host()
-        val live = LiveAi(mock(Context::class.java), scope, host)
-        try {
-            live.onModeLiveAi("session", emptyMap())
-            val token = live.turnGeneration
-            repeat(10) { live.refreshCameraSetting() }
-            assertEquals(1, host.starts)
-            assertEquals(0, host.stops)
-            assertTrue(live.turnIsCurrent(token))
-            host.voiceOnly = null
-            live.refreshCameraSetting()
-            assertEquals(1, host.stops)
-            assertFalse(live.turnIsCurrent(token))
-            assertFalse(live.imageAllowed)
-        } finally { scope.cancel() }
     }
 
     @Test fun stopUtteranceRevokesLocalSessionBeforeDeviceStop() = runBlocking {
@@ -90,7 +60,6 @@ class LiveAiCameraLifecycleTest {
                 kotlinx.coroutines.delay(40)
                 assertFalse(live.active)
                 assertFalse(live.turnIsCurrent(token))
-                assertFalse(live.imageAllowed)
                 assertEquals("session", host.endedSession)
                 assertEquals(1, host.stops)
                 assertEquals(0, host.answers)
@@ -105,7 +74,6 @@ class LiveAiCameraLifecycleTest {
         var block = false
         val events = mutableListOf<Int>()
         val host = object : LiveAiHost {
-            override val voiceOnly = true
             override suspend fun event(id: Int, body: ByteArray) {
                 events.add(id)
                 if (block && id == EV_MWA_INTERACTION_CREATION_SUCCESS) release.await()
@@ -138,7 +106,7 @@ class LiveAiCameraLifecycleTest {
         }
     }
 
-    @Test fun directStartRequestsCameraOncePerSession() = runBlocking {
+    @Test fun directStartWaitsForLiveModeBeforeRequestingCamera() = runBlocking {
         mockConstruction(GlassesEars::class.java).use {
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
             val host = Host()
@@ -147,7 +115,7 @@ class LiveAiCameraLifecycleTest {
                 repeat(2) { cycle ->
                     live.onStartInteraction(mapOf(1 to "turn-$cycle", 5 to 3), Locale.US)
                     live.onStartInteraction(mapOf(1 to "turn-$cycle", 5 to 3), Locale.US)
-                    assertEquals(cycle + 1, host.starts)
+                    assertEquals(cycle, host.starts)
                     live.onModeLiveAi("session-$cycle", emptyMap())
                     assertEquals(cycle + 1, host.starts)
                     live.end("test")
